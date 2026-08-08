@@ -5,11 +5,20 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      name: 'home',
-      component: () => import('@/views/HomeView.vue'),
+      name: 'videos',
+      component: () => import('@/views/VideoListView.vue'),
+    },
+    {
+      path: '/upload',
+      name: 'video-upload',
+      component: () => import('@/views/UploadView.vue'),
+    },
+    {
+      path: '/videos/:id',
+      name: 'video-detail',
+      component: () => import('@/views/VideoDetailView.vue'),
     },
   ],
 })
 
 export default router
-
