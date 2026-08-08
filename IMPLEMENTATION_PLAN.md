@@ -125,11 +125,13 @@ README.md
 
 ### Milestone 3 — 异步分析框架
 
+状态：**已完成并通过真实 MySQL、Redis、RocketMQ 与浏览器验收。**
+
 目标：
 
 - 使用 Flyway 创建 `analysis_task` 表和业务唯一约束。
 - 实现分析任务创建、短期重复提交防护、RocketMQ Producer/Consumer。
-- Consumer 用确定性的模拟步骤更新 20/50/80/100 进度，不接 ASR/LLM。
+- Consumer 用确定性的模拟步骤更新 20/40/70/90/100 进度，不接 ASR/LLM。
 - Redis 保存带 TTL 的实时进度，MySQL 保存最终任务状态。
 
 新增/修改文件：
@@ -137,8 +139,7 @@ README.md
 ```text
 backend/src/main/resources/db/migration/V2__create_analysis_task_table.sql
 backend/src/main/java/com/videoagent/analysis/{controller,service,producer,consumer,repository,entity,dto}/...
-backend/src/main/java/com/videoagent/analysis/progress/{AnalysisProgressService,RedisAnalysisProgressService}.java
-backend/src/main/java/com/videoagent/common/config/{RedisConfig,RocketMqConfig}.java
+backend/src/main/java/com/videoagent/analysis/progress/{AnalysisProgressStore,RedisAnalysisProgressStore}.java
 backend/src/main/resources/application.yml
 backend/src/test/java/com/videoagent/analysis/...
 frontend/src/services/analysis.ts
@@ -158,7 +159,7 @@ README.md
 
 - DB 写成功、MQ 发送失败是 V1 已知一致性风险，本阶段记录但不提前实现 Transactional Outbox。
 - Redis 不能作为唯一幂等依据；唯一约束与任务状态转换需处理并发竞争。
-- MQ 重投可能造成重复消费，完整幂等在 Milestone 7 加固，但本阶段不得产生明显重复终态写入。
+- MQ 重投可能造成重复消费；本阶段已通过原子 PENDING 抢占和 SUCCESS 短路保证框架级幂等，更复杂的失败重试策略留到后续阶段。
 
 ### Milestone 4 — FFmpeg + Mock ASR
 

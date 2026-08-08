@@ -41,8 +41,16 @@ rocketmq:
   name-server: ${ROCKETMQ_NAMESRV_ADDR:localhost:9876}
   producer:
     group: videoagent-producer
+    send-message-timeout: ${ROCKETMQ_SEND_TIMEOUT:3000}
 
 videoagent:
+  analysis:
+    topic: ${VIDEO_ANALYZE_TOPIC:VIDEO_ANALYZE_TOPIC}
+    consumer-group: ${VIDEO_ANALYZE_CONSUMER_GROUP:videoagent-analysis-consumer}
+    analysis-type: ${VIDEO_ANALYSIS_TYPE:FRAMEWORK}
+    model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m3-simulation-v1}
+    progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
+    step-delay: ${VIDEO_ANALYSIS_STEP_DELAY:700ms}
   upload:
     max-file-size: ${VIDEO_MAX_FILE_SIZE:500MB}
   storage:

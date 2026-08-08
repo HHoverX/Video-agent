@@ -2,7 +2,9 @@ package com.videoagent.common.health;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.video.repository.VideoRepository;
+import org.apache.rocketmq.spring.core.RocketMQTemplate;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,6 +13,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 @SpringBootTest(
@@ -29,6 +32,15 @@ class HealthEndpointIntegrationTest {
 
     @MockitoBean
     private VideoRepository videoRepository;
+
+    @MockitoBean
+    private AnalysisTaskRepository analysisTaskRepository;
+
+    @MockitoBean
+    private RocketMQTemplate rocketMQTemplate;
+
+    @MockitoBean
+    private StringRedisTemplate stringRedisTemplate;
 
     @LocalServerPort
     private int port;

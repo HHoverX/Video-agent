@@ -614,6 +614,116 @@ p {
   font-size: 12px;
 }
 
+.analysis-panel {
+  margin-top: 26px;
+  padding: 28px;
+}
+
+.analysis-panel__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
+}
+
+.analysis-panel__heading .eyebrow {
+  margin-bottom: 9px;
+}
+
+.analysis-panel__heading h2 {
+  margin: 0;
+  color: #eef1f7;
+  font-size: 22px;
+}
+
+.analysis-panel__heading > div > p:last-child {
+  margin: 9px 0 0;
+  color: #777f93;
+  font-size: 12px;
+}
+
+.analysis-start-button.el-button {
+  min-width: 148px;
+  min-height: 44px;
+  border: 1px solid rgba(127, 242, 210, 0.38);
+  border-radius: 11px;
+  color: #07110e;
+  background: #8cf0d4;
+  font-weight: 700;
+}
+
+.analysis-start-button.el-button:hover,
+.analysis-start-button.el-button:focus {
+  color: #07110e;
+  background: #a3f6df;
+}
+
+.analysis-start-button.el-button.is-disabled {
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #687083;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.analysis-notice {
+  margin: 22px 0 0;
+}
+
+.analysis-progress,
+.analysis-empty {
+  margin-top: 24px;
+  padding-top: 23px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.analysis-progress__meta {
+  margin-bottom: 16px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  color: #858da0;
+  font-size: 12px;
+}
+
+.analysis-progress__meta > div {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.analysis-progress__meta strong {
+  color: #dfe4ee;
+  font-size: 15px;
+}
+
+.analysis-progress .el-progress-bar__outer {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.analysis-progress .el-progress-bar__inner {
+  background: linear-gradient(90deg, #665cff, #8cf0d4);
+}
+
+.analysis-progress .el-progress__text {
+  color: #bdc4d3;
+}
+
+.analysis-empty,
+.analysis-polling {
+  color: #697184;
+  font-size: 12px;
+}
+
+.analysis-polling,
+.analysis-failure {
+  margin: 12px 0 0;
+}
+
+.analysis-failure {
+  color: #ff9aaa;
+  font-size: 12px;
+}
+
 @media (max-width: 900px) {
   .video-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -622,6 +732,11 @@ p {
   .upload-layout,
   .detail-hero {
     grid-template-columns: 1fr;
+  }
+
+  .analysis-panel__heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .detail-grid {
@@ -680,8 +795,20 @@ p {
   }
 
   .upload-panel,
-  .upload-note {
+  .upload-note,
+  .analysis-panel {
     padding: 22px;
+  }
+
+  .analysis-start-button.el-button {
+    width: 100%;
+  }
+
+  .analysis-progress__meta,
+  .analysis-progress__meta > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
   }
 
   .app-footer {
