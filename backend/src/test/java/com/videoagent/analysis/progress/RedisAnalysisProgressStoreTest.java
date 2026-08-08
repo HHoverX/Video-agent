@@ -31,8 +31,7 @@ class RedisAnalysisProgressStoreTest {
             "test-consumer",
             "FRAMEWORK",
             "m3-simulation-v1",
-            Duration.ofHours(24),
-            Duration.ZERO
+            Duration.ofHours(24)
         );
         store = new RedisAnalysisProgressStore(redisTemplate, new ObjectMapper(), properties);
     }

@@ -3,6 +3,8 @@ package com.videoagent.analysis.entity;
 public enum AnalysisStage {
     QUEUED("任务已进入队列"),
     PREPARING("正在准备分析"),
+    EXTRACTING_AUDIO("正在提取音频"),
+    TRANSCRIBING("正在生成带时间戳字幕"),
     ANALYZING("正在模拟分析"),
     PROCESSING("正在处理分析结果"),
     SAVING("正在保存结果"),

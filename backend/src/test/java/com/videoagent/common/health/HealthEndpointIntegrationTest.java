@@ -3,6 +3,7 @@ package com.videoagent.common.health;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.video.repository.VideoRepository;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 
@@ -35,6 +36,9 @@ class HealthEndpointIntegrationTest {
 
     @MockitoBean
     private AnalysisTaskRepository analysisTaskRepository;
+
+    @MockitoBean
+    private VideoTranscriptSegmentRepository transcriptSegmentRepository;
 
     @MockitoBean
     private RocketMQTemplate rocketMQTemplate;

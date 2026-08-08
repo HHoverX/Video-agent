@@ -9,6 +9,13 @@ import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.progress.RedisAnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.asr.AsrProvider;
+import com.videoagent.asr.TranscriptSegment;
+import com.videoagent.asr.TranscriptionResult;
+import com.videoagent.media.AudioExtractResult;
+import com.videoagent.media.MediaProcessor;
+import com.videoagent.storage.ObjectStorageService;
+import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 
@@ -23,18 +30,30 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.when;
+
 @EnabledIfEnvironmentVariable(named = "VIDEOAGENT_M3_INFRA_TEST", matches = "true")
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = "videoagent.analysis.step-delay=150ms"
+    properties = {
+        "videoagent.analysis.analysis-type=FRAMEWORK",
+        "videoagent.analysis.model-version=m3-simulation-v1",
+        "videoagent.media.temp-root=target/m3-integration-media"
+    }
 )
 class AnalysisFrameworkInfrastructureIntegrationTest {
 
@@ -56,11 +75,46 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
     @Autowired
     private StringRedisTemplate redisTemplate;
 
+    @MockitoBean
+    private ObjectStorageService storageService;
+
+    @MockitoBean
+    private MediaProcessor mediaProcessor;
+
+    @MockitoBean
+    private AsrProvider asrProvider;
+
+    @MockitoBean
+    private TranscriptService transcriptService;
+
     private Long videoId;
     private Long taskId;
 
     @BeforeEach
-    void createVideo() {
+    void createVideo() throws Exception {
+        doAnswer(invocation -> {
+            Path destination = invocation.getArgument(1);
+            Files.write(destination, new byte[] {1, 2, 3});
+            Thread.sleep(120);
+            return null;
+        }).when(storageService).downloadObject(any(String.class), any(Path.class));
+        when(mediaProcessor.extractAudio(any(Path.class), any(Path.class))).thenAnswer(invocation -> {
+            Path audio = invocation.getArgument(1);
+            Files.write(audio, new byte[] {4, 5, 6});
+            Thread.sleep(120);
+            return new AudioExtractResult(audio, 3L);
+        });
+        when(asrProvider.transcribe(any())).thenAnswer(invocation -> {
+            Thread.sleep(120);
+            return new TranscriptionResult(List.of(
+                new TranscriptSegment(0, 2_000, "M3 regression segment")
+            ));
+        });
+        doAnswer(invocation -> {
+            Thread.sleep(120);
+            return null;
+        }).when(transcriptService).replaceTaskSegments(any(), any());
+
         LocalDateTime now = LocalDateTime.now();
         VideoEntity video = new VideoEntity();
         video.setTitle("M3 integration video");
@@ -112,8 +166,8 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
         AnalysisTaskEntity pending = taskRepository.selectById(taskId);
         assertThat(pending).isNotNull();
-        assertThat(pending.getStatus()).isEqualTo("PENDING");
-        assertThat(pending.getProgress()).isZero();
+        assertThat(pending.getStatus()).isIn("PENDING", "PROCESSING");
+        assertThat(pending.getProgress()).isBetween(0, 90);
 
         ResponseEntity<String> duplicateResponse = restTemplate.postForEntity(
             baseUrl("/api/videos/" + videoId + "/analysis"),

@@ -21,8 +21,8 @@ import { RouterLink, RouterView } from 'vue-router'
     </main>
 
     <footer class="app-footer">
-      <span>VideoAgent · Milestone 3</span>
-      <span>Spring Boot · RocketMQ · Redis · MySQL</span>
+      <span>VideoAgent · Milestone 4</span>
+      <span>FFmpeg · Mock ASR · Timestamped Transcript</span>
     </footer>
   </div>
 </template>

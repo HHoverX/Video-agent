@@ -3,6 +3,7 @@ package com.videoagent.storage;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import io.minio.BucketExistsArgs;
+import io.minio.GetObjectArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
@@ -12,6 +13,9 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
@@ -27,6 +31,22 @@ public class MinioStorageService implements ObjectStorageService {
     ) {
         this.clientProvider = clientProvider;
         this.properties = properties;
+    }
+
+    @Override
+    public void downloadObject(String objectKey, Path destination) {
+        try (InputStream inputStream = clientProvider.getObject().getObject(GetObjectArgs.builder()
+            .bucket(properties.bucket())
+            .object(objectKey)
+            .build())) {
+            Files.copy(inputStream, destination, StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception exception) {
+            throw new VideoAgentException(
+                ErrorCode.STORAGE_ERROR,
+                "视频从对象存储下载失败",
+                exception
+            );
+        }
     }
 
     @Override

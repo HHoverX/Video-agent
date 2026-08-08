@@ -163,6 +163,8 @@ README.md
 
 ### Milestone 4 — FFmpeg + Mock ASR
 
+状态：**已完成并通过真实 MySQL、Redis、MinIO、RocketMQ、FFmpeg 与浏览器验收。**
+
 目标：
 
 - 创建带时间戳的 transcript segment 表。
@@ -173,17 +175,19 @@ README.md
 新增/修改文件：
 
 ```text
-backend/src/main/resources/db/migration/V3__create_transcript_segment_table.sql
+backend/src/main/resources/db/migration/V3__create_video_transcript_segment_table.sql
 backend/src/main/java/com/videoagent/media/{MediaProcessor,FfmpegMediaProcessor,...}.java
-backend/src/main/java/com/videoagent/ai/asr/{AsrProvider,MockAsrProvider,...}.java
-backend/src/main/java/com/videoagent/ai/model/...
-backend/src/main/java/com/videoagent/video/transcript/...
-backend/src/main/java/com/videoagent/analysis/service/...
+backend/src/main/java/com/videoagent/asr/{AsrProvider,MockAsrProvider,...}.java
+backend/src/main/java/com/videoagent/transcript/{controller,service,repository,entity,dto}/...
+backend/src/main/java/com/videoagent/analysis/consumer/AnalysisTaskProcessor.java
+backend/src/main/java/com/videoagent/storage/{ObjectStorageService,MinioStorageService}.java
 backend/src/main/resources/application.yml
-backend/src/test/java/com/videoagent/{media,ai/asr,analysis}/...
-frontend/src/components/TranscriptList.vue
+backend/src/test/java/com/videoagent/{media,asr,transcript,analysis}/...
+frontend/src/services/transcript.ts
+frontend/src/types/transcript.ts
 frontend/src/views/VideoDetailView.vue
 README.md
+MILESTONE_4_ACCEPTANCE_REPORT.md
 ```
 
 验收标准：

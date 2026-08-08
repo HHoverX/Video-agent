@@ -8,6 +8,18 @@ import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisProperties;
+import com.videoagent.asr.AsrProvider;
+import com.videoagent.asr.AudioSource;
+import com.videoagent.asr.TranscriptionResult;
+import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.media.AudioExtractResult;
+import com.videoagent.media.MediaProcessor;
+import com.videoagent.media.MediaWorkspace;
+import com.videoagent.media.TemporaryMediaWorkspace;
+import com.videoagent.storage.ObjectStorageService;
+import com.videoagent.transcript.service.TranscriptService;
+import com.videoagent.video.entity.VideoEntity;
+import com.videoagent.video.repository.VideoRepository;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,15 +35,33 @@ public class AnalysisTaskProcessor {
     private final AnalysisTaskRepository analysisTaskRepository;
     private final AnalysisProgressStore progressStore;
     private final AnalysisProperties properties;
+    private final VideoRepository videoRepository;
+    private final ObjectStorageService storageService;
+    private final TemporaryMediaWorkspace workspaceFactory;
+    private final MediaProcessor mediaProcessor;
+    private final AsrProvider asrProvider;
+    private final TranscriptService transcriptService;
 
     public AnalysisTaskProcessor(
         AnalysisTaskRepository analysisTaskRepository,
         AnalysisProgressStore progressStore,
-        AnalysisProperties properties
+        AnalysisProperties properties,
+        VideoRepository videoRepository,
+        ObjectStorageService storageService,
+        TemporaryMediaWorkspace workspaceFactory,
+        MediaProcessor mediaProcessor,
+        AsrProvider asrProvider,
+        TranscriptService transcriptService
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
         this.progressStore = progressStore;
         this.properties = properties;
+        this.videoRepository = videoRepository;
+        this.storageService = storageService;
+        this.workspaceFactory = workspaceFactory;
+        this.mediaProcessor = mediaProcessor;
+        this.asrProvider = asrProvider;
+        this.transcriptService = transcriptService;
     }
 
     public void process(AnalysisMessage message) {
@@ -61,14 +91,19 @@ public class AnalysisTaskProcessor {
                 task.getId(), task.getVideoId(), task.getStatus());
             return;
         }
+        if (!properties.analysisType().equals(task.getAnalysisType())
+            || !properties.modelVersion().equals(task.getModelVersion())) {
+            log.warn("[taskId={}][videoId={}][stage=CONSUME] task version is not handled by this consumer",
+                task.getId(), task.getVideoId());
+            return;
+        }
 
         int lastProgress = task.getProgress() == null ? 0 : task.getProgress();
         try {
-            pause();
             int claimed = analysisTaskRepository.claimPending(
                 task.getId(),
                 AnalysisStage.PREPARING.name(),
-                20,
+                10,
                 LocalDateTime.now()
             );
             if (claimed != 1) {
@@ -77,29 +112,38 @@ public class AnalysisTaskProcessor {
                 return;
             }
 
-            lastProgress = 20;
+            lastProgress = 10;
             publish(task.getId(), AnalysisStage.PREPARING, lastProgress);
-            pause();
 
-            lastProgress = advance(task.getId(), AnalysisStage.ANALYZING, 40);
-            pause();
+            VideoEntity video = videoRepository.selectById(task.getVideoId());
+            if (video == null) {
+                throw new IllegalStateException("Video metadata no longer exists");
+            }
 
-            lastProgress = advance(task.getId(), AnalysisStage.PROCESSING, 70);
-            pause();
+            TranscriptionResult transcription;
+            try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
+                storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
+                lastProgress = advance(task.getId(), AnalysisStage.EXTRACTING_AUDIO, 35);
+                AudioExtractResult audio = mediaProcessor.extractAudio(
+                    workspace.videoFile(),
+                    workspace.audioFile()
+                );
+                lastProgress = advance(task.getId(), AnalysisStage.TRANSCRIBING, 70);
+                transcription = asrProvider.transcribe(new AudioSource(audio.audioFile()));
+            }
 
             lastProgress = advance(task.getId(), AnalysisStage.SAVING, 90);
-            pause();
+            transcriptService.replaceTaskSegments(task, transcription);
 
             int completed = analysisTaskRepository.markSuccess(task.getId(), LocalDateTime.now());
             if (completed != 1) {
                 throw new IllegalStateException("Task could not transition to SUCCESS");
             }
             publish(task.getId(), AnalysisStage.DONE, 100);
-            log.info("[taskId={}][videoId={}][stage=DONE] simulated analysis completed",
+            log.info("[taskId={}][videoId={}][stage=DONE] media transcription completed",
                 task.getId(), task.getVideoId());
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            fail(task, lastProgress, "ANALYSIS_INTERRUPTED", "模拟分析线程被中断", exception);
+        } catch (VideoAgentException exception) {
+            fail(task, lastProgress, exception.errorCode().name(), exception.getMessage(), exception);
         } catch (RuntimeException exception) {
             fail(task, lastProgress, "ANALYSIS_PROCESSING_FAILED", exception.getMessage(), exception);
         }
@@ -138,7 +182,7 @@ public class AnalysisTaskProcessor {
         String message,
         Exception exception
     ) {
-        String safeMessage = message == null || message.isBlank() ? "模拟分析处理失败" : message;
+        String safeMessage = message == null || message.isBlank() ? "分析任务处理失败" : message;
         if (safeMessage.length() > 1000) {
             safeMessage = safeMessage.substring(0, 1000);
         }
@@ -149,13 +193,7 @@ public class AnalysisTaskProcessor {
             progress,
             safeMessage
         ));
-        log.error("[taskId={}][videoId={}][stage=FAILED] simulated analysis failed",
+        log.error("[taskId={}][videoId={}][stage=FAILED] media transcription failed",
             task.getId(), task.getVideoId(), exception);
-    }
-
-    private void pause() throws InterruptedException {
-        if (!properties.stepDelay().isZero() && !properties.stepDelay().isNegative()) {
-            Thread.sleep(properties.stepDelay().toMillis());
-        }
     }
 }

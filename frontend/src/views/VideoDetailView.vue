@@ -3,8 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { getAnalysisTask, startAnalysis } from '@/services/analysis'
+import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
 import type { AnalysisTask, AnalysisStatus } from '@/types/analysis'
+import type { TranscriptSegment } from '@/types/transcript'
 import type { Video } from '@/types/video'
 
 const POLL_INTERVAL_MILLIS = 500
@@ -17,6 +19,9 @@ const startingAnalysis = ref(false)
 const pollingAnalysis = ref(false)
 const analysisTask = ref<AnalysisTask | null>(null)
 const analysisError = ref('')
+const transcript = ref<TranscriptSegment[]>([])
+const transcriptLoading = ref(false)
+const transcriptError = ref('')
 let pollTimer: number | undefined
 
 const analysisStatusLabel = computed(() => {
@@ -38,6 +43,9 @@ const progressStatus = computed(() => {
 const analysisActive = computed(
   () => analysisTask.value?.status === 'PENDING' || analysisTask.value?.status === 'PROCESSING',
 )
+const analysisComplete = computed(
+  () => analysisTask.value?.status === 'SUCCESS' || transcript.value.length > 0,
+)
 
 function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`
@@ -50,10 +58,33 @@ function formatDate(value: string) {
   }).format(new Date(value))
 }
 
+function formatTimestamp(milliseconds: number) {
+  const totalSeconds = Math.floor(milliseconds / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const base = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+  return hours > 0 ? `${hours.toString().padStart(2, '0')}:${base}` : base
+}
+
+async function loadTranscript() {
+  const videoId = Number(route.params.id)
+  transcriptLoading.value = true
+  try {
+    transcript.value = await getVideoTranscript(videoId)
+    transcriptError.value = ''
+  } catch (error) {
+    transcriptError.value = apiErrorMessage(error, '字幕加载失败，请稍后重试。')
+  } finally {
+    transcriptLoading.value = false
+  }
+}
+
 async function loadVideo() {
   loading.value = true
   try {
     video.value = await getVideo(Number(route.params.id))
+    await loadTranscript()
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '视频详情加载失败。')
   } finally {
@@ -76,9 +107,12 @@ function schedulePoll(taskId: number) {
 async function pollAnalysis(taskId: number) {
   pollingAnalysis.value = true
   try {
-    analysisTask.value = await getAnalysisTask(taskId)
+    const current = await getAnalysisTask(taskId)
+    analysisTask.value = current
     analysisError.value = ''
-    if (analysisActive.value) {
+    if (current.status === 'SUCCESS') {
+      await loadTranscript()
+    } else if (analysisActive.value) {
       schedulePoll(taskId)
     }
   } catch (error) {
@@ -89,7 +123,7 @@ async function pollAnalysis(taskId: number) {
 }
 
 async function handleStartAnalysis() {
-  if (!video.value || startingAnalysis.value || analysisActive.value) return
+  if (!video.value || startingAnalysis.value || analysisActive.value || analysisComplete.value) return
 
   startingAnalysis.value = true
   analysisError.value = ''
@@ -161,17 +195,17 @@ onBeforeUnmount(clearPollTimer)
       <div class="analysis-panel content-panel">
         <div class="analysis-panel__heading">
           <div>
-            <p class="eyebrow">MILESTONE 3 · ASYNC FRAMEWORK</p>
-            <h2>AI 分析任务</h2>
-            <p>通过 RocketMQ 异步执行模拟阶段；本阶段不会生成真实分析内容。</p>
+            <p class="eyebrow">MILESTONE 4 · MEDIA TRANSCRIPTION</p>
+            <h2>AI 转录任务</h2>
+            <p>从 MinIO 获取视频，由 FFmpeg 提取音频，再通过 Mock ASR 生成时间戳字幕。</p>
           </div>
           <el-button
             class="analysis-start-button"
-            :disabled="analysisActive || analysisTask?.status === 'SUCCESS'"
+            :disabled="analysisActive || analysisComplete"
             :loading="startingAnalysis"
             @click="handleStartAnalysis"
           >
-            {{ analysisActive ? '分析进行中' : analysisTask?.status === 'SUCCESS' ? '分析已完成' : '开始 AI 分析' }}
+            {{ analysisActive ? '分析进行中' : analysisComplete ? '分析已完成' : '开始 AI 分析' }}
           </el-button>
         </div>
 
@@ -199,7 +233,39 @@ onBeforeUnmount(clearPollTimer)
         </div>
 
         <div v-else class="analysis-empty">
-          尚未创建分析任务。点击按钮后，接口会立即返回任务编号并开始轮询状态。
+          {{
+            analysisComplete
+              ? '该视频已完成转录，字幕已从持久化数据加载。'
+              : '尚未创建分析任务。点击按钮后，接口会立即返回任务编号并开始轮询状态。'
+          }}
+        </div>
+      </div>
+
+      <div class="transcript-panel content-panel">
+        <div class="transcript-panel__heading">
+          <div>
+            <p class="eyebrow">TIMESTAMPED TRANSCRIPT</p>
+            <h2>视频字幕</h2>
+          </div>
+          <span v-if="transcript.length" class="transcript-count">
+            {{ transcript.length }} 个片段
+          </span>
+        </div>
+
+        <div v-if="transcriptError" class="notice notice--error transcript-notice">
+          {{ transcriptError }}
+        </div>
+        <div v-else-if="transcriptLoading" class="transcript-loading">
+          <el-skeleton :rows="3" animated />
+        </div>
+        <ol v-else-if="transcript.length" class="transcript-list">
+          <li v-for="segment in transcript" :key="`${segment.startMs}-${segment.endMs}`">
+            <span class="transcript-timestamp">{{ formatTimestamp(segment.startMs) }}</span>
+            <p>{{ segment.text }}</p>
+          </li>
+        </ol>
+        <div v-else class="transcript-empty">
+          尚未生成字幕。完成上方转录任务后，带时间戳的片段会显示在这里。
         </div>
       </div>
     </template>

@@ -47,10 +47,14 @@ videoagent:
   analysis:
     topic: ${VIDEO_ANALYZE_TOPIC:VIDEO_ANALYZE_TOPIC}
     consumer-group: ${VIDEO_ANALYZE_CONSUMER_GROUP:videoagent-analysis-consumer}
-    analysis-type: ${VIDEO_ANALYSIS_TYPE:FRAMEWORK}
-    model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m3-simulation-v1}
+    analysis-type: ${VIDEO_ANALYSIS_TYPE:TRANSCRIPTION}
+    model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m4-ffmpeg-mock-asr-v1}
     progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
-    step-delay: ${VIDEO_ANALYSIS_STEP_DELAY:700ms}
+  media:
+    ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+    ffmpeg-timeout: ${FFMPEG_TIMEOUT:30s}
+    temp-root: ${MEDIA_TEMP_ROOT:${java.io.tmpdir}/videoagent-media}
+    stderr-max-chars: ${FFMPEG_STDERR_MAX_CHARS:4000}
   upload:
     max-file-size: ${VIDEO_MAX_FILE_SIZE:500MB}
   storage:

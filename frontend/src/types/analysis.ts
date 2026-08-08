@@ -3,6 +3,8 @@ export type AnalysisStatus = 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
 export type AnalysisStage =
   | 'QUEUED'
   | 'PREPARING'
+  | 'EXTRACTING_AUDIO'
+  | 'TRANSCRIBING'
   | 'ANALYZING'
   | 'PROCESSING'
   | 'SAVING'

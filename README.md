@@ -2,14 +2,15 @@
 
 VideoAgent 是一个面向面试学习的 AI 全栈项目。用户上传视频后，系统将异步完成音频提取、语音转文字和结构化总结，并保留可跳转的时间戳。
 
-当前进度：**Milestone 3 — 异步分析任务框架**。
+当前进度：**Milestone 4 — FFmpeg + Mock ASR（已完成并验收）**。
 
 ## 技术栈
 
 - 后端：Java 21、Spring Boot 3、Maven、MyBatis-Plus、Flyway
 - 前端：Vue 3、TypeScript、Vite、Pinia、Vue Router、Axios、Element Plus
 - 基础设施：MySQL 8、Redis、MinIO、Apache RocketMQ、Docker Compose
-- 后续阶段：FFmpeg、ASR Provider、LLM Provider、SSE、Video RAG
+- 媒体与转录：FFmpeg、`MediaProcessor`、`AsrProvider`、确定性 `MockAsrProvider`
+- 后续阶段：LLM Provider、SSE、Video RAG
 
 ## 本地启动
 
@@ -43,10 +44,11 @@ docker compose ps
 
 ### 3. 启动后端
 
-需要 Java 21 或更高版本。本机若存在多个 JDK，请先确认 `mvn -version` 使用的 Java 版本。
+需要 Java 21 或更高版本，并需要可执行的 FFmpeg。本机若存在多个 JDK，请先确认 `mvn -version` 使用的 Java 版本。FFmpeg 不在 `PATH` 时，通过 `FFMPEG_PATH` 指向可执行文件：
 
 ```powershell
 Set-Location backend
+$env:FFMPEG_PATH = 'C:\path\to\ffmpeg.exe'
 mvn spring-boot:run
 ```
 
@@ -64,9 +66,10 @@ GET  /api/videos
 GET  /api/videos/{videoId}
 POST /api/videos/{videoId}/analysis
 GET  /api/analysis/{taskId}
+GET  /api/videos/{videoId}/transcript
 ```
 
-上传链路负责 MP4 校验、MinIO 对象写入和 MySQL 元数据持久化。分析接口会创建持久任务、向 `VIDEO_ANALYZE_TOPIC` 投递仅包含 `taskId`/`videoId` 的消息，并立即返回；Consumer 只执行确定性的模拟阶段，不进行真实媒体或 AI 分析。
+上传链路负责 MP4 校验、MinIO 对象写入和 MySQL 元数据持久化。分析接口会创建 `TRANSCRIPTION / m4-ffmpeg-mock-asr-v1` 持久任务、向 `VIDEO_ANALYZE_TOPIC` 投递仅包含 `taskId`/`videoId` 的消息，并立即返回。Consumer 从 MinIO 下载视频，在受控临时目录中用 FFmpeg 提取 16 kHz 单声道 WAV，再由 Mock ASR 生成带时间戳片段并写入 MySQL。
 
 ### 4. 启动前端
 
@@ -78,7 +81,7 @@ npm run dev
 
 访问 `http://localhost:5173`。Vite 会把 `/api` 请求代理到后端 `8080` 端口。
 
-前端提供视频列表、普通 multipart 上传和元数据详情页面。详情页可以发起模拟分析，并用普通 HTTP 轮询展示排队、处理中、完成或失败状态。当前单文件上限默认是 500 MB，可通过 `VIDEO_MAX_FILE_SIZE` 与 `VIDEO_MAX_REQUEST_SIZE` 调整。
+前端提供视频列表、普通 multipart 上传和元数据详情页面。详情页可以发起转录，用普通 HTTP 轮询展示排队、提取音频、转录、保存、完成或失败状态，并按 `00:00` 格式展示 transcript segments。当前尚无视频播放器，因此时间戳仅展示、不提供跳转。单文件上限默认是 500 MB，可通过 `VIDEO_MAX_FILE_SIZE` 与 `VIDEO_MAX_REQUEST_SIZE` 调整。
 
 ## 构建与测试
 
@@ -102,9 +105,16 @@ mvn "-Dtest=VideoUploadInfrastructureIntegrationTest" test
 
 $env:VIDEOAGENT_M3_INFRA_TEST = "true"
 mvn "-Dtest=AnalysisFrameworkInfrastructureIntegrationTest" test
+
+$env:VIDEOAGENT_FFMPEG_TEST = "true"
+$env:FFMPEG_PATH = 'C:\path\to\ffmpeg.exe'
+mvn "-Dtest=FfmpegMediaProcessorTest" test
+
+$env:VIDEOAGENT_M4_INFRA_TEST = "true"
+mvn "-Dtest=MediaTranscriptionInfrastructureIntegrationTest" test
 ```
 
-这些测试默认跳过，避免普通单元测试强依赖本机 Docker。M2 基础设施测试检查 MinIO/MySQL 上传链路；M3 基础设施测试检查 MySQL PENDING、RocketMQ 消费、Redis 实时进度与 TTL、MySQL SUCCESS、重复请求、重复消费幂等和 Redis 丢失回退。测试结束会清理自己的临时数据。
+这些测试默认跳过，避免普通单元测试强依赖本机 Docker 或 FFmpeg。M2 基础设施测试检查 MinIO/MySQL 上传链路；M3 基础设施测试回归异步框架；FFmpeg 组件测试覆盖成功、非零退出和超时；M4 基础设施测试覆盖真实 MinIO 下载、RocketMQ 消费、FFmpeg 提取、Mock ASR、字幕入库、失败状态、重复消费、Redis 丢失回退和临时文件清理。测试结束会清理自己的临时数据。
 
 ## 当前目录结构
 
@@ -113,6 +123,9 @@ backend/             Spring Boot API
   src/main/java/com/videoagent/video/    视频上传、列表与详情
   src/main/java/com/videoagent/storage/  MinIO 对象存储适配
   src/main/java/com/videoagent/analysis/ 异步任务、MQ 与实时进度
+  src/main/java/com/videoagent/media/    FFmpeg 媒体处理与临时目录
+  src/main/java/com/videoagent/asr/      ASR Provider 与 Mock 实现
+  src/main/java/com/videoagent/transcript/ 时间戳字幕持久化与 API
 frontend/            Vue 3 Web 应用
 infra/rocketmq/      RocketMQ Broker 本地配置
 docker-compose.yml   本地基础设施
@@ -121,7 +134,7 @@ IMPLEMENTATION_PLAN.md
 
 ## 环境变量
 
-完整清单见 `.env.example`。后端支持通过环境变量覆盖 MySQL、Redis、MinIO、RocketMQ、ASR 与 LLM 配置；ASR/LLM 默认使用 `mock`，真实 Provider 将在对应 Milestone 接入。
+完整清单见 `.env.example`。后端支持通过环境变量覆盖 MySQL、Redis、MinIO、RocketMQ、FFmpeg 路径/超时/临时目录以及分析版本。M4 固定使用本地 `MockAsrProvider`，不需要第三方 API Key；真实 ASR 与 LLM 均未接入。
 
 ## Architecture Decisions
 
@@ -137,12 +150,22 @@ MySQL 保存视频和分析任务等持久业务事实；Redis 只保存带 24 �
 
 长耗时任务不应占用 HTTP 请求。RocketMQ 将任务创建与后台处理解耦；Consumer 使用原子状态转换抢占 PENDING 任务，并对 SUCCESS 消息直接跳过，保证当前框架的重复消费幂等。
 
+### MediaProcessor 与 AsrProvider 的边界
+
+`MediaProcessor` 只负责视频到音频，FFmpeg 参数由后端固定构造并设置超时；它不承担剪辑、生成或复杂转码。`AsrProvider` 只接收音频源并返回时间戳片段。M4 使用确定性 Mock，让没有外部密钥的本地环境也能完整验收 MinIO → FFmpeg → transcript 链路。
+
+### 临时媒体文件生命周期
+
+每个任务在配置的媒体临时根目录下创建随机子目录，只使用系统生成的 `source.mp4` 与 `audio.wav` 文件名。工作区通过 `try-with-resources` 在成功、FFmpeg 失败和 ASR 失败路径统一递归清理，并拒绝删除工作区边界外的路径。
+
 ## 已知限制
 
 - 当前只支持普通 multipart MP4 上传，不支持分片、断点续传或秒传。
-- 当前“AI 分析”仅模拟 20/40/70/90/100 进度，不包含 FFmpeg、ASR、LLM、字幕、摘要或章节结果。
+- 当前 ASR 是确定性 Mock，不是 Whisper 或第三方真实语音识别；字幕内容用于验证工程链路，不代表视频真实语义。
+- 当前不包含 LLM、摘要、章节、关键点、RAG、Embedding、OCR、VLM 或说话人分离。
 - 当前前端使用普通轮询，不包含 SSE 或 WebSocket。
 - 同一视频、分析类型和模型版本只保留一个任务；当前阶段不提供失败任务的手工重试接口。
+- 已有 `FRAMEWORK / m3-simulation-v1` 历史任务不变；M4 使用新的业务键 `TRANSCRIPTION / m4-ffmpeg-mock-asr-v1`。
 - 本地默认开发凭据只能用于本机环境。
 - MinIO 写成功但 MySQL 写失败时会尝试补偿删除对象；跨资源强一致性不属于当前阶段。
 

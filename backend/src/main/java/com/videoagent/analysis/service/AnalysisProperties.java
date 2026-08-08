@@ -10,16 +10,14 @@ public record AnalysisProperties(
     String consumerGroup,
     String analysisType,
     String modelVersion,
-    Duration progressTtl,
-    Duration stepDelay
+    Duration progressTtl
 ) {
     public AnalysisProperties {
         topic = defaultIfBlank(topic, "VIDEO_ANALYZE_TOPIC");
         consumerGroup = defaultIfBlank(consumerGroup, "videoagent-analysis-consumer");
-        analysisType = defaultIfBlank(analysisType, "FRAMEWORK");
-        modelVersion = defaultIfBlank(modelVersion, "m3-simulation-v1");
+        analysisType = defaultIfBlank(analysisType, "TRANSCRIPTION");
+        modelVersion = defaultIfBlank(modelVersion, "m4-ffmpeg-mock-asr-v1");
         progressTtl = progressTtl == null ? Duration.ofHours(24) : progressTtl;
-        stepDelay = stepDelay == null ? Duration.ofMillis(700) : stepDelay;
     }
 
     private static String defaultIfBlank(String value, String fallback) {

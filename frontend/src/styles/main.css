@@ -719,6 +719,83 @@ p {
   margin: 12px 0 0;
 }
 
+.transcript-panel {
+  margin-top: 26px;
+  padding: 28px;
+}
+
+.transcript-panel__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.transcript-panel__heading .eyebrow {
+  margin-bottom: 9px;
+}
+
+.transcript-panel__heading h2 {
+  margin: 0;
+  color: #eef1f7;
+  font-size: 22px;
+}
+
+.transcript-count {
+  color: #747d90;
+  font-size: 11px;
+}
+
+.transcript-notice {
+  margin: 22px 0 0;
+}
+
+.transcript-loading,
+.transcript-list,
+.transcript-empty {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.transcript-list {
+  margin-bottom: 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.transcript-list li {
+  min-height: 64px;
+  padding: 15px 0;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.transcript-list li:last-child {
+  border-bottom: 0;
+}
+
+.transcript-timestamp {
+  color: #8cf0d4;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.transcript-list p {
+  margin: 0;
+  color: #bdc4d3;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.transcript-empty {
+  color: #697184;
+  font-size: 12px;
+}
+
 .analysis-failure {
   color: #ff9aaa;
   font-size: 12px;
@@ -796,7 +873,8 @@ p {
 
   .upload-panel,
   .upload-note,
-  .analysis-panel {
+  .analysis-panel,
+  .transcript-panel {
     padding: 22px;
   }
 
@@ -808,6 +886,11 @@ p {
   .analysis-progress__meta > div {
     align-items: flex-start;
     flex-direction: column;
+    gap: 7px;
+  }
+
+  .transcript-list li {
+    grid-template-columns: 1fr;
     gap: 7px;
   }
 

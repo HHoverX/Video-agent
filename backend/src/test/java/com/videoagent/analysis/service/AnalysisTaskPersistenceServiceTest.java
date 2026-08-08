@@ -31,8 +31,7 @@ class AnalysisTaskPersistenceServiceTest {
             "test-consumer",
             "FRAMEWORK",
             "m3-simulation-v1",
-            Duration.ofHours(24),
-            Duration.ZERO
+            Duration.ofHours(24)
         );
         service = new AnalysisTaskPersistenceService(videoRepository, taskRepository, properties);
     }
