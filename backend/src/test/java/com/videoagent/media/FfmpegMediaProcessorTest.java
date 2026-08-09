@@ -50,6 +50,19 @@ class FfmpegMediaProcessorTest {
     }
 
     @Test
+    void shouldClassifyVideoWithoutAudioStream() throws Exception {
+        Path video = generateVideoWithoutAudio("silent.mp4", 1);
+
+        assertThatThrownBy(() -> processor(Duration.ofSeconds(20)).extractAudio(
+            video,
+            tempDirectory.resolve("silent.wav")
+        )).isInstanceOfSatisfying(VideoAgentException.class, exception -> {
+            assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_AUDIO_STREAM_NOT_FOUND);
+            assertThat(exception.getMessage()).isEqualTo("该视频不包含可用于语音转写的音轨");
+        });
+    }
+
+    @Test
     void shouldTerminateFfmpegWhenTimeoutExpires() throws Exception {
         Path video = generateVideo("timeout.mp4", 5);
 
@@ -83,6 +96,25 @@ class FfmpegMediaProcessorTest {
             "-c:v", "mpeg4",
             "-c:a", "aac",
             "-shortest",
+            output.toString()
+        ).redirectErrorStream(true).start();
+        boolean finished = process.waitFor(30, TimeUnit.SECONDS);
+        String outputText = new String(process.getInputStream().readAllBytes());
+        assertThat(finished).as("FFmpeg fixture generation timed out").isTrue();
+        assertThat(process.exitValue()).as(outputText).isZero();
+        assertThat(output).exists();
+        return output;
+    }
+
+    private Path generateVideoWithoutAudio(String filename, int durationSeconds) throws Exception {
+        Path output = tempDirectory.resolve(filename);
+        String executable = System.getenv().getOrDefault("FFMPEG_PATH", "ffmpeg");
+        Process process = new ProcessBuilder(
+            executable,
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=160x120:r=10",
+            "-t", Integer.toString(durationSeconds),
+            "-c:v", "mpeg4",
             output.toString()
         ).redirectErrorStream(true).start();
         boolean finished = process.waitFor(30, TimeUnit.SECONDS);

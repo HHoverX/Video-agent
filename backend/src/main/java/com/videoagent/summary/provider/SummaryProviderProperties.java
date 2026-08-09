@@ -11,7 +11,8 @@ public record SummaryProviderProperties(
     String model,
     String baseUrl,
     Duration timeout,
-    Integer maxRetries
+    Integer maxRetries,
+    String structuredOutputMode
 ) {
     public SummaryProviderProperties {
         provider = defaultIfBlank(provider, "mock").toLowerCase();
@@ -20,11 +21,20 @@ public record SummaryProviderProperties(
         baseUrl = baseUrl == null ? "" : baseUrl.strip();
         timeout = timeout == null ? Duration.ofSeconds(60) : timeout;
         maxRetries = maxRetries == null ? 1 : maxRetries;
+        structuredOutputMode = defaultIfBlank(structuredOutputMode, "json_schema")
+            .toLowerCase(java.util.Locale.ROOT);
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("LLM timeout must be positive");
         }
         if (maxRetries < 0 || maxRetries > 3) {
             throw new IllegalArgumentException("LLM maxRetries must be between 0 and 3");
+        }
+        if (!structuredOutputMode.equals("json_schema")
+            && !structuredOutputMode.equals("json_object")
+            && !structuredOutputMode.equals("prompting")) {
+            throw new IllegalArgumentException(
+                "LLM structuredOutputMode must be json_schema, json_object or prompting"
+            );
         }
     }
 

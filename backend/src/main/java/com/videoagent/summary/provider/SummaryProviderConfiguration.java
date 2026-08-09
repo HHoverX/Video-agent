@@ -45,9 +45,17 @@ public class SummaryProviderConfiguration {
             .apiKey(properties.apiKey())
             .modelName(properties.model())
             .timeout(properties.timeout())
-            .maxRetries(properties.maxRetries())
-            .supportedCapabilities(RESPONSE_FORMAT_JSON_SCHEMA)
-            .strictJsonSchema(true);
+            .maxRetries(properties.maxRetries());
+        switch (properties.structuredOutputMode()) {
+            case "json_schema" -> builder
+                .supportedCapabilities(RESPONSE_FORMAT_JSON_SCHEMA)
+                .strictJsonSchema(true);
+            case "json_object" -> builder.responseFormat("json_object");
+            case "prompting" -> {
+                // LangChain4j AI Services embeds the target structure in the prompt.
+            }
+            default -> throw new IllegalStateException("Validated structured output mode is unknown");
+        }
         if (!properties.baseUrl().isBlank()) {
             builder.baseUrl(properties.baseUrl());
         }

@@ -3,13 +3,10 @@ package com.videoagent.asr;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 
-import org.springframework.stereotype.Component;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 
-@Component
 public class MockAsrProvider implements AsrProvider {
 
     private static final List<TranscriptSegment> DETERMINISTIC_SEGMENTS = List.of(

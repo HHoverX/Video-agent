@@ -68,6 +68,9 @@ videoagent:
     asr:
       provider: ${ASR_PROVIDER:mock}
       api-key: ${ASR_API_KEY:}
+      model: ${ASR_MODEL:}
+      base-url: ${ASR_BASE_URL:}
+      timeout: ${ASR_TIMEOUT:60s}
     llm:
       provider: ${LLM_PROVIDER:mock}
       api-key: ${LLM_API_KEY:}
@@ -75,3 +78,4 @@ videoagent:
       base-url: ${LLM_BASE_URL:}
       timeout: ${LLM_TIMEOUT:60s}
       max-retries: ${LLM_MAX_RETRIES:1}
+      structured-output-mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_schema}

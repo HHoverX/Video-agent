@@ -36,6 +36,7 @@ public class FfmpegMediaProcessor implements MediaProcessor {
                 "-hide_banner",
                 "-y",
                 "-i", input.toString(),
+                "-map", "0:a:0",
                 "-vn",
                 "-ac", "1",
                 "-ar", "16000",
@@ -61,6 +62,12 @@ public class FfmpegMediaProcessor implements MediaProcessor {
 
             String stderr = readStderr(stderrFile);
             if (process.exitValue() != 0) {
+                if (isMissingAudioStream(stderr)) {
+                    throw new VideoAgentException(
+                        ErrorCode.VIDEO_AUDIO_STREAM_NOT_FOUND,
+                        "该视频不包含可用于语音转写的音轨"
+                    );
+                }
                 throw new VideoAgentException(
                     ErrorCode.FFMPEG_EXECUTION_FAILED,
                     "FFmpeg 退出码=" + process.exitValue() + "；stderr=" + stderr
@@ -129,6 +136,13 @@ public class FfmpegMediaProcessor implements MediaProcessor {
         } catch (IOException exception) {
             return "<stderr unreadable>";
         }
+    }
+
+    private boolean isMissingAudioStream(String stderr) {
+        String normalized = stderr.toLowerCase(java.util.Locale.ROOT);
+        return normalized.contains("matches no streams")
+            || normalized.contains("does not contain any stream")
+            || normalized.contains("contains no audio");
     }
 
     private void terminate(Process process) {
