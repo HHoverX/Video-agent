@@ -205,10 +205,12 @@ MILESTONE_4_ACCEPTANCE_REPORT.md
 
 ### Milestone 5 — LLM 摘要
 
+状态：**已完成并通过真实 MySQL、Redis、MinIO、RocketMQ、FFmpeg、Mock Summary 与浏览器验收。**
+
 目标：
 
 - 创建 summary、chapter、key point 表。
-- 定义 `VideoSummaryProvider` 及结构化请求/响应，先实现 Mock，再允许配置真实 Provider。
+- 定义 `VideoSummaryProvider` 及结构化请求/响应，实现确定性 Mock 与 LangChain4j OpenAI-compatible Provider。
 - 将 transcript 转换为 overview、chapters、key points 并事务性保存。
 - 前端展示摘要/章节/关键点，点击时间戳跳转播放器。
 
@@ -216,23 +218,23 @@ MILESTONE_4_ACCEPTANCE_REPORT.md
 
 ```text
 backend/src/main/resources/db/migration/V4__create_video_summary_tables.sql
-backend/src/main/java/com/videoagent/ai/llm/{VideoSummaryProvider,MockVideoSummaryProvider,...}.java
+backend/src/main/java/com/videoagent/summary/provider/...
 backend/src/main/java/com/videoagent/summary/{controller,service,repository,entity,dto}/...
-backend/src/main/java/com/videoagent/analysis/service/...
+backend/src/main/java/com/videoagent/analysis/consumer/AnalysisTaskProcessor.java
 backend/src/main/resources/application.yml
-backend/src/test/java/com/videoagent/{ai/llm,summary,analysis}/...
-frontend/src/components/{VideoPlayer,SummaryPanel,ChapterList,KeyPointList}.vue
+backend/src/test/java/com/videoagent/{summary,analysis}/...
 frontend/src/services/summary.ts
 frontend/src/types/summary.ts
 frontend/src/views/VideoDetailView.vue
 README.md
+MILESTONE_5_ACCEPTANCE_REPORT.md
 ```
 
 验收标准：
 
 - 一次分析生成且持久化 overview、chapters、key points。
 - 结果接口按顺序返回结构化 DTO，前端完整展示。
-- 点击 chapter/key point/transcript 时间戳能设置播放器 `currentTime`。
+- 当前尚无播放器，chapter、key point 与 transcript 时间戳按规格仅展示，不提前实现视频代理或播放器架构。
 - 未配置真实 LLM Key 时默认 Mock 仍可完成完整链路。
 
 风险：

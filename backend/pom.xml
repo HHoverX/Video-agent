@@ -22,6 +22,7 @@
         <mybatis-plus.version>3.5.12</mybatis-plus.version>
         <minio.version>8.5.17</minio.version>
         <rocketmq-spring.version>2.3.2</rocketmq-spring.version>
+        <langchain4j.version>1.18.0</langchain4j.version>
     </properties>
 
     <dependencies>
@@ -71,6 +72,16 @@
             <artifactId>rocketmq-spring-boot-starter</artifactId>
             <version>${rocketmq-spring.version}</version>
         </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -93,4 +104,3 @@
         </plugins>
     </build>
 </project>
-

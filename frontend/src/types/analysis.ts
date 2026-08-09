@@ -5,6 +5,8 @@ export type AnalysisStage =
   | 'PREPARING'
   | 'EXTRACTING_AUDIO'
   | 'TRANSCRIBING'
+  | 'SAVING_TRANSCRIPT'
+  | 'SUMMARIZING'
   | 'ANALYZING'
   | 'PROCESSING'
   | 'SAVING'

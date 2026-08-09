@@ -17,6 +17,10 @@ import com.videoagent.media.MediaProcessor;
 import com.videoagent.media.MediaWorkspace;
 import com.videoagent.media.TemporaryMediaWorkspace;
 import com.videoagent.storage.ObjectStorageService;
+import com.videoagent.summary.provider.VideoSummaryProvider;
+import com.videoagent.summary.provider.VideoSummaryRequest;
+import com.videoagent.summary.provider.VideoSummaryResult;
+import com.videoagent.summary.service.VideoSummaryService;
 import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
@@ -41,6 +45,8 @@ public class AnalysisTaskProcessor {
     private final MediaProcessor mediaProcessor;
     private final AsrProvider asrProvider;
     private final TranscriptService transcriptService;
+    private final VideoSummaryProvider summaryProvider;
+    private final VideoSummaryService summaryService;
 
     public AnalysisTaskProcessor(
         AnalysisTaskRepository analysisTaskRepository,
@@ -51,7 +57,9 @@ public class AnalysisTaskProcessor {
         TemporaryMediaWorkspace workspaceFactory,
         MediaProcessor mediaProcessor,
         AsrProvider asrProvider,
-        TranscriptService transcriptService
+        TranscriptService transcriptService,
+        VideoSummaryProvider summaryProvider,
+        VideoSummaryService summaryService
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
         this.progressStore = progressStore;
@@ -62,6 +70,8 @@ public class AnalysisTaskProcessor {
         this.mediaProcessor = mediaProcessor;
         this.asrProvider = asrProvider;
         this.transcriptService = transcriptService;
+        this.summaryProvider = summaryProvider;
+        this.summaryService = summaryService;
     }
 
     public void process(AnalysisMessage message) {
@@ -132,15 +142,26 @@ public class AnalysisTaskProcessor {
                 transcription = asrProvider.transcribe(new AudioSource(audio.audioFile()));
             }
 
-            lastProgress = advance(task.getId(), AnalysisStage.SAVING, 90);
+            lastProgress = advance(task.getId(), AnalysisStage.SAVING_TRANSCRIPT, 75);
             transcriptService.replaceTaskSegments(task, transcription);
+
+            VideoSummaryRequest summaryRequest = new VideoSummaryRequest(
+                task.getVideoId(),
+                task.getId(),
+                transcription.segments()
+            );
+            lastProgress = advance(task.getId(), AnalysisStage.SUMMARIZING, 85);
+            VideoSummaryResult summary = summaryProvider.summarize(summaryRequest);
+
+            lastProgress = advance(task.getId(), AnalysisStage.SAVING, 95);
+            summaryService.replaceTaskResult(task, summaryRequest, summary);
 
             int completed = analysisTaskRepository.markSuccess(task.getId(), LocalDateTime.now());
             if (completed != 1) {
                 throw new IllegalStateException("Task could not transition to SUCCESS");
             }
             publish(task.getId(), AnalysisStage.DONE, 100);
-            log.info("[taskId={}][videoId={}][stage=DONE] media transcription completed",
+            log.info("[taskId={}][videoId={}][stage=DONE] structured video summary completed",
                 task.getId(), task.getVideoId());
         } catch (VideoAgentException exception) {
             fail(task, lastProgress, exception.errorCode().name(), exception.getMessage(), exception);

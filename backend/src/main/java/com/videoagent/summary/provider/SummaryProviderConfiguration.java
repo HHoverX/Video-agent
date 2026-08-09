@@ -1,0 +1,61 @@
+package com.videoagent.summary.provider;
+
+import static dev.langchain4j.model.chat.Capability.RESPONSE_FORMAT_JSON_SCHEMA;
+
+import com.videoagent.summary.service.SummaryResultValidator;
+
+import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.service.AiServices;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration(proxyBeanMethods = false)
+public class SummaryProviderConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(SummaryProviderConfiguration.class);
+
+    @Bean
+    public VideoSummaryProvider videoSummaryProvider(
+        SummaryProviderProperties properties,
+        SummaryResultValidator validator
+    ) {
+        return switch (properties.provider()) {
+            case "mock" -> new MockVideoSummaryProvider(validator);
+            case "openai" -> openAiOrMock(properties, validator);
+            default -> throw new IllegalArgumentException(
+                "Unsupported LLM_PROVIDER: " + properties.provider()
+            );
+        };
+    }
+
+    private VideoSummaryProvider openAiOrMock(
+        SummaryProviderProperties properties,
+        SummaryResultValidator validator
+    ) {
+        if (!properties.hasRealProviderConfiguration()) {
+            log.warn("LLM provider=openai is missing API key or model; using MockVideoSummaryProvider");
+            return new MockVideoSummaryProvider(validator);
+        }
+
+        var builder = OpenAiChatModel.builder()
+            .apiKey(properties.apiKey())
+            .modelName(properties.model())
+            .timeout(properties.timeout())
+            .maxRetries(properties.maxRetries())
+            .supportedCapabilities(RESPONSE_FORMAT_JSON_SCHEMA)
+            .strictJsonSchema(true);
+        if (!properties.baseUrl().isBlank()) {
+            builder.baseUrl(properties.baseUrl());
+        }
+        ChatModel chatModel = builder.build();
+        LangChain4jSummaryAiService aiService = AiServices.create(
+            LangChain4jSummaryAiService.class,
+            chatModel
+        );
+        return new LangChain4jVideoSummaryProvider(aiService, validator);
+    }
+}

@@ -50,6 +50,7 @@ import static org.mockito.Mockito.when;
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
     properties = {
+        "videoagent.analysis.consumer-group=videoagent-m3-infra-${random.uuid}",
         "videoagent.analysis.analysis-type=FRAMEWORK",
         "videoagent.analysis.model-version=m3-simulation-v1",
         "videoagent.media.temp-root=target/m3-integration-media"

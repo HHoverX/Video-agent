@@ -724,6 +724,121 @@ p {
   padding: 28px;
 }
 
+.summary-panel {
+  margin-top: 26px;
+  padding: 28px;
+}
+
+.summary-panel__heading,
+.summary-section__title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.summary-panel__heading .eyebrow {
+  margin-bottom: 9px;
+}
+
+.summary-panel__heading h2,
+.summary-section h3,
+.summary-overview h3 {
+  margin: 0;
+  color: #eef1f7;
+}
+
+.summary-panel__heading h2 {
+  font-size: 22px;
+}
+
+.summary-task-label,
+.summary-section__title span {
+  color: #747d90;
+  font-size: 11px;
+}
+
+.summary-notice {
+  margin: 22px 0 0;
+}
+
+.summary-loading,
+.summary-content,
+.summary-empty {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.summary-overview {
+  padding: 20px 22px;
+  border: 1px solid rgba(140, 240, 212, 0.15);
+  border-radius: 13px;
+  background: rgba(140, 240, 212, 0.045);
+}
+
+.summary-overview h3,
+.summary-section h3 {
+  font-size: 15px;
+}
+
+.summary-overview p,
+.chapter-list p,
+.key-point-list p {
+  margin: 9px 0 0;
+  color: #bdc4d3;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.summary-section {
+  margin-top: 28px;
+}
+
+.chapter-list,
+.key-point-list {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chapter-list li,
+.key-point-list li {
+  padding: 17px 0;
+  display: grid;
+  grid-template-columns: 138px minmax(0, 1fr);
+  gap: 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.chapter-list li:last-child,
+.key-point-list li:last-child {
+  border-bottom: 0;
+}
+
+.chapter-list h4 {
+  margin: 0;
+  color: #e5e9f1;
+  font-size: 14px;
+}
+
+.summary-timestamp {
+  color: #8cf0d4;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.key-point-list p {
+  margin-top: 0;
+}
+
+.summary-empty {
+  color: #697184;
+  font-size: 12px;
+}
+
 .transcript-panel__heading {
   display: flex;
   align-items: flex-end;
@@ -874,6 +989,7 @@ p {
   .upload-panel,
   .upload-note,
   .analysis-panel,
+  .summary-panel,
   .transcript-panel {
     padding: 22px;
   }
@@ -892,6 +1008,12 @@ p {
   .transcript-list li {
     grid-template-columns: 1fr;
     gap: 7px;
+  }
+
+  .chapter-list li,
+  .key-point-list li {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .app-footer {

@@ -3,9 +3,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { getAnalysisTask, startAnalysis } from '@/services/analysis'
+import { getVideoChapters, getVideoKeyPoints, getVideoSummary } from '@/services/summary'
 import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
 import type { AnalysisTask, AnalysisStatus } from '@/types/analysis'
+import type { VideoChapter, VideoKeyPoint, VideoSummary } from '@/types/summary'
 import type { TranscriptSegment } from '@/types/transcript'
 import type { Video } from '@/types/video'
 
@@ -22,6 +24,11 @@ const analysisError = ref('')
 const transcript = ref<TranscriptSegment[]>([])
 const transcriptLoading = ref(false)
 const transcriptError = ref('')
+const summary = ref<VideoSummary | null>(null)
+const chapters = ref<VideoChapter[]>([])
+const keyPoints = ref<VideoKeyPoint[]>([])
+const summaryLoading = ref(false)
+const summaryError = ref('')
 let pollTimer: number | undefined
 
 const analysisStatusLabel = computed(() => {
@@ -44,7 +51,7 @@ const analysisActive = computed(
   () => analysisTask.value?.status === 'PENDING' || analysisTask.value?.status === 'PROCESSING',
 )
 const analysisComplete = computed(
-  () => analysisTask.value?.status === 'SUCCESS' || transcript.value.length > 0,
+  () => analysisTask.value?.status === 'SUCCESS' || summary.value !== null,
 )
 
 function formatBytes(bytes: number) {
@@ -80,11 +87,31 @@ async function loadTranscript() {
   }
 }
 
+async function loadSummary() {
+  const videoId = Number(route.params.id)
+  summaryLoading.value = true
+  try {
+    const [loadedSummary, loadedChapters, loadedKeyPoints] = await Promise.all([
+      getVideoSummary(videoId),
+      getVideoChapters(videoId),
+      getVideoKeyPoints(videoId),
+    ])
+    summary.value = loadedSummary
+    chapters.value = loadedChapters
+    keyPoints.value = loadedKeyPoints
+    summaryError.value = ''
+  } catch (error) {
+    summaryError.value = apiErrorMessage(error, 'AI 总结加载失败，请稍后重试。')
+  } finally {
+    summaryLoading.value = false
+  }
+}
+
 async function loadVideo() {
   loading.value = true
   try {
     video.value = await getVideo(Number(route.params.id))
-    await loadTranscript()
+    await Promise.all([loadTranscript(), loadSummary()])
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '视频详情加载失败。')
   } finally {
@@ -111,7 +138,7 @@ async function pollAnalysis(taskId: number) {
     analysisTask.value = current
     analysisError.value = ''
     if (current.status === 'SUCCESS') {
-      await loadTranscript()
+      await Promise.all([loadTranscript(), loadSummary()])
     } else if (analysisActive.value) {
       schedulePoll(taskId)
     }
@@ -195,9 +222,9 @@ onBeforeUnmount(clearPollTimer)
       <div class="analysis-panel content-panel">
         <div class="analysis-panel__heading">
           <div>
-            <p class="eyebrow">MILESTONE 4 · MEDIA TRANSCRIPTION</p>
-            <h2>AI 转录任务</h2>
-            <p>从 MinIO 获取视频，由 FFmpeg 提取音频，再通过 Mock ASR 生成时间戳字幕。</p>
+            <p class="eyebrow">MILESTONE 5 · STRUCTURED VIDEO SUMMARY</p>
+            <h2>AI 视频分析</h2>
+            <p>依次完成音频提取、时间戳转录和结构化总结，生成 Overview、Chapters 与 Key Points。</p>
           </div>
           <el-button
             class="analysis-start-button"
@@ -235,9 +262,68 @@ onBeforeUnmount(clearPollTimer)
         <div v-else class="analysis-empty">
           {{
             analysisComplete
-              ? '该视频已完成转录，字幕已从持久化数据加载。'
+              ? '该视频已完成 M5 结构化总结，结果已从持久化数据加载。'
               : '尚未创建分析任务。点击按钮后，接口会立即返回任务编号并开始轮询状态。'
           }}
+        </div>
+      </div>
+
+      <div class="summary-panel content-panel">
+        <div class="summary-panel__heading">
+          <div>
+            <p class="eyebrow">AI SUMMARY</p>
+            <h2>结构化视频总结</h2>
+          </div>
+          <span v-if="summary" class="summary-task-label">任务 #{{ summary.taskId }}</span>
+        </div>
+
+        <div v-if="summaryError" class="notice notice--error summary-notice">
+          {{ summaryError }}
+        </div>
+        <div v-else-if="summaryLoading" class="summary-loading">
+          <el-skeleton :rows="6" animated />
+        </div>
+        <div v-else-if="summary" class="summary-content">
+          <section class="summary-overview">
+            <h3>Overview</h3>
+            <p>{{ summary.overview }}</p>
+          </section>
+
+          <section class="summary-section">
+            <div class="summary-section__title">
+              <h3>Chapters</h3>
+              <span>{{ chapters.length }} 章</span>
+            </div>
+            <ol class="chapter-list">
+              <li v-for="chapter in chapters" :key="chapter.chapterIndex">
+                <span class="summary-timestamp">
+                  {{ formatTimestamp(chapter.startMs) }} – {{ formatTimestamp(chapter.endMs) }}
+                </span>
+                <div>
+                  <h4>{{ chapter.title }}</h4>
+                  <p>{{ chapter.summary }}</p>
+                </div>
+              </li>
+            </ol>
+          </section>
+
+          <section class="summary-section">
+            <div class="summary-section__title">
+              <h3>Key Points</h3>
+              <span>{{ keyPoints.length }} 条</span>
+            </div>
+            <ul class="key-point-list">
+              <li v-for="point in keyPoints" :key="point.pointIndex">
+                <span class="summary-timestamp">
+                  {{ formatTimestamp(point.startMs) }} – {{ formatTimestamp(point.endMs) }}
+                </span>
+                <p>{{ point.content }}</p>
+              </li>
+            </ul>
+          </section>
+        </div>
+        <div v-else class="summary-empty">
+          尚未生成结构化总结。启动上方 M5 分析后，Overview、Chapters 与 Key Points 会显示在这里。
         </div>
       </div>
 

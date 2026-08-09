@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
+import com.videoagent.summary.repository.VideoChapterRepository;
+import com.videoagent.summary.repository.VideoKeyPointRepository;
+import com.videoagent.summary.repository.VideoSummaryRepository;
 import com.videoagent.video.repository.VideoRepository;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 
@@ -39,6 +42,15 @@ class HealthEndpointIntegrationTest {
 
     @MockitoBean
     private VideoTranscriptSegmentRepository transcriptSegmentRepository;
+
+    @MockitoBean
+    private VideoSummaryRepository videoSummaryRepository;
+
+    @MockitoBean
+    private VideoChapterRepository videoChapterRepository;
+
+    @MockitoBean
+    private VideoKeyPointRepository videoKeyPointRepository;
 
     @MockitoBean
     private RocketMQTemplate rocketMQTemplate;

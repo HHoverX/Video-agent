@@ -5,6 +5,8 @@ public enum AnalysisStage {
     PREPARING("正在准备分析"),
     EXTRACTING_AUDIO("正在提取音频"),
     TRANSCRIBING("正在生成带时间戳字幕"),
+    SAVING_TRANSCRIPT("正在保存时间戳字幕"),
+    SUMMARIZING("正在生成结构化视频总结"),
     ANALYZING("正在模拟分析"),
     PROCESSING("正在处理分析结果"),
     SAVING("正在保存结果"),

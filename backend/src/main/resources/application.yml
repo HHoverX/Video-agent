@@ -47,8 +47,8 @@ videoagent:
   analysis:
     topic: ${VIDEO_ANALYZE_TOPIC:VIDEO_ANALYZE_TOPIC}
     consumer-group: ${VIDEO_ANALYZE_CONSUMER_GROUP:videoagent-analysis-consumer}
-    analysis-type: ${VIDEO_ANALYSIS_TYPE:TRANSCRIPTION}
-    model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m4-ffmpeg-mock-asr-v1}
+    analysis-type: ${VIDEO_ANALYSIS_TYPE:STRUCTURED_SUMMARY}
+    model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m5-langchain4j-structured-v1}
     progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
@@ -70,3 +70,6 @@ videoagent:
       provider: ${LLM_PROVIDER:mock}
       api-key: ${LLM_API_KEY:}
       model: ${LLM_MODEL:}
+      base-url: ${LLM_BASE_URL:}
+      timeout: ${LLM_TIMEOUT:60s}
+      max-retries: ${LLM_MAX_RETRIES:1}

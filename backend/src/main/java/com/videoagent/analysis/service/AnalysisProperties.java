@@ -15,8 +15,8 @@ public record AnalysisProperties(
     public AnalysisProperties {
         topic = defaultIfBlank(topic, "VIDEO_ANALYZE_TOPIC");
         consumerGroup = defaultIfBlank(consumerGroup, "videoagent-analysis-consumer");
-        analysisType = defaultIfBlank(analysisType, "TRANSCRIPTION");
-        modelVersion = defaultIfBlank(modelVersion, "m4-ffmpeg-mock-asr-v1");
+        analysisType = defaultIfBlank(analysisType, "STRUCTURED_SUMMARY");
+        modelVersion = defaultIfBlank(modelVersion, "m5-langchain4j-structured-v1");
         progressTtl = progressTtl == null ? Duration.ofHours(24) : progressTtl;
     }
 
