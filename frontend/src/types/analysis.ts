@@ -32,3 +32,14 @@ export interface AnalysisTask {
   startedAt: string | null
   finishedAt: string | null
 }
+
+export interface AnalysisProgressEvent {
+  taskId: number
+  videoId: number
+  status: AnalysisStatus
+  stage: AnalysisStage
+  progress: number
+  message: string
+  errorCode: string | null
+  errorMessage: string | null
+}

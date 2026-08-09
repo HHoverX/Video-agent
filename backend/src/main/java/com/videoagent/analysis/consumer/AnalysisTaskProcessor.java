@@ -5,9 +5,9 @@ import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.entity.AnalysisStage;
 import com.videoagent.analysis.entity.AnalysisStatus;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
-import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisProperties;
+import com.videoagent.analysis.service.AnalysisProgressUpdateService;
 import com.videoagent.asr.AsrProvider;
 import com.videoagent.asr.AudioSource;
 import com.videoagent.asr.TranscriptionResult;
@@ -37,7 +37,7 @@ public class AnalysisTaskProcessor {
     private static final Logger log = LoggerFactory.getLogger(AnalysisTaskProcessor.class);
 
     private final AnalysisTaskRepository analysisTaskRepository;
-    private final AnalysisProgressStore progressStore;
+    private final AnalysisProgressUpdateService progressUpdateService;
     private final AnalysisProperties properties;
     private final VideoRepository videoRepository;
     private final ObjectStorageService storageService;
@@ -50,7 +50,7 @@ public class AnalysisTaskProcessor {
 
     public AnalysisTaskProcessor(
         AnalysisTaskRepository analysisTaskRepository,
-        AnalysisProgressStore progressStore,
+        AnalysisProgressUpdateService progressUpdateService,
         AnalysisProperties properties,
         VideoRepository videoRepository,
         ObjectStorageService storageService,
@@ -62,7 +62,7 @@ public class AnalysisTaskProcessor {
         VideoSummaryService summaryService
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
-        this.progressStore = progressStore;
+        this.progressUpdateService = progressUpdateService;
         this.properties = properties;
         this.videoRepository = videoRepository;
         this.storageService = storageService;
@@ -123,7 +123,7 @@ public class AnalysisTaskProcessor {
             }
 
             lastProgress = 10;
-            publish(task.getId(), AnalysisStage.PREPARING, lastProgress);
+            publish(task, AnalysisStage.PREPARING, lastProgress);
 
             VideoEntity video = videoRepository.selectById(task.getVideoId());
             if (video == null) {
@@ -133,16 +133,16 @@ public class AnalysisTaskProcessor {
             TranscriptionResult transcription;
             try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
                 storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
-                lastProgress = advance(task.getId(), AnalysisStage.EXTRACTING_AUDIO, 35);
+                lastProgress = advance(task, AnalysisStage.EXTRACTING_AUDIO, 35);
                 AudioExtractResult audio = mediaProcessor.extractAudio(
                     workspace.videoFile(),
                     workspace.audioFile()
                 );
-                lastProgress = advance(task.getId(), AnalysisStage.TRANSCRIBING, 70);
+                lastProgress = advance(task, AnalysisStage.TRANSCRIBING, 70);
                 transcription = asrProvider.transcribe(new AudioSource(audio.audioFile()));
             }
 
-            lastProgress = advance(task.getId(), AnalysisStage.SAVING_TRANSCRIPT, 75);
+            lastProgress = advance(task, AnalysisStage.SAVING_TRANSCRIPT, 75);
             transcriptService.replaceTaskSegments(task, transcription);
 
             VideoSummaryRequest summaryRequest = new VideoSummaryRequest(
@@ -150,17 +150,17 @@ public class AnalysisTaskProcessor {
                 task.getId(),
                 transcription.segments()
             );
-            lastProgress = advance(task.getId(), AnalysisStage.SUMMARIZING, 85);
+            lastProgress = advance(task, AnalysisStage.SUMMARIZING, 85);
             VideoSummaryResult summary = summaryProvider.summarize(summaryRequest);
 
-            lastProgress = advance(task.getId(), AnalysisStage.SAVING, 95);
+            lastProgress = advance(task, AnalysisStage.SAVING, 95);
             summaryService.replaceTaskResult(task, summaryRequest, summary);
 
             int completed = analysisTaskRepository.markSuccess(task.getId(), LocalDateTime.now());
             if (completed != 1) {
                 throw new IllegalStateException("Task could not transition to SUCCESS");
             }
-            publish(task.getId(), AnalysisStage.DONE, 100);
+            publish(task, AnalysisStage.DONE, 100);
             log.info("[taskId={}][videoId={}][stage=DONE] structured video summary completed",
                 task.getId(), task.getVideoId());
         } catch (VideoAgentException exception) {
@@ -170,9 +170,9 @@ public class AnalysisTaskProcessor {
         }
     }
 
-    private int advance(long taskId, AnalysisStage stage, int progress) {
+    private int advance(AnalysisTaskEntity task, AnalysisStage stage, int progress) {
         int updated = analysisTaskRepository.updateProcessingProgress(
-            taskId,
+            task.getId(),
             stage.name(),
             progress,
             LocalDateTime.now()
@@ -180,15 +180,15 @@ public class AnalysisTaskProcessor {
         if (updated != 1) {
             throw new IllegalStateException("Task progress update was rejected at stage " + stage.name());
         }
-        publish(taskId, stage, progress);
+        publish(task, stage, progress);
         return progress;
     }
 
-    private void publish(long taskId, AnalysisStage stage, int progress) {
+    private void publish(AnalysisTaskEntity task, AnalysisStage stage, int progress) {
         String status = stage == AnalysisStage.DONE
             ? AnalysisStatus.SUCCESS.name()
             : AnalysisStatus.PROCESSING.name();
-        progressStore.save(taskId, new AnalysisProgressSnapshot(
+        progressUpdateService.update(task.getId(), task.getVideoId(), new AnalysisProgressSnapshot(
             status,
             stage.name(),
             progress,
@@ -208,12 +208,12 @@ public class AnalysisTaskProcessor {
             safeMessage = safeMessage.substring(0, 1000);
         }
         analysisTaskRepository.markFailed(task.getId(), errorCode, safeMessage, LocalDateTime.now());
-        progressStore.save(task.getId(), new AnalysisProgressSnapshot(
+        progressUpdateService.update(task.getId(), task.getVideoId(), new AnalysisProgressSnapshot(
             AnalysisStatus.FAILED.name(),
             AnalysisStage.FAILED.name(),
             progress,
             safeMessage
-        ));
+        ), errorCode, safeMessage);
         log.error("[taskId={}][videoId={}][stage=FAILED] media transcription failed",
             task.getId(), task.getVideoId(), exception);
     }

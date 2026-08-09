@@ -16,9 +16,9 @@ import static org.mockito.Mockito.when;
 import com.videoagent.analysis.dto.AnalysisMessage;
 import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
-import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisProperties;
+import com.videoagent.analysis.service.AnalysisProgressUpdateService;
 import com.videoagent.asr.AsrProvider;
 import com.videoagent.asr.AudioSource;
 import com.videoagent.asr.TranscriptSegment;
@@ -51,7 +51,7 @@ import java.util.List;
 class AnalysisTaskProcessorTest {
 
     private final AnalysisTaskRepository repository = mock(AnalysisTaskRepository.class);
-    private final AnalysisProgressStore progressStore = mock(AnalysisProgressStore.class);
+    private final AnalysisProgressUpdateService progressUpdateService = mock(AnalysisProgressUpdateService.class);
     private final VideoRepository videoRepository = mock(VideoRepository.class);
     private final ObjectStorageService storageService = mock(ObjectStorageService.class);
     private final TemporaryMediaWorkspace workspaceFactory = mock(TemporaryMediaWorkspace.class);
@@ -74,7 +74,7 @@ class AnalysisTaskProcessorTest {
         );
         processor = new AnalysisTaskProcessor(
             repository,
-            progressStore,
+            progressUpdateService,
             properties,
             videoRepository,
             storageService,
@@ -96,7 +96,7 @@ class AnalysisTaskProcessorTest {
 
         verify(repository).selectById(101L);
         verifyNoMoreInteractions(repository);
-        verify(progressStore, never()).save(anyLong(), any());
+        verify(progressUpdateService, never()).update(anyLong(), anyLong(), any());
         verifyNoMoreInteractions(mediaProcessor, asrProvider, transcriptService, summaryProvider, summaryService);
     }
 
@@ -135,7 +135,7 @@ class AnalysisTaskProcessorTest {
 
         ArgumentCaptor<AnalysisProgressSnapshot> progressCaptor =
             ArgumentCaptor.forClass(AnalysisProgressSnapshot.class);
-        verify(progressStore, times(7)).save(eq(101L), progressCaptor.capture());
+        verify(progressUpdateService, times(7)).update(eq(101L), eq(7L), progressCaptor.capture());
         List<AnalysisProgressSnapshot> snapshots = progressCaptor.getAllValues();
         assertThat(snapshots).extracting(AnalysisProgressSnapshot::progress)
             .containsExactly(10, 35, 70, 75, 85, 95, 100);
@@ -182,11 +182,15 @@ class AnalysisTaskProcessorTest {
         verify(summaryService, never()).replaceTaskResult(any(), any(), any());
         verify(repository, never()).markSuccess(anyLong(), any());
 
-        ArgumentCaptor<AnalysisProgressSnapshot> snapshot =
+        ArgumentCaptor<AnalysisProgressSnapshot> failedSnapshot =
             ArgumentCaptor.forClass(AnalysisProgressSnapshot.class);
-        verify(progressStore, times(3)).save(eq(101L), snapshot.capture());
-        assertThat(snapshot.getValue().status()).isEqualTo("FAILED");
-        assertThat(snapshot.getValue().progress()).isEqualTo(35);
+        verify(progressUpdateService, times(2)).update(eq(101L), eq(7L), any());
+        verify(progressUpdateService).update(
+            eq(101L), eq(7L), failedSnapshot.capture(),
+            eq("FFMPEG_EXECUTION_FAILED"), eq("invalid media")
+        );
+        assertThat(failedSnapshot.getValue().status()).isEqualTo("FAILED");
+        assertThat(failedSnapshot.getValue().progress()).isEqualTo(35);
     }
 
     @Test
@@ -222,12 +226,16 @@ class AnalysisTaskProcessorTest {
         verify(summaryService, never()).replaceTaskResult(any(), any(), any());
         verify(repository, never()).markSuccess(anyLong(), any());
 
-        ArgumentCaptor<AnalysisProgressSnapshot> snapshot =
+        ArgumentCaptor<AnalysisProgressSnapshot> failedSnapshot =
             ArgumentCaptor.forClass(AnalysisProgressSnapshot.class);
-        verify(progressStore, times(6)).save(eq(101L), snapshot.capture());
-        assertThat(snapshot.getValue().status()).isEqualTo("FAILED");
-        assertThat(snapshot.getValue().stage()).isEqualTo("FAILED");
-        assertThat(snapshot.getValue().progress()).isEqualTo(85);
+        verify(progressUpdateService, times(5)).update(eq(101L), eq(7L), any());
+        verify(progressUpdateService).update(
+            eq(101L), eq(7L), failedSnapshot.capture(),
+            eq("LLM_SUMMARY_FAILED"), eq("provider unavailable")
+        );
+        assertThat(failedSnapshot.getValue().status()).isEqualTo("FAILED");
+        assertThat(failedSnapshot.getValue().stage()).isEqualTo("FAILED");
+        assertThat(failedSnapshot.getValue().progress()).isEqualTo(85);
     }
 
     @Test
@@ -241,7 +249,7 @@ class AnalysisTaskProcessorTest {
 
         verify(repository, never()).updateProcessingProgress(anyLong(), anyString(), anyInt(), any());
         verify(repository, never()).markSuccess(anyLong(), any());
-        verify(progressStore, never()).save(anyLong(), any());
+        verify(progressUpdateService, never()).update(anyLong(), anyLong(), any());
         verifyNoMoreInteractions(mediaProcessor, asrProvider, transcriptService, summaryProvider, summaryService);
     }
 

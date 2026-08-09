@@ -2,7 +2,7 @@
 
 VideoAgent 是一个面向面试学习的 AI 全栈项目。用户上传视频后，系统将异步完成音频提取、语音转文字和结构化总结，并保留可跳转的时间戳。
 
-当前进度：**Milestone 5 — LLM Structured Video Summary（已完成并验收）**。
+当前进度：**Milestone 6 — SSE Real-time Analysis Progress（已完成并验收）**。
 
 ## 技术栈
 
@@ -11,7 +11,8 @@ VideoAgent 是一个面向面试学习的 AI 全栈项目。用户上传视频�
 - 基础设施：MySQL 8、Redis、MinIO、Apache RocketMQ、Docker Compose
 - 媒体与转录：FFmpeg、`MediaProcessor`、`AsrProvider`、确定性 `MockAsrProvider`
 - 结构化总结：LangChain4j、`VideoSummaryProvider`、确定性 Mock、可配置 OpenAI-compatible Provider
-- 后续阶段：SSE、Video RAG
+- 实时进度：Spring MVC `SseEmitter`、Browser `EventSource`、有限 GET fallback
+- 后续阶段：可靠性收口、Video RAG
 
 ## 本地启动
 
@@ -67,6 +68,7 @@ GET  /api/videos
 GET  /api/videos/{videoId}
 POST /api/videos/{videoId}/analysis
 GET  /api/analysis/{taskId}
+GET  /api/analysis/{taskId}/events       text/event-stream
 GET  /api/videos/{videoId}/transcript
 GET  /api/videos/{videoId}/summary
 GET  /api/videos/{videoId}/chapters
@@ -87,7 +89,7 @@ npm run dev
 
 访问 `http://localhost:5173`。Vite 会把 `/api` 请求代理到后端 `8080` 端口。
 
-前端提供视频列表、普通 multipart 上传和元数据详情页面。详情页可以发起 M5 分析，用普通 HTTP 轮询展示排队、提取音频、转录、总结、保存、完成或失败状态，并展示 Overview、按时间排序的 Chapters、Key Points 与 transcript segments。当前尚无视频播放器，因此时间戳仅展示、不提供跳转。单文件上限默认是 500 MB，可通过 `VIDEO_MAX_FILE_SIZE` 与 `VIDEO_MAX_REQUEST_SIZE` 调整。
+前端提供视频列表、普通 multipart 上传和元数据详情页面。详情页发起分析后优先使用 `EventSource` 接收排队、提取音频、转录、总结、保存、完成或失败事件；SSE 连接失败时退化为每秒一次、最多 180 次的 GET 查询。终态会关闭连接并自动刷新 Overview、Chapters、Key Points 与 transcript segments；页面刷新时可恢复仍在运行的 taskId。当前尚无视频播放器，因此时间戳仅展示、不提供跳转。单文件上限默认是 500 MB，可通过 `VIDEO_MAX_FILE_SIZE` 与 `VIDEO_MAX_REQUEST_SIZE` 调整。
 
 ## 构建与测试
 
@@ -121,9 +123,12 @@ mvn "-Dtest=MediaTranscriptionInfrastructureIntegrationTest" test
 
 $env:VIDEOAGENT_M5_INFRA_TEST = "true"
 mvn "-Dtest=StructuredSummaryInfrastructureIntegrationTest" test
+
+$env:VIDEOAGENT_M6_INFRA_TEST = "true"
+mvn "-Dtest=AnalysisSseInfrastructureIntegrationTest" test
 ```
 
-这些测试默认跳过，避免普通单元测试强依赖本机 Docker 或 FFmpeg。M2 基础设施测试检查 MinIO/MySQL 上传链路；M3 基础设施测试回归异步框架；FFmpeg 组件测试覆盖成功、非零退出和超时；M4 基础设施测试覆盖媒体转录链路；M5 基础设施测试覆盖真实上传、RocketMQ、FFmpeg、Mock ASR、Mock Summary、三表入库、结果 API、历史版本、重复消费、Redis 丢失回退和临时文件清理。测试结束会清理自己的临时数据。
+这些测试默认跳过，避免普通单元测试强依赖本机 Docker 或 FFmpeg。M2 基础设施测试检查 MinIO/MySQL 上传链路；M3 基础设施测试回归异步框架；FFmpeg 组件测试覆盖成功、非零退出和超时；M4 基础设施测试覆盖媒体转录链路；M5 基础设施测试覆盖结构化总结；M6 基础设施测试实际捕获完整 SSE 阶段序列，验证终态关闭、四类结果 API 以及 Redis 丢失后的 MySQL 初始状态回退。测试结束会清理自己的临时数据。
 
 ## 当前目录结构
 
@@ -132,6 +137,7 @@ backend/             Spring Boot API
   src/main/java/com/videoagent/video/    视频上传、列表与详情
   src/main/java/com/videoagent/storage/  MinIO 对象存储适配
   src/main/java/com/videoagent/analysis/ 异步任务、MQ 与实时进度
+    controller/event/service              SSE endpoint、订阅生命周期与广播
   src/main/java/com/videoagent/media/    FFmpeg 媒体处理与临时目录
   src/main/java/com/videoagent/asr/      ASR Provider 与 Mock 实现
   src/main/java/com/videoagent/transcript/ 时间戳字幕持久化与 API
@@ -144,7 +150,7 @@ IMPLEMENTATION_PLAN.md
 
 ## 环境变量
 
-完整清单见 `.env.example`。后端支持通过环境变量覆盖 MySQL、Redis、MinIO、RocketMQ、FFmpeg、分析版本以及 LLM Provider 配置。Mock ASR 与 Mock Summary 均不需要第三方 API Key；真实 LLM Key 只从环境变量读取，不写入配置文件或日志。
+完整清单见 `.env.example`。后端支持通过环境变量覆盖 MySQL、Redis、MinIO、RocketMQ、FFmpeg、分析版本、`VIDEO_ANALYSIS_SSE_TIMEOUT` 以及 LLM Provider 配置。Mock ASR 与 Mock Summary 均不需要第三方 API Key；真实 LLM Key 只从环境变量读取，不写入配置文件或日志。
 
 ## Architecture Decisions
 
@@ -172,13 +178,17 @@ MySQL 保存视频和分析任务等持久业务事实；Redis 只保存带 24 �
 
 业务 Consumer 只依赖 `VideoSummaryProvider`，不直接调用厂商 SDK。Mock Provider 返回确定性结构，保证无 Key 的本地与 CI 链路；真实 Provider 的 LangChain4j 依赖集中在配置与适配器中，使用严格 JSON Schema Structured Output。所有结果在入库前再次校验必填文本、数量、长度与 transcript 时间边界，并统一按时间排序；非法结构使任务进入 `FAILED`，不会产生部分可见结果。
 
+### SSE、Redis 与 MySQL 的职责
+
+进度更新先写入现有 Redis 快照，再向当前应用进程中的 `SseEmitter` 订阅者广播；MySQL 仍是最终事实源。订阅建立时通过查询服务读取初始状态，Redis 缺失时自动回退 MySQL，并在注册后再次读取以缩小竞态窗口。浏览器断开、发送异常、超时和任务终态都会清理 emitter；这些观察通道异常不会传播到 Consumer。按 M6 范围不使用 Redis Pub/Sub，因此多实例部署需要粘性路由或后续独立设计跨实例广播。
+
 ## 已知限制
 
 - 当前只支持普通 multipart MP4 上传，不支持分片、断点续传或秒传。
 - 当前 ASR 是确定性 Mock，不是 Whisper 或第三方真实语音识别；字幕内容用于验证工程链路，不代表视频真实语义。
 - 当前真实 LLM 仅实现 OpenAI-compatible LangChain4j Provider；自动化与默认本地链路使用确定性 Mock，不依赖付费 API。
 - 当前不包含 RAG、Embedding、Agent/Tool Calling、OCR、VLM 或说话人分离。
-- 当前前端使用普通轮询，不包含 SSE 或 WebSocket。
+- 当前前端优先使用 SSE，连接失败时有限退化为 GET；不包含 WebSocket、Redis Pub/Sub 或复杂自动重连框架。
 - 同一视频、分析类型和模型版本只保留一个任务；当前阶段不提供失败任务的手工重试接口。
 - 已有 M3/M4 历史任务不变；M5 使用新的业务键 `STRUCTURED_SUMMARY / m5-langchain4j-structured-v1`。
 - 本地默认开发凭据只能用于本机环境。

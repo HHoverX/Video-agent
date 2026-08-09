@@ -2,16 +2,18 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
+import { useAnalysisEvents } from '@/composables/useAnalysisEvents'
 import { getAnalysisTask, startAnalysis } from '@/services/analysis'
 import { getVideoChapters, getVideoKeyPoints, getVideoSummary } from '@/services/summary'
 import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
-import type { AnalysisTask, AnalysisStatus } from '@/types/analysis'
+import type { AnalysisProgressEvent, AnalysisTask, AnalysisStatus } from '@/types/analysis'
 import type { VideoChapter, VideoKeyPoint, VideoSummary } from '@/types/summary'
 import type { TranscriptSegment } from '@/types/transcript'
 import type { Video } from '@/types/video'
 
-const POLL_INTERVAL_MILLIS = 500
+const POLL_INTERVAL_MILLIS = 1_000
+const MAX_FALLBACK_POLLS = 180
 
 const route = useRoute()
 const loading = ref(true)
@@ -19,6 +21,7 @@ const video = ref<Video | null>(null)
 const errorMessage = ref('')
 const startingAnalysis = ref(false)
 const pollingAnalysis = ref(false)
+const analysisTransport = ref<'idle' | 'sse' | 'polling'>('idle')
 const analysisTask = ref<AnalysisTask | null>(null)
 const analysisError = ref('')
 const transcript = ref<TranscriptSegment[]>([])
@@ -30,6 +33,19 @@ const keyPoints = ref<VideoKeyPoint[]>([])
 const summaryLoading = ref(false)
 const summaryError = ref('')
 let pollTimer: number | undefined
+let fallbackPollCount = 0
+
+const { connect: connectAnalysisEvents, close: closeAnalysisEvents } = useAnalysisEvents({
+  onOpen: () => {
+    analysisTransport.value = 'sse'
+  },
+  onProgress: (event) => {
+    void handleProgressEvent(event)
+  },
+  onError: (taskId) => {
+    if (analysisActive.value) startPollingFallback(taskId)
+  },
+})
 
 const analysisStatusLabel = computed(() => {
   const labels: Record<AnalysisStatus, string> = {
@@ -119,6 +135,26 @@ async function loadVideo() {
   }
 }
 
+function taskStorageKey() {
+  return `videoagent:analysis-task:${Number(route.params.id)}`
+}
+
+function rememberTask(taskId: number) {
+  try {
+    window.sessionStorage.setItem(taskStorageKey(), String(taskId))
+  } catch {
+    // Session storage is optional; the active SSE connection still works without refresh recovery.
+  }
+}
+
+function forgetTask() {
+  try {
+    window.sessionStorage.removeItem(taskStorageKey())
+  } catch {
+    // Ignore storage restrictions in privacy-focused browser contexts.
+  }
+}
+
 function clearPollTimer() {
   if (pollTimer !== undefined) {
     window.clearTimeout(pollTimer)
@@ -131,19 +167,59 @@ function schedulePoll(taskId: number) {
   pollTimer = window.setTimeout(() => pollAnalysis(taskId), POLL_INTERVAL_MILLIS)
 }
 
+function startPollingFallback(taskId: number) {
+  closeAnalysisEvents()
+  analysisTransport.value = 'polling'
+  fallbackPollCount = 0
+  schedulePoll(taskId)
+}
+
+async function handleTerminalTask(task: AnalysisTask) {
+  clearPollTimer()
+  closeAnalysisEvents()
+  analysisTransport.value = 'idle'
+  forgetTask()
+  if (task.status === 'SUCCESS') {
+    await Promise.all([loadTranscript(), loadSummary()])
+  }
+}
+
+async function handleProgressEvent(event: AnalysisProgressEvent) {
+  const previous = analysisTask.value
+  analysisTask.value = {
+    ...event,
+    createdAt: previous?.createdAt ?? new Date().toISOString(),
+    startedAt: previous?.startedAt ?? (event.status === 'PENDING' ? null : new Date().toISOString()),
+    finishedAt: event.status === 'SUCCESS' || event.status === 'FAILED'
+      ? previous?.finishedAt ?? new Date().toISOString()
+      : null,
+  }
+  analysisError.value = ''
+  if (event.status === 'SUCCESS' || event.status === 'FAILED') {
+    await handleTerminalTask(analysisTask.value)
+  }
+}
+
 async function pollAnalysis(taskId: number) {
   pollingAnalysis.value = true
+  fallbackPollCount += 1
   try {
     const current = await getAnalysisTask(taskId)
     analysisTask.value = current
     analysisError.value = ''
-    if (current.status === 'SUCCESS') {
-      await Promise.all([loadTranscript(), loadSummary()])
+    if (current.status === 'SUCCESS' || current.status === 'FAILED') {
+      await handleTerminalTask(current)
     } else if (analysisActive.value) {
-      schedulePoll(taskId)
+      if (fallbackPollCount < MAX_FALLBACK_POLLS) {
+        schedulePoll(taskId)
+      } else {
+        analysisTransport.value = 'idle'
+        analysisError.value = '实时连接不可用，轮询已达到上限。任务仍在后台运行，可刷新页面恢复状态。'
+      }
     }
   } catch (error) {
     analysisError.value = apiErrorMessage(error, '分析状态加载失败，请稍后重试。')
+    if (fallbackPollCount < MAX_FALLBACK_POLLS) schedulePoll(taskId)
   } finally {
     pollingAnalysis.value = false
   }
@@ -167,7 +243,9 @@ async function handleStartAnalysis() {
       startedAt: null,
       finishedAt: null,
     }
-    schedulePoll(started.taskId)
+    rememberTask(started.taskId)
+    analysisTransport.value = 'sse'
+    connectAnalysisEvents(started.taskId)
   } catch (error) {
     analysisError.value = apiErrorMessage(error, '无法发起分析，请稍后重试。')
   } finally {
@@ -175,8 +253,40 @@ async function handleStartAnalysis() {
   }
 }
 
-onMounted(loadVideo)
-onBeforeUnmount(clearPollTimer)
+async function recoverAnalysisTask() {
+  let storedTaskId = 0
+  try {
+    storedTaskId = Number(window.sessionStorage.getItem(taskStorageKey()))
+  } catch {
+    return
+  }
+  if (!Number.isSafeInteger(storedTaskId) || storedTaskId <= 0) return
+
+  try {
+    const current = await getAnalysisTask(storedTaskId)
+    analysisTask.value = current
+    if (current.status === 'PENDING' || current.status === 'PROCESSING') {
+      analysisTransport.value = 'sse'
+      connectAnalysisEvents(storedTaskId)
+    } else {
+      await handleTerminalTask(current)
+    }
+  } catch (error) {
+    forgetTask()
+    analysisError.value = apiErrorMessage(error, '无法恢复上次分析任务。')
+  }
+}
+
+async function loadPage() {
+  await loadVideo()
+  if (video.value) await recoverAnalysisTask()
+}
+
+onMounted(loadPage)
+onBeforeUnmount(() => {
+  clearPollTimer()
+  closeAnalysisEvents()
+})
 </script>
 
 <template>
@@ -222,9 +332,9 @@ onBeforeUnmount(clearPollTimer)
       <div class="analysis-panel content-panel">
         <div class="analysis-panel__heading">
           <div>
-            <p class="eyebrow">MILESTONE 5 · STRUCTURED VIDEO SUMMARY</p>
+            <p class="eyebrow">MILESTONE 6 · SSE REAL-TIME PROGRESS</p>
             <h2>AI 视频分析</h2>
-            <p>依次完成音频提取、时间戳转录和结构化总结，生成 Overview、Chapters 与 Key Points。</p>
+            <p>通过 SSE 实时展示音频提取、时间戳转录和结构化总结进度，GET 查询作为断线兜底。</p>
           </div>
           <el-button
             class="analysis-start-button"
@@ -256,14 +366,17 @@ onBeforeUnmount(clearPollTimer)
           <p v-if="analysisTask.status === 'FAILED'" class="analysis-failure">
             {{ analysisTask.errorMessage || '任务处理失败。' }}
           </p>
-          <p v-else-if="pollingAnalysis" class="analysis-polling">正在刷新实时进度…</p>
+          <p v-else-if="analysisTransport === 'sse'" class="analysis-polling">SSE 实时进度已连接</p>
+          <p v-else-if="analysisTransport === 'polling' || pollingAnalysis" class="analysis-polling">
+            SSE 不可用，正在使用 GET 查询兜底…
+          </p>
         </div>
 
         <div v-else class="analysis-empty">
           {{
             analysisComplete
-              ? '该视频已完成 M5 结构化总结，结果已从持久化数据加载。'
-              : '尚未创建分析任务。点击按钮后，接口会立即返回任务编号并开始轮询状态。'
+              ? '该视频已完成结构化分析，结果已从持久化数据加载。'
+              : '尚未创建分析任务。点击按钮后，接口会立即返回任务编号并建立 SSE 实时连接。'
           }}
         </div>
       </div>
@@ -323,7 +436,7 @@ onBeforeUnmount(clearPollTimer)
           </section>
         </div>
         <div v-else class="summary-empty">
-          尚未生成结构化总结。启动上方 M5 分析后，Overview、Chapters 与 Key Points 会显示在这里。
+          尚未生成结构化总结。启动上方分析后，Overview、Chapters 与 Key Points 会显示在这里。
         </div>
       </div>
 

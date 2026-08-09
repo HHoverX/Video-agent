@@ -7,7 +7,6 @@ import com.videoagent.analysis.entity.AnalysisStage;
 import com.videoagent.analysis.entity.AnalysisStatus;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.producer.AnalysisTaskProducer;
-import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 
@@ -18,21 +17,21 @@ public class AnalysisCommandService {
 
     private final AnalysisTaskPersistenceService persistenceService;
     private final AnalysisTaskProducer producer;
-    private final AnalysisProgressStore progressStore;
+    private final AnalysisProgressUpdateService progressUpdateService;
 
     public AnalysisCommandService(
         AnalysisTaskPersistenceService persistenceService,
         AnalysisTaskProducer producer,
-        AnalysisProgressStore progressStore
+        AnalysisProgressUpdateService progressUpdateService
     ) {
         this.persistenceService = persistenceService;
         this.producer = producer;
-        this.progressStore = progressStore;
+        this.progressUpdateService = progressUpdateService;
     }
 
     public StartAnalysisResponse start(long videoId) {
         AnalysisTaskEntity task = persistenceService.createPending(videoId);
-        progressStore.save(task.getId(), new AnalysisProgressSnapshot(
+        progressUpdateService.update(task.getId(), videoId, new AnalysisProgressSnapshot(
             AnalysisStatus.PENDING.name(),
             AnalysisStage.QUEUED.name(),
             0,
@@ -43,12 +42,12 @@ public class AnalysisCommandService {
             producer.send(new AnalysisMessage(task.getId(), videoId));
         } catch (RuntimeException exception) {
             persistenceService.markDispatchFailed(task.getId(), exception.getMessage());
-            progressStore.save(task.getId(), new AnalysisProgressSnapshot(
+            progressUpdateService.update(task.getId(), videoId, new AnalysisProgressSnapshot(
                 AnalysisStatus.FAILED.name(),
                 AnalysisStage.FAILED.name(),
                 0,
                 ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage()
-            ));
+            ), ErrorCode.ANALYSIS_DISPATCH_FAILED.name(), ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage());
             throw new VideoAgentException(
                 ErrorCode.ANALYSIS_DISPATCH_FAILED,
                 ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage(),

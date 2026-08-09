@@ -50,6 +50,8 @@ videoagent:
     analysis-type: ${VIDEO_ANALYSIS_TYPE:STRUCTURED_SUMMARY}
     model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m5-langchain4j-structured-v1}
     progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
+    sse:
+      timeout: ${VIDEO_ANALYSIS_SSE_TIMEOUT:30m}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:30s}

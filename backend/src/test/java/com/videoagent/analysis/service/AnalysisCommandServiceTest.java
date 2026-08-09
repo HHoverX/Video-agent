@@ -12,7 +12,6 @@ import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.producer.AnalysisTaskProducer;
-import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 
@@ -23,12 +22,12 @@ class AnalysisCommandServiceTest {
 
     private final AnalysisTaskPersistenceService persistenceService = mock(AnalysisTaskPersistenceService.class);
     private final AnalysisTaskProducer producer = mock(AnalysisTaskProducer.class);
-    private final AnalysisProgressStore progressStore = mock(AnalysisProgressStore.class);
+    private final AnalysisProgressUpdateService progressUpdateService = mock(AnalysisProgressUpdateService.class);
     private AnalysisCommandService service;
 
     @BeforeEach
     void setUp() {
-        service = new AnalysisCommandService(persistenceService, producer, progressStore);
+        service = new AnalysisCommandService(persistenceService, producer, progressUpdateService);
     }
 
     @Test
@@ -39,7 +38,7 @@ class AnalysisCommandServiceTest {
         StartAnalysisResponse response = service.start(7L);
 
         assertThat(response).isEqualTo(new StartAnalysisResponse(101L, 7L, "PENDING"));
-        verify(progressStore).save(101L, new AnalysisProgressSnapshot(
+        verify(progressUpdateService).update(101L, 7L, new AnalysisProgressSnapshot(
             "PENDING", "QUEUED", 0, "任务已进入队列"
         ));
         verify(producer).send(new AnalysisMessage(101L, 7L));
@@ -58,9 +57,9 @@ class AnalysisCommandServiceTest {
             );
 
         verify(persistenceService).markDispatchFailed(101L, "broker unavailable");
-        verify(progressStore).save(101L, new AnalysisProgressSnapshot(
+        verify(progressUpdateService).update(101L, 7L, new AnalysisProgressSnapshot(
             "FAILED", "FAILED", 0, "分析任务投递失败"
-        ));
+        ), "ANALYSIS_DISPATCH_FAILED", "分析任务投递失败");
     }
 
     private AnalysisTaskEntity pendingTask() {

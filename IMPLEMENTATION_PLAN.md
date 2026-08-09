@@ -245,6 +245,8 @@ MILESTONE_5_ACCEPTANCE_REPORT.md
 
 ### Milestone 6 — SSE 实时进度
 
+状态：**已完成并通过真实 MySQL、Redis、MinIO、RocketMQ、FFmpeg、SSE 与浏览器验收。**
+
 目标：
 
 - 实现 `GET /api/analysis/{taskId}/events`，从 Redis 进度向客户端发送 SSE。
@@ -255,13 +257,17 @@ MILESTONE_5_ACCEPTANCE_REPORT.md
 
 ```text
 backend/src/main/java/com/videoagent/analysis/controller/AnalysisEventController.java
-backend/src/main/java/com/videoagent/analysis/service/AnalysisEventService.java
-backend/src/main/java/com/videoagent/common/config/AsyncConfig.java
-backend/src/test/java/com/videoagent/analysis/AnalysisEventControllerTest.java
+backend/src/main/java/com/videoagent/analysis/dto/AnalysisProgressEventResponse.java
+backend/src/main/java/com/videoagent/analysis/event/AnalysisEventBroadcaster.java
+backend/src/main/java/com/videoagent/analysis/service/{AnalysisEventService,AnalysisEventProperties,AnalysisProgressUpdateService}.java
+backend/src/test/java/com/videoagent/analysis/{event,service,controller}/...
+backend/src/test/java/com/videoagent/analysis/AnalysisSseInfrastructureIntegrationTest.java
 frontend/src/composables/useAnalysisEvents.ts
-frontend/src/components/AnalysisProgress.vue
+frontend/src/services/analysis.ts
+frontend/src/types/analysis.ts
 frontend/src/views/VideoDetailView.vue
 README.md
+MILESTONE_6_ACCEPTANCE_REPORT.md
 ```
 
 验收标准：
