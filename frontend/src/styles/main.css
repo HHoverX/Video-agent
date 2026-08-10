@@ -724,6 +724,84 @@ p {
   padding: 28px;
 }
 
+.qa-panel {
+  margin-top: 26px;
+  padding: 28px;
+}
+
+.qa-panel__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.qa-mode-tag {
+  color: #8cf0d4;
+  font-size: 12px;
+  border: 1px solid rgba(140, 240, 212, 0.4);
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.qa-input-row {
+  display: flex;
+  gap: 10px;
+}
+
+.qa-hint {
+  color: #697184;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.qa-result {
+  margin-top: 18px;
+}
+
+.qa-answer {
+  color: #e6e9f0;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.qa-citations {
+  margin-top: 14px;
+}
+
+.qa-citations-title {
+  color: #8cf0d4;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.qa-citation-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.qa-citation-list li {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.qa-citation-time {
+  color: #8cf0d4;
+  font-size: 12px;
+}
+
+.qa-citation-list p {
+  color: #c3c9d6;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
 .summary-panel {
   margin-top: 26px;
   padding: 28px;

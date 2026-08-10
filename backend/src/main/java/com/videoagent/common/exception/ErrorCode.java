@@ -36,6 +36,9 @@ public enum ErrorCode {
     LLM_SUMMARY_INVALID(HttpStatus.UNPROCESSABLE_ENTITY, "LLM 总结结果不合法"),
     SUMMARY_PERSISTENCE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "视频总结保存失败"),
     STORAGE_ERROR(HttpStatus.BAD_GATEWAY, "对象存储操作失败"),
+    EMBEDDING_REQUEST_FAILED(HttpStatus.BAD_GATEWAY, "Embedding 服务请求失败"),
+    RAG_INDEX_NOT_READY(HttpStatus.CONFLICT, "该视频的问答索引尚未就绪，请先构建索引"),
+    RAG_INDEX_BUILD_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "问答索引构建失败"),
     INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "服务器内部错误");
 
     private final HttpStatus httpStatus;

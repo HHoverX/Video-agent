@@ -17,6 +17,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.rag.service.RagCleanupService;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.dto.VideoPageResponse;
@@ -42,6 +43,7 @@ class VideoServiceTest {
     private final ObjectStorageService storageService = mock(ObjectStorageService.class);
     private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private final VideoDeletionService deletionService = mock(VideoDeletionService.class);
+    private final RagCleanupService ragCleanupService = mock(RagCleanupService.class);
     private VideoService videoService;
 
     @BeforeEach
@@ -55,7 +57,8 @@ class VideoServiceTest {
             fileValidator,
             storageService,
             ownershipService,
-            deletionService
+            deletionService,
+            ragCleanupService
         );
         doAnswer(invocation -> {
             InputStream stream = invocation.getArgument(1);

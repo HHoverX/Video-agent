@@ -68,6 +68,22 @@ videoagent:
     max-attempts: ${OUTBOX_MAX_ATTEMPTS:15}
     batch-size: ${OUTBOX_BATCH_SIZE:20}
     publish-interval-ms: ${OUTBOX_PUBLISH_INTERVAL:5000}
+  rag:
+    direct-context-max-chars: ${RAG_DIRECT_CONTEXT_MAX_CHARS:8000}
+    chunk-max-chars: ${RAG_CHUNK_MAX_CHARS:2000}
+    chunk-overlap-segments: ${RAG_CHUNK_OVERLAP_SEGMENTS:1}
+    top-k: ${RAG_TOP_K:5}
+    qdrant:
+      host: ${QDRANT_HOST:localhost}
+      port: ${QDRANT_REST_PORT:6333}
+      collection: ${QDRANT_COLLECTION:video_transcript_chunks}
+    embedding:
+      provider: ${EMBEDDING_PROVIDER:mock}
+      api-key: ${EMBEDDING_API_KEY:}
+      base-url: ${EMBEDDING_BASE_URL:}
+      model: ${EMBEDDING_MODEL:}
+      dimension: ${EMBEDDING_DIMENSION:384}
+      timeout: ${EMBEDDING_TIMEOUT:30s}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:30s}

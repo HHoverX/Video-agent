@@ -10,6 +10,7 @@ import com.videoagent.video.dto.VideoResponse;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.rag.service.RagCleanupService;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,19 +41,22 @@ public class VideoService {
     private final ObjectStorageService storageService;
     private final VideoOwnershipService ownershipService;
     private final VideoDeletionService deletionService;
+    private final RagCleanupService ragCleanupService;
 
     public VideoService(
         VideoRepository videoRepository,
         VideoFileValidator fileValidator,
         ObjectStorageService storageService,
         VideoOwnershipService ownershipService,
-        VideoDeletionService deletionService
+        VideoDeletionService deletionService,
+        RagCleanupService ragCleanupService
     ) {
         this.videoRepository = videoRepository;
         this.fileValidator = fileValidator;
         this.storageService = storageService;
         this.ownershipService = ownershipService;
         this.deletionService = deletionService;
+        this.ragCleanupService = ragCleanupService;
     }
 
     @Transactional
@@ -151,6 +155,7 @@ public class VideoService {
                 exception
             );
         }
+        ragCleanupService.cleanupVideo(userId, videoId);
     }
 
     private String uploadToStorage(

@@ -4,6 +4,8 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { useAnalysisEvents } from '@/composables/useAnalysisEvents'
 import { getAnalysisTask, startAnalysis } from '@/services/analysis'
+import { askVideoQa, buildRagIndex, getRagStatus } from '@/services/rag'
+import type { QaResponse, RagIndexStatusResponse } from '@/services/rag'
 import { getVideoChapters, getVideoKeyPoints, getVideoSummary } from '@/services/summary'
 import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
@@ -32,6 +34,13 @@ const chapters = ref<VideoChapter[]>([])
 const keyPoints = ref<VideoKeyPoint[]>([])
 const summaryLoading = ref(false)
 const summaryError = ref('')
+const ragStatus = ref<RagIndexStatusResponse | null>(null)
+const ragModeLabel = ref('')
+const qaQuestion = ref('')
+const qaLoading = ref(false)
+const qaError = ref('')
+const qaResult = ref<QaResponse | null>(null)
+const buildingIndex = ref(false)
 let pollTimer: number | undefined
 let fallbackPollCount = 0
 
@@ -126,11 +135,54 @@ async function loadSummary() {
   }
 }
 
+async function loadRagStatus() {
+  const videoId = Number(route.params.id)
+  if (!Number.isSafeInteger(videoId) || videoId <= 0) return
+  try {
+    ragStatus.value = await getRagStatus(videoId)
+    ragModeLabel.value = ragStatus.value.mode === 'DIRECT_CONTEXT'
+      ? '直接上下文'
+      : '向量检索'
+  } catch {
+    // RAG status is auxiliary; a failure here should not block the page.
+  }
+}
+
+async function handleBuildIndex() {
+  const videoId = Number(route.params.id)
+  buildingIndex.value = true
+  qaError.value = ''
+  try {
+    ragStatus.value = await buildRagIndex(videoId)
+    ragModeLabel.value = ragStatus.value.mode === 'DIRECT_CONTEXT' ? '直接上下文' : '向量检索'
+  } catch (error) {
+    qaError.value = apiErrorMessage(error, '索引构建失败。')
+  } finally {
+    buildingIndex.value = false
+  }
+}
+
+async function handleAsk() {
+  const question = qaQuestion.value.trim()
+  if (!question || qaLoading.value) return
+  const videoId = Number(route.params.id)
+  qaLoading.value = true
+  qaError.value = ''
+  qaResult.value = null
+  try {
+    qaResult.value = await askVideoQa(videoId, question)
+  } catch (error) {
+    qaError.value = apiErrorMessage(error, '问答请求失败。')
+  } finally {
+    qaLoading.value = false
+  }
+}
+
 async function loadVideo() {
   loading.value = true
   try {
     video.value = await getVideo(Number(route.params.id))
-    await Promise.all([loadTranscript(), loadSummary()])
+    await Promise.all([loadTranscript(), loadSummary(), loadRagStatus()])
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '视频详情加载失败。')
   } finally {
@@ -471,6 +523,76 @@ onBeforeUnmount(() => {
         </ol>
         <div v-else class="transcript-empty">
           尚未生成字幕。完成上方转录任务后，带时间戳的片段会显示在这里。
+        </div>
+      </div>
+
+      <div class="qa-panel content-panel">
+        <div class="qa-panel__heading">
+          <div>
+            <p class="eyebrow">VIDEO QA</p>
+            <h2>视频问答</h2>
+            <p>基于视频字幕的接地问答，答案附时间戳引用。</p>
+          </div>
+          <span v-if="ragStatus" class="qa-mode-tag">{{ ragModeLabel }}</span>
+        </div>
+
+        <div v-if="qaError" class="notice notice--error qa-notice">{{ qaError }}</div>
+
+        <div v-if="ragStatus && ragStatus.mode === 'DIRECT_CONTEXT'" class="qa-body">
+          <div class="qa-input-row">
+            <el-input
+              v-model="qaQuestion"
+              placeholder="输入关于视频内容的问题…"
+              :disabled="qaLoading"
+              @keyup.enter="handleAsk"
+            />
+            <el-button type="primary" :loading="qaLoading" @click="handleAsk">提问</el-button>
+          </div>
+        </div>
+
+        <div v-else-if="ragStatus && ragStatus.status === 'NOT_BUILT'" class="qa-body">
+          <p class="qa-hint">该视频文本较长，需要建立问答索引后才能提问。</p>
+          <el-button :loading="buildingIndex" @click="handleBuildIndex">构建问答索引</el-button>
+        </div>
+
+        <div v-else-if="ragStatus && ragStatus.status === 'BUILDING'" class="qa-body">
+          <p class="qa-hint">索引构建中，请稍候…</p>
+        </div>
+
+        <div v-else-if="ragStatus && ragStatus.status === 'FAILED'" class="qa-body">
+          <p class="qa-hint">索引构建失败：{{ ragStatus.lastErrorMessage || '未知错误' }}</p>
+          <el-button :loading="buildingIndex" @click="handleBuildIndex">重新构建</el-button>
+        </div>
+
+        <div v-else-if="ragStatus && ragStatus.status === 'READY'" class="qa-body">
+          <div class="qa-input-row">
+            <el-input
+              v-model="qaQuestion"
+              placeholder="输入关于视频内容的问题…"
+              :disabled="qaLoading"
+              @keyup.enter="handleAsk"
+            />
+            <el-button type="primary" :loading="qaLoading" @click="handleAsk">提问</el-button>
+          </div>
+        </div>
+
+        <div v-else-if="!ragStatus" class="qa-body">
+          <p class="qa-hint">加载问答状态…</p>
+        </div>
+
+        <div v-if="qaResult" class="qa-result">
+          <div class="qa-answer">{{ qaResult.answer }}</div>
+          <div v-if="qaResult.citations.length" class="qa-citations">
+            <p class="qa-citations-title">引用片段</p>
+            <ul class="qa-citation-list">
+              <li v-for="(citation, idx) in qaResult.citations" :key="idx">
+                <span class="qa-citation-time">
+                  [{{ formatTimestamp(citation.startMs) }} – {{ formatTimestamp(citation.endMs) }}]
+                </span>
+                <p>{{ citation.text }}</p>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </template>
