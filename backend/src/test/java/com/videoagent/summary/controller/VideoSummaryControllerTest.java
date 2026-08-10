@@ -13,6 +13,7 @@ import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
 import com.videoagent.summary.service.VideoSummaryService;
+import com.videoagent.security.CurrentUserAccessor;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,11 +27,15 @@ import java.util.Optional;
 class VideoSummaryControllerTest {
 
     private final VideoSummaryService service = mock(VideoSummaryService.class);
+    private final CurrentUserAccessor currentUser = mock(CurrentUserAccessor.class);
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
-        mockMvc = MockMvcBuilders.standaloneSetup(new VideoSummaryController(service))
+        when(currentUser.userId()).thenReturn(5L);
+        mockMvc = MockMvcBuilders.standaloneSetup(
+                new VideoSummaryController(service, currentUser)
+            )
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     }
@@ -38,14 +43,14 @@ class VideoSummaryControllerTest {
     @Test
     void shouldReturnSummaryAndOrderedCollections() throws Exception {
         LocalDateTime now = LocalDateTime.of(2026, 8, 8, 12, 0);
-        when(service.getSummary(7L)).thenReturn(Optional.of(
+        when(service.getSummary(7L, 5L)).thenReturn(Optional.of(
             new VideoSummaryResponse(11L, "overview", now, now)
         ));
-        when(service.getChapters(7L)).thenReturn(List.of(
+        when(service.getChapters(7L, 5L)).thenReturn(List.of(
             new VideoChapterResponse(0, "first", "summary", 0, 2_000),
             new VideoChapterResponse(1, "second", "summary", 2_000, 4_000)
         ));
-        when(service.getKeyPoints(7L)).thenReturn(List.of(
+        when(service.getKeyPoints(7L, 5L)).thenReturn(List.of(
             new VideoKeyPointResponse(0, "point", 0, 2_000)
         ));
 
@@ -64,8 +69,8 @@ class VideoSummaryControllerTest {
 
     @Test
     void shouldReturnNoContentWhenSummaryIsNotReadyAnd404ForMissingVideo() throws Exception {
-        when(service.getSummary(7L)).thenReturn(Optional.empty());
-        when(service.getSummary(999L)).thenThrow(
+        when(service.getSummary(7L, 5L)).thenReturn(Optional.empty());
+        when(service.getSummary(999L, 5L)).thenThrow(
             new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND)
         );
 

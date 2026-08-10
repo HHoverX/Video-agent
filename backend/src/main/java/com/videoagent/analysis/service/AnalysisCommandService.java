@@ -29,8 +29,8 @@ public class AnalysisCommandService {
         this.progressUpdateService = progressUpdateService;
     }
 
-    public StartAnalysisResponse start(long videoId) {
-        AnalysisTaskEntity task = persistenceService.createPending(videoId);
+    public StartAnalysisResponse start(long videoId, long userId) {
+        AnalysisTaskEntity task = persistenceService.createPending(videoId, userId);
         progressUpdateService.update(task.getId(), videoId, new AnalysisProgressSnapshot(
             AnalysisStatus.PENDING.name(),
             AnalysisStage.QUEUED.name(),

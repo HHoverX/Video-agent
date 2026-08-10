@@ -10,6 +10,7 @@ import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.event.AnalysisEventBroadcaster;
 import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -26,17 +27,19 @@ class AnalysisEventServiceTest {
         AnalysisTaskRepository repository = mock(AnalysisTaskRepository.class);
         AnalysisProgressStore progressStore = mock(AnalysisProgressStore.class);
         AnalysisEventBroadcaster broadcaster = mock(AnalysisEventBroadcaster.class);
+        VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
         AnalysisTaskEntity task = processingTask();
         when(repository.selectById(101L)).thenReturn(task);
         when(progressStore.find(101L)).thenReturn(Optional.empty());
+        when(ownershipService.isOwned(7L, 5L)).thenReturn(true);
 
         AnalysisEventService service = new AnalysisEventService(
-            new AnalysisQueryService(repository, progressStore),
+            new AnalysisQueryService(repository, progressStore, ownershipService),
             broadcaster,
             new AnalysisEventProperties(Duration.ofSeconds(10))
         );
 
-        SseEmitter emitter = service.subscribe(101L);
+        SseEmitter emitter = service.subscribe(101L, 5L);
 
         assertThat(emitter.getTimeout()).isEqualTo(10_000L);
         verify(broadcaster).register(101L, emitter);

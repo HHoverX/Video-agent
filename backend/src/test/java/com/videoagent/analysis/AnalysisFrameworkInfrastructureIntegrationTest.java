@@ -9,6 +9,7 @@ import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.progress.RedisAnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.asr.AsrProvider;
 import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.asr.TranscriptionResult;
@@ -16,6 +17,8 @@ import com.videoagent.media.AudioExtractResult;
 import com.videoagent.media.MediaProcessor;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.transcript.service.TranscriptService;
+import com.videoagent.testsupport.TestAuthClient;
+import com.videoagent.testsupport.TestAuthClient.Session;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 
@@ -29,6 +32,8 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
@@ -53,7 +58,8 @@ import static org.mockito.Mockito.when;
         "videoagent.analysis.consumer-group=videoagent-m3-infra-${random.uuid}",
         "videoagent.analysis.analysis-type=FRAMEWORK",
         "videoagent.analysis.model-version=m3-simulation-v1",
-        "videoagent.media.temp-root=target/m3-integration-media"
+        "videoagent.media.temp-root=target/m3-integration-media",
+        "videoagent.security.jwt.secret=" + TestAuthClient.JWT_SECRET
     }
 )
 class AnalysisFrameworkInfrastructureIntegrationTest {
@@ -66,6 +72,9 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
     @Autowired
     private VideoRepository videoRepository;
+
+    @Autowired
+    private AppUserRepository userRepository;
 
     @Autowired
     private AnalysisTaskRepository taskRepository;
@@ -90,9 +99,15 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
     private Long videoId;
     private Long taskId;
+    private Session authSession;
 
     @BeforeEach
     void createVideo() throws Exception {
+        authSession = TestAuthClient.registerAndLogin(
+            restTemplate,
+            baseUrl(""),
+            "m3-infra-" + System.nanoTime()
+        );
         doAnswer(invocation -> {
             Path destination = invocation.getArgument(1);
             Files.write(destination, new byte[] {1, 2, 3});
@@ -118,6 +133,7 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
         LocalDateTime now = LocalDateTime.now();
         VideoEntity video = new VideoEntity();
+        video.setUserId(authSession.userId());
         video.setTitle("M3 integration video");
         video.setOriginalFilename("m3-integration.mp4");
         video.setObjectKey("tests/m3/" + UUID.randomUUID() + ".mp4");
@@ -147,14 +163,18 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
             }
             videoRepository.deleteById(videoId);
         }
+        if (authSession != null) {
+            userRepository.deleteById(authSession.userId());
+        }
     }
 
     @Test
     void shouldDispatchConsumeTrackProgressAndFallBackToMysql() throws Exception {
         long startedNanos = System.nanoTime();
-        ResponseEntity<StartAnalysisResponse> startResponse = restTemplate.postForEntity(
+        ResponseEntity<StartAnalysisResponse> startResponse = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/analysis"),
-            null,
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
             StartAnalysisResponse.class
         );
         Duration requestDuration = Duration.ofNanos(System.nanoTime() - startedNanos);
@@ -170,9 +190,10 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
         assertThat(pending.getStatus()).isIn("PENDING", "PROCESSING");
         assertThat(pending.getProgress()).isBetween(0, 90);
 
-        ResponseEntity<String> duplicateResponse = restTemplate.postForEntity(
+        ResponseEntity<String> duplicateResponse = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/analysis"),
-            null,
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
             String.class
         );
         assertThat(duplicateResponse.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
@@ -184,10 +205,12 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
         AnalysisTaskResponse current = null;
         long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         while (System.nanoTime() < deadline) {
-            current = restTemplate.getForObject(
+            current = restTemplate.exchange(
                 baseUrl("/api/analysis/" + taskId),
+                HttpMethod.GET,
+                new HttpEntity<>(authSession.headers()),
                 AnalysisTaskResponse.class
-            );
+            ).getBody();
             assertThat(current).isNotNull();
             observedProgress.add(current.progress());
             String redisSnapshot = redisTemplate.opsForValue().get(
@@ -231,10 +254,12 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
         assertThat(afterDuplicate.getStatus()).isEqualTo("SUCCESS");
 
         redisTemplate.delete(redisKey);
-        AnalysisTaskResponse fallback = restTemplate.getForObject(
+        AnalysisTaskResponse fallback = restTemplate.exchange(
             baseUrl("/api/analysis/" + taskId),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             AnalysisTaskResponse.class
-        );
+        ).getBody();
         assertThat(fallback).isNotNull();
         assertThat(fallback.status()).isEqualTo("SUCCESS");
         assertThat(fallback.progress()).isEqualTo(100);
@@ -243,9 +268,10 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
     @Test
     void shouldRejectAnalysisForMissingVideo() {
-        ResponseEntity<String> response = restTemplate.postForEntity(
+        ResponseEntity<String> response = restTemplate.exchange(
             baseUrl("/api/videos/999999999/analysis"),
-            null,
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
             String.class
         );
 

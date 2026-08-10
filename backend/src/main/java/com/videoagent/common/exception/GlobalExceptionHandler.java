@@ -1,13 +1,16 @@
 package com.videoagent.common.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.ConstraintViolationException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
@@ -68,6 +71,23 @@ public class GlobalExceptionHandler {
         );
     }
 
+    @ExceptionHandler({
+        MethodArgumentNotValidException.class,
+        HandlerMethodValidationException.class,
+        ConstraintViolationException.class
+    })
+    public ResponseEntity<ApiErrorResponse> handleValidation(
+        Exception exception,
+        HttpServletRequest request
+    ) {
+        return response(
+            ErrorCode.VALIDATION_ERROR.httpStatus(),
+            ErrorCode.VALIDATION_ERROR,
+            ErrorCode.VALIDATION_ERROR.defaultMessage(),
+            request
+        );
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleUnexpected(
         Exception exception,
@@ -88,12 +108,14 @@ public class GlobalExceptionHandler {
         String message,
         HttpServletRequest request
     ) {
-        return ResponseEntity.status(status).body(new ApiErrorResponse(
-            Instant.now(),
-            status.value(),
-            errorCode.name(),
-            message,
-            request.getRequestURI()
-        ));
+        return ResponseEntity.status(status)
+            .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+            .body(new ApiErrorResponse(
+                Instant.now(),
+                status.value(),
+                errorCode.name(),
+                message,
+                request.getRequestURI()
+            ));
     }
 }

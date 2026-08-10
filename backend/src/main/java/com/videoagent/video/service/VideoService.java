@@ -1,9 +1,11 @@
 package com.videoagent.video.service;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.storage.ObjectStorageService;
+import com.videoagent.video.dto.VideoPageResponse;
 import com.videoagent.video.dto.VideoResponse;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.entity.VideoEntity;
@@ -36,25 +38,32 @@ public class VideoService {
     private final VideoRepository videoRepository;
     private final VideoFileValidator fileValidator;
     private final ObjectStorageService storageService;
+    private final VideoOwnershipService ownershipService;
+    private final VideoDeletionService deletionService;
 
     public VideoService(
         VideoRepository videoRepository,
         VideoFileValidator fileValidator,
-        ObjectStorageService storageService
+        ObjectStorageService storageService,
+        VideoOwnershipService ownershipService,
+        VideoDeletionService deletionService
     ) {
         this.videoRepository = videoRepository;
         this.fileValidator = fileValidator;
         this.storageService = storageService;
+        this.ownershipService = ownershipService;
+        this.deletionService = deletionService;
     }
 
     @Transactional
-    public VideoUploadResponse upload(MultipartFile file, String requestedTitle) {
+    public VideoUploadResponse upload(long userId, MultipartFile file, String requestedTitle) {
         ValidatedVideoFile validatedFile = fileValidator.validate(file, requestedTitle);
         String objectKey = createObjectKey();
         String fileHash = uploadToStorage(file, validatedFile, objectKey);
 
         VideoEntity video = new VideoEntity();
         LocalDateTime now = LocalDateTime.now();
+        video.setUserId(userId);
         video.setTitle(validatedFile.title());
         video.setOriginalFilename(validatedFile.originalFilename());
         video.setObjectKey(objectKey);
@@ -84,24 +93,64 @@ public class VideoService {
     }
 
     @Transactional(readOnly = true)
-    public List<VideoResponse> listVideos() {
-        return videoRepository.selectList(
-                Wrappers.<VideoEntity>lambdaQuery()
-                    .orderByDesc(VideoEntity::getCreatedAt)
-                    .orderByDesc(VideoEntity::getId)
-            )
-            .stream()
-            .map(VideoResponse::from)
-            .toList();
+    public VideoPageResponse listVideos(long userId, int page, int size, String keyword) {
+        String normalizedKeyword = keyword == null ? "" : keyword.strip();
+        Page<VideoEntity> result = videoRepository.selectPage(
+            new Page<>(page, size),
+            Wrappers.<VideoEntity>lambdaQuery()
+                .eq(VideoEntity::getUserId, userId)
+                .like(!normalizedKeyword.isEmpty(), VideoEntity::getTitle, normalizedKeyword)
+                .orderByDesc(VideoEntity::getCreatedAt)
+                .orderByDesc(VideoEntity::getId)
+        );
+        return new VideoPageResponse(
+            result.getRecords().stream().map(VideoResponse::from).toList(),
+            result.getCurrent(),
+            result.getSize(),
+            result.getTotal(),
+            result.getPages()
+        );
     }
 
     @Transactional(readOnly = true)
-    public VideoResponse getVideo(long videoId) {
-        VideoEntity video = videoRepository.selectById(videoId);
-        if (video == null) {
+    public VideoResponse getVideo(long videoId, long userId) {
+        return VideoResponse.from(ownershipService.requireOwned(videoId, userId));
+    }
+
+    @Transactional
+    public VideoResponse updateTitle(long videoId, long userId, String requestedTitle) {
+        String title = requestedTitle == null ? "" : requestedTitle.strip();
+        if (title.isEmpty() || title.length() > 255) {
+            throw new VideoAgentException(ErrorCode.VALIDATION_ERROR, "视频标题长度必须为 1 至 255 个字符");
+        }
+        ownershipService.requireOwned(videoId, userId);
+        LocalDateTime now = LocalDateTime.now();
+        int updated = videoRepository.update(
+            null,
+            Wrappers.<VideoEntity>lambdaUpdate()
+                .eq(VideoEntity::getId, videoId)
+                .eq(VideoEntity::getUserId, userId)
+                .set(VideoEntity::getTitle, title)
+                .set(VideoEntity::getUpdatedAt, now)
+        );
+        if (updated != 1) {
             throw new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND);
         }
-        return VideoResponse.from(video);
+        return VideoResponse.from(ownershipService.requireOwned(videoId, userId));
+    }
+
+    public void deleteVideo(long videoId, long userId) {
+        String objectKey = deletionService.deleteDatabaseRecords(videoId, userId);
+        try {
+            storageService.removeObject(objectKey);
+        } catch (RuntimeException exception) {
+            log.warn(
+                "[videoId={}][stage=DELETE] database committed but object cleanup failed key={}",
+                videoId,
+                objectKey,
+                exception
+            );
+        }
     }
 
     private String uploadToStorage(

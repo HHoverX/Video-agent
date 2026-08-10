@@ -14,6 +14,7 @@ import com.videoagent.analysis.service.AnalysisQueryService;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.GlobalExceptionHandler;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.security.CurrentUserAccessor;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,13 +27,15 @@ class AnalysisControllerTest {
 
     private final AnalysisCommandService commandService = mock(AnalysisCommandService.class);
     private final AnalysisQueryService queryService = mock(AnalysisQueryService.class);
+    private final CurrentUserAccessor currentUser = mock(CurrentUserAccessor.class);
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
+        when(currentUser.userId()).thenReturn(5L);
         mockMvc = MockMvcBuilders.standaloneSetup(
-                new AnalysisCommandController(commandService),
-                new AnalysisQueryController(queryService)
+                new AnalysisCommandController(commandService, currentUser),
+                new AnalysisQueryController(queryService, currentUser)
             )
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
@@ -40,7 +43,7 @@ class AnalysisControllerTest {
 
     @Test
     void shouldAcceptAnalysisWithoutWaitingForConsumer() throws Exception {
-        when(commandService.start(7L)).thenReturn(new StartAnalysisResponse(101L, 7L, "PENDING"));
+        when(commandService.start(7L, 5L)).thenReturn(new StartAnalysisResponse(101L, 7L, "PENDING"));
 
         mockMvc.perform(post("/api/videos/7/analysis"))
             .andExpect(status().isAccepted())
@@ -52,7 +55,7 @@ class AnalysisControllerTest {
     @Test
     void shouldReturnTaskProgress() throws Exception {
         LocalDateTime now = LocalDateTime.of(2026, 8, 8, 20, 0);
-        when(queryService.getTask(101L)).thenReturn(new AnalysisTaskResponse(
+        when(queryService.getTask(101L, 5L)).thenReturn(new AnalysisTaskResponse(
             101L, 7L, "PROCESSING", "ANALYZING", 40, "正在模拟分析",
             null, null, now, now, null
         ));
@@ -66,9 +69,9 @@ class AnalysisControllerTest {
 
     @Test
     void shouldReturnRequiredBusinessErrors() throws Exception {
-        when(commandService.start(999L)).thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
-        when(commandService.start(7L)).thenThrow(new VideoAgentException(ErrorCode.ANALYSIS_ALREADY_RUNNING));
-        when(queryService.getTask(999L)).thenThrow(new VideoAgentException(ErrorCode.ANALYSIS_NOT_FOUND));
+        when(commandService.start(999L, 5L)).thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
+        when(commandService.start(7L, 5L)).thenThrow(new VideoAgentException(ErrorCode.ANALYSIS_ALREADY_RUNNING));
+        when(queryService.getTask(999L, 5L)).thenThrow(new VideoAgentException(ErrorCode.ANALYSIS_NOT_FOUND));
 
         mockMvc.perform(post("/api/videos/999/analysis"))
             .andExpect(status().isNotFound())

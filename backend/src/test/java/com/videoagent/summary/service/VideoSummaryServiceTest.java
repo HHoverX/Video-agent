@@ -1,6 +1,7 @@
 package com.videoagent.summary.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -8,6 +9,8 @@ import static org.mockito.Mockito.when;
 
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.asr.TranscriptSegment;
+import com.videoagent.common.exception.ErrorCode;
+import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.entity.VideoChapterEntity;
@@ -21,7 +24,7 @@ import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
 import com.videoagent.video.entity.VideoEntity;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,12 +37,12 @@ class VideoSummaryServiceTest {
     private final VideoSummaryRepository summaryRepository = mock(VideoSummaryRepository.class);
     private final VideoChapterRepository chapterRepository = mock(VideoChapterRepository.class);
     private final VideoKeyPointRepository keyPointRepository = mock(VideoKeyPointRepository.class);
-    private final VideoRepository videoRepository = mock(VideoRepository.class);
+    private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private final VideoSummaryService service = new VideoSummaryService(
         summaryRepository,
         chapterRepository,
         keyPointRepository,
-        videoRepository,
+        ownershipService,
         new SummaryResultValidator()
     );
 
@@ -48,7 +51,7 @@ class VideoSummaryServiceTest {
         when(summaryRepository.insert(any(VideoSummaryEntity.class))).thenReturn(1);
         when(chapterRepository.insert(any(VideoChapterEntity.class))).thenReturn(1);
         when(keyPointRepository.insert(any(VideoKeyPointEntity.class))).thenReturn(1);
-        when(videoRepository.selectById(7L)).thenReturn(new VideoEntity());
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
     }
 
     @Test
@@ -107,8 +110,8 @@ class VideoSummaryServiceTest {
             point(1, 2_000, "second point")
         ));
 
-        List<VideoChapterResponse> chapters = service.getChapters(7L);
-        List<VideoKeyPointResponse> points = service.getKeyPoints(7L);
+        List<VideoChapterResponse> chapters = service.getChapters(7L, 5L);
+        List<VideoKeyPointResponse> points = service.getKeyPoints(7L, 5L);
 
         assertThat(chapters).extracting(VideoChapterResponse::chapterIndex)
             .containsExactly(0, 1);
@@ -118,6 +121,17 @@ class VideoSummaryServiceTest {
             .containsExactly(0, 1);
         assertThat(points).extracting(VideoKeyPointResponse::startMs)
             .containsExactly(0L, 2_000L);
+    }
+
+    @Test
+    void shouldHideAnotherUsersSummary() {
+        when(ownershipService.requireOwned(7L, 6L))
+            .thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
+
+        assertThatThrownBy(() -> service.getSummary(7L, 6L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_NOT_FOUND)
+            );
     }
 
     private AnalysisTaskEntity task() {

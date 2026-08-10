@@ -2,6 +2,7 @@ package com.videoagent.transcript.controller;
 
 import com.videoagent.transcript.dto.TranscriptSegmentResponse;
 import com.videoagent.transcript.service.TranscriptService;
+import com.videoagent.security.CurrentUserAccessor;
 
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,13 +16,18 @@ import java.util.List;
 public class TranscriptController {
 
     private final TranscriptService transcriptService;
+    private final CurrentUserAccessor currentUser;
 
-    public TranscriptController(TranscriptService transcriptService) {
+    public TranscriptController(
+        TranscriptService transcriptService,
+        CurrentUserAccessor currentUser
+    ) {
         this.transcriptService = transcriptService;
+        this.currentUser = currentUser;
     }
 
     @GetMapping
     public List<TranscriptSegmentResponse> getTranscript(@PathVariable long videoId) {
-        return transcriptService.getVideoTranscript(videoId);
+        return transcriptService.getVideoTranscript(videoId, currentUser.userId());
     }
 }

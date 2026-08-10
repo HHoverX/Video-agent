@@ -44,6 +44,10 @@ rocketmq:
     send-message-timeout: ${ROCKETMQ_SEND_TIMEOUT:3000}
 
 videoagent:
+  security:
+    jwt:
+      secret: ${JWT_SECRET:}
+      expiration: ${JWT_EXPIRATION:2h}
   analysis:
     topic: ${VIDEO_ANALYZE_TOPIC:VIDEO_ANALYZE_TOPIC}
     consumer-group: ${VIDEO_ANALYZE_CONSUMER_GROUP:videoagent-analysis-consumer}

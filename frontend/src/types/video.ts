@@ -14,6 +14,14 @@ export interface VideoUploadResponse {
   videoId: number
 }
 
+export interface VideoPage {
+  items: Video[]
+  page: number
+  size: number
+  total: number
+  pages: number
+}
+
 export interface ApiErrorResponse {
   timestamp: string
   status: number

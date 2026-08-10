@@ -11,7 +11,7 @@ import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.video.entity.VideoEntity;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,7 +20,7 @@ import java.time.Duration;
 
 class AnalysisTaskPersistenceServiceTest {
 
-    private final VideoRepository videoRepository = mock(VideoRepository.class);
+    private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private final AnalysisTaskRepository taskRepository = mock(AnalysisTaskRepository.class);
     private AnalysisTaskPersistenceService service;
 
@@ -33,12 +33,12 @@ class AnalysisTaskPersistenceServiceTest {
             "m3-simulation-v1",
             Duration.ofHours(24)
         );
-        service = new AnalysisTaskPersistenceService(videoRepository, taskRepository, properties);
+        service = new AnalysisTaskPersistenceService(ownershipService, taskRepository, properties);
     }
 
     @Test
     void shouldCreatePendingTaskForExistingVideo() {
-        when(videoRepository.selectById(7L)).thenReturn(new VideoEntity());
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
         when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1")).thenReturn(null);
         when(taskRepository.insert(any(AnalysisTaskEntity.class))).thenAnswer(invocation -> {
             AnalysisTaskEntity task = invocation.getArgument(0);
@@ -46,7 +46,7 @@ class AnalysisTaskPersistenceServiceTest {
             return 1;
         });
 
-        AnalysisTaskEntity task = service.createPending(7L);
+        AnalysisTaskEntity task = service.createPending(7L, 5L);
 
         assertThat(task.getId()).isEqualTo(101L);
         assertThat(task.getStatus()).isEqualTo("PENDING");
@@ -57,9 +57,10 @@ class AnalysisTaskPersistenceServiceTest {
 
     @Test
     void shouldRejectUnknownVideo() {
-        when(videoRepository.selectById(999L)).thenReturn(null);
+        when(ownershipService.requireOwned(999L, 5L))
+            .thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
 
-        assertThatThrownBy(() -> service.createPending(999L))
+        assertThatThrownBy(() -> service.createPending(999L, 5L))
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_NOT_FOUND)
             );
@@ -67,13 +68,13 @@ class AnalysisTaskPersistenceServiceTest {
 
     @Test
     void shouldRejectExistingBusinessTask() {
-        when(videoRepository.selectById(7L)).thenReturn(new VideoEntity());
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
         AnalysisTaskEntity existing = new AnalysisTaskEntity();
         existing.setId(88L);
         existing.setStatus("PROCESSING");
         when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1")).thenReturn(existing);
 
-        assertThatThrownBy(() -> service.createPending(7L))
+        assertThatThrownBy(() -> service.createPending(7L, 5L))
             .isInstanceOfSatisfying(VideoAgentException.class, exception -> {
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_ALREADY_RUNNING);
                 assertThat(exception.getMessage()).contains("taskId=88", "status=PROCESSING");

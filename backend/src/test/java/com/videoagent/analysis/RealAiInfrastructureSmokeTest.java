@@ -6,12 +6,15 @@ import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.progress.RedisAnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.storage.StorageProperties;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
 import com.videoagent.transcript.dto.TranscriptSegmentResponse;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
+import com.videoagent.testsupport.TestAuthClient;
+import com.videoagent.testsupport.TestAuthClient.Session;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
@@ -64,6 +67,7 @@ class RealAiInfrastructureSmokeTest {
         registry.add("videoagent.analysis.consumer-group", () ->
             "videoagent-m6-5-real-ai-" + UUID.randomUUID()
         );
+        registry.add("videoagent.security.jwt.secret", () -> TestAuthClient.JWT_SECRET);
         registry.add("videoagent.analysis.analysis-type", () -> "STRUCTURED_SUMMARY");
         registry.add("videoagent.analysis.model-version", () -> "m6.5-real-ai-v1");
         registry.add("videoagent.media.temp-root", () -> MEDIA_ROOT.toString());
@@ -106,6 +110,9 @@ class RealAiInfrastructureSmokeTest {
     private VideoRepository videoRepository;
 
     @Autowired
+    private AppUserRepository userRepository;
+
+    @Autowired
     private AnalysisTaskRepository taskRepository;
 
     @Autowired
@@ -123,6 +130,7 @@ class RealAiInfrastructureSmokeTest {
     private final List<Long> videoIds = new ArrayList<>();
     private final List<Long> taskIds = new ArrayList<>();
     private final List<String> objectKeys = new ArrayList<>();
+    private Session authSession;
 
     static boolean realAiEnvironmentReady() {
         if (!"true".equalsIgnoreCase(System.getenv("VIDEOAGENT_REAL_AI_TEST"))) {
@@ -155,6 +163,10 @@ class RealAiInfrastructureSmokeTest {
         for (Long videoId : videoIds.reversed()) {
             videoRepository.deleteById(videoId);
         }
+        if (authSession != null) {
+            userRepository.deleteById(authSession.userId());
+            authSession = null;
+        }
         taskIds.clear();
         objectKeys.clear();
         videoIds.clear();
@@ -174,14 +186,20 @@ class RealAiInfrastructureSmokeTest {
 
     @Test
     void shouldRunUploadedVideoThroughDashScopeAndDeepSeek() throws Exception {
+        authSession = TestAuthClient.registerAndLogin(
+            restTemplate,
+            baseUrl(""),
+            "real-ai-" + UUID.randomUUID().toString().substring(0, 12)
+        );
         Path videoPath = Path.of(System.getenv("VIDEOAGENT_REAL_AI_VIDEO"))
             .toAbsolutePath()
             .normalize();
         long videoId = uploadVideo(videoPath);
 
-        ResponseEntity<StartAnalysisResponse> started = restTemplate.postForEntity(
+        ResponseEntity<StartAnalysisResponse> started = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/analysis"),
-            null,
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
             StartAnalysisResponse.class
         );
         assertThat(started.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
@@ -202,8 +220,10 @@ class RealAiInfrastructureSmokeTest {
         assertThat(completed.progress()).isEqualTo(100);
 
         assertThat(transcriptRepository.findLatestSuccessfulByVideoId(videoId)).isNotEmpty();
-        ResponseEntity<TranscriptSegmentResponse[]> transcript = restTemplate.getForEntity(
+        ResponseEntity<TranscriptSegmentResponse[]> transcript = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/transcript"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             TranscriptSegmentResponse[].class
         );
         assertThat(transcript.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -218,16 +238,22 @@ class RealAiInfrastructureSmokeTest {
             normalizeSpeech(System.getenv("VIDEOAGENT_REAL_AI_EXPECTED_TEXT"))
         );
 
-        ResponseEntity<VideoSummaryResponse> summary = restTemplate.getForEntity(
+        ResponseEntity<VideoSummaryResponse> summary = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/summary"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoSummaryResponse.class
         );
-        ResponseEntity<VideoChapterResponse[]> chapters = restTemplate.getForEntity(
+        ResponseEntity<VideoChapterResponse[]> chapters = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/chapters"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoChapterResponse[].class
         );
-        ResponseEntity<VideoKeyPointResponse[]> keyPoints = restTemplate.getForEntity(
+        ResponseEntity<VideoKeyPointResponse[]> keyPoints = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/key-points"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoKeyPointResponse[].class
         );
         assertThat(summary.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -256,6 +282,7 @@ class RealAiInfrastructureSmokeTest {
         body.add("title", "M6.5 real AI smoke test");
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.setBearerAuth(authSession.token());
 
         ResponseEntity<VideoUploadResponse> response = restTemplate.exchange(
             baseUrl("/api/videos"),
@@ -277,10 +304,13 @@ class RealAiInfrastructureSmokeTest {
         AnalysisTaskResponse task = null;
         long deadline = System.nanoTime() + Duration.ofMinutes(3).toNanos();
         while (System.nanoTime() < deadline) {
-            task = restTemplate.getForObject(
+            ResponseEntity<AnalysisTaskResponse> response = restTemplate.exchange(
                 baseUrl("/api/analysis/" + taskId),
+                HttpMethod.GET,
+                new HttpEntity<>(authSession.headers()),
                 AnalysisTaskResponse.class
             );
+            task = response.getBody();
             if (task != null && ("SUCCESS".equals(task.status()) || "FAILED".equals(task.status()))) {
                 return task;
             }

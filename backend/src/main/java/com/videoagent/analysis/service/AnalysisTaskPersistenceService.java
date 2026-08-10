@@ -6,7 +6,7 @@ import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -17,25 +17,23 @@ import java.time.LocalDateTime;
 @Service
 public class AnalysisTaskPersistenceService {
 
-    private final VideoRepository videoRepository;
+    private final VideoOwnershipService ownershipService;
     private final AnalysisTaskRepository analysisTaskRepository;
     private final AnalysisProperties properties;
 
     public AnalysisTaskPersistenceService(
-        VideoRepository videoRepository,
+        VideoOwnershipService ownershipService,
         AnalysisTaskRepository analysisTaskRepository,
         AnalysisProperties properties
     ) {
-        this.videoRepository = videoRepository;
+        this.ownershipService = ownershipService;
         this.analysisTaskRepository = analysisTaskRepository;
         this.properties = properties;
     }
 
     @Transactional
-    public AnalysisTaskEntity createPending(long videoId) {
-        if (videoRepository.selectById(videoId) == null) {
-            throw new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND);
-        }
+    public AnalysisTaskEntity createPending(long videoId, long userId) {
+        ownershipService.requireOwned(videoId, userId);
 
         AnalysisTaskEntity existing = analysisTaskRepository.findByBusinessKey(
             videoId,

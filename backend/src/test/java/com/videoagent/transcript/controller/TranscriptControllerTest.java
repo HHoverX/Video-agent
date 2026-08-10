@@ -11,6 +11,7 @@ import com.videoagent.common.exception.GlobalExceptionHandler;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.transcript.dto.TranscriptSegmentResponse;
 import com.videoagent.transcript.service.TranscriptService;
+import com.videoagent.security.CurrentUserAccessor;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,18 +23,22 @@ import java.util.List;
 class TranscriptControllerTest {
 
     private final TranscriptService transcriptService = mock(TranscriptService.class);
+    private final CurrentUserAccessor currentUser = mock(CurrentUserAccessor.class);
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
-        mockMvc = MockMvcBuilders.standaloneSetup(new TranscriptController(transcriptService))
+        when(currentUser.userId()).thenReturn(5L);
+        mockMvc = MockMvcBuilders.standaloneSetup(
+                new TranscriptController(transcriptService, currentUser)
+            )
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     }
 
     @Test
     void shouldReturnOrderedTranscriptSegments() throws Exception {
-        when(transcriptService.getVideoTranscript(7L)).thenReturn(List.of(
+        when(transcriptService.getVideoTranscript(7L, 5L)).thenReturn(List.of(
             new TranscriptSegmentResponse(0, 2_000, "first"),
             new TranscriptSegmentResponse(2_000, 4_000, "second")
         ));
@@ -48,8 +53,8 @@ class TranscriptControllerTest {
 
     @Test
     void shouldReturnEmptyArrayBeforeTranscriptExistsAnd404ForMissingVideo() throws Exception {
-        when(transcriptService.getVideoTranscript(7L)).thenReturn(List.of());
-        when(transcriptService.getVideoTranscript(999L))
+        when(transcriptService.getVideoTranscript(7L, 5L)).thenReturn(List.of());
+        when(transcriptService.getVideoTranscript(999L, 5L))
             .thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
 
         mockMvc.perform(get("/api/videos/7/transcript"))

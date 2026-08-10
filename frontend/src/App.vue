@@ -1,18 +1,30 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from 'vue-router'
+import { RouterLink, RouterView, useRouter } from 'vue-router'
+
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const router = useRouter()
+
+async function logout() {
+  auth.clearSession()
+  await router.replace('/login')
+}
 </script>
 
 <template>
   <div class="app-shell">
     <header class="app-header">
-      <RouterLink class="brand" to="/" aria-label="VideoAgent 视频列表">
+      <RouterLink class="brand" to="/videos" aria-label="VideoAgent 视频列表">
         <span class="brand-mark">V</span>
         <span>VideoAgent</span>
       </RouterLink>
 
-      <nav class="app-nav" aria-label="主导航">
-        <RouterLink to="/">视频库</RouterLink>
+      <nav v-if="auth.isAuthenticated" class="app-nav" aria-label="主导航">
+        <span class="nav-user">{{ auth.user?.username }}</span>
+        <RouterLink to="/videos">视频库</RouterLink>
         <RouterLink class="nav-upload" to="/upload">上传视频</RouterLink>
+        <button class="nav-logout" type="button" @click="logout">退出登录</button>
       </nav>
     </header>
 
@@ -21,8 +33,8 @@ import { RouterLink, RouterView } from 'vue-router'
     </main>
 
     <footer class="app-footer">
-      <span>VideoAgent · Milestone 6</span>
-      <span>SSE · FFmpeg · Mock ASR · Structured Summary</span>
+      <span>VideoAgent · Milestone 6.6</span>
+      <span>JWT Authentication · Video Ownership · Authenticated SSE</span>
     </footer>
   </div>
 </template>

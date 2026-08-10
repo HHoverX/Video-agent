@@ -33,9 +33,9 @@ class AnalysisCommandServiceTest {
     @Test
     void shouldPersistBeforeDispatchAndReturnPendingTask() {
         AnalysisTaskEntity task = pendingTask();
-        when(persistenceService.createPending(7L)).thenReturn(task);
+        when(persistenceService.createPending(7L, 5L)).thenReturn(task);
 
-        StartAnalysisResponse response = service.start(7L);
+        StartAnalysisResponse response = service.start(7L, 5L);
 
         assertThat(response).isEqualTo(new StartAnalysisResponse(101L, 7L, "PENDING"));
         verify(progressUpdateService).update(101L, 7L, new AnalysisProgressSnapshot(
@@ -47,11 +47,11 @@ class AnalysisCommandServiceTest {
     @Test
     void shouldMarkTaskFailedWhenBrokerRejectsMessage() {
         AnalysisTaskEntity task = pendingTask();
-        when(persistenceService.createPending(7L)).thenReturn(task);
+        when(persistenceService.createPending(7L, 5L)).thenReturn(task);
         doThrow(new IllegalStateException("broker unavailable"))
             .when(producer).send(new AnalysisMessage(101L, 7L));
 
-        assertThatThrownBy(() -> service.start(7L))
+        assertThatThrownBy(() -> service.start(7L, 5L))
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_DISPATCH_FAILED)
             );

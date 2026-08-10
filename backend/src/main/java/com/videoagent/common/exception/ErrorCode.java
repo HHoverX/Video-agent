@@ -4,10 +4,16 @@ import org.springframework.http.HttpStatus;
 
 public enum ErrorCode {
     INVALID_REQUEST(HttpStatus.BAD_REQUEST, "请求参数不合法"),
+    VALIDATION_ERROR(HttpStatus.BAD_REQUEST, "请求参数校验失败"),
+    USERNAME_ALREADY_EXISTS(HttpStatus.CONFLICT, "用户名已存在"),
+    INVALID_CREDENTIALS(HttpStatus.UNAUTHORIZED, "用户名或密码错误"),
+    UNAUTHORIZED(HttpStatus.UNAUTHORIZED, "请先登录"),
+    RESOURCE_NOT_FOUND(HttpStatus.NOT_FOUND, "资源不存在"),
     VIDEO_NOT_FOUND(HttpStatus.NOT_FOUND, "视频不存在"),
     VIDEO_FORMAT_NOT_SUPPORTED(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "仅支持 MP4 视频"),
     VIDEO_FILE_TOO_LARGE(HttpStatus.PAYLOAD_TOO_LARGE, "视频文件超过大小限制"),
     VIDEO_UPLOAD_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "视频上传失败"),
+    VIDEO_ANALYSIS_IN_PROGRESS(HttpStatus.CONFLICT, "视频正在分析中，暂时无法删除"),
     ANALYSIS_ALREADY_RUNNING(HttpStatus.CONFLICT, "该视频当前分析版本已有任务"),
     ANALYSIS_NOT_FOUND(HttpStatus.NOT_FOUND, "分析任务不存在"),
     ANALYSIS_DISPATCH_FAILED(HttpStatus.SERVICE_UNAVAILABLE, "分析任务投递失败"),

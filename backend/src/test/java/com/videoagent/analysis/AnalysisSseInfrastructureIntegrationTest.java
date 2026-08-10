@@ -8,11 +8,14 @@ import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.progress.RedisAnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.storage.StorageProperties;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
 import com.videoagent.transcript.dto.TranscriptSegmentResponse;
+import com.videoagent.testsupport.TestAuthClient;
+import com.videoagent.testsupport.TestAuthClient.Session;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
@@ -79,6 +82,7 @@ class AnalysisSseInfrastructureIntegrationTest {
     @DynamicPropertySource
     static void mediaProperties(DynamicPropertyRegistry registry) {
         registry.add("videoagent.media.temp-root", () -> MEDIA_ROOT.toString());
+        registry.add("videoagent.security.jwt.secret", () -> TestAuthClient.JWT_SECRET);
         registry.add("videoagent.media.ffmpeg-path", () ->
             System.getenv().getOrDefault("FFMPEG_PATH", "ffmpeg")
         );
@@ -97,6 +101,9 @@ class AnalysisSseInfrastructureIntegrationTest {
     private VideoRepository videoRepository;
 
     @Autowired
+    private AppUserRepository userRepository;
+
+    @Autowired
     private AnalysisTaskRepository taskRepository;
 
     @Autowired
@@ -111,6 +118,7 @@ class AnalysisSseInfrastructureIntegrationTest {
     private final List<Long> videoIds = new ArrayList<>();
     private final List<Long> taskIds = new ArrayList<>();
     private final List<String> objectKeys = new ArrayList<>();
+    private Session authSession;
 
     @AfterEach
     void cleanDatabaseAndStorage() throws Exception {
@@ -126,6 +134,10 @@ class AnalysisSseInfrastructureIntegrationTest {
         }
         for (Long videoId : videoIds) {
             videoRepository.deleteById(videoId);
+        }
+        if (authSession != null) {
+            userRepository.deleteById(authSession.userId());
+            authSession = null;
         }
         taskIds.clear();
         objectKeys.clear();
@@ -147,9 +159,10 @@ class AnalysisSseInfrastructureIntegrationTest {
     @Test
     void shouldStreamRealPipelineAndFallBackToMysqlAfterRedisLoss() throws Exception {
         long videoId = uploadVideo(generateValidMp4());
-        ResponseEntity<StartAnalysisResponse> started = restTemplate.postForEntity(
+        ResponseEntity<StartAnalysisResponse> started = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/analysis"),
-            null,
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
             StartAnalysisResponse.class
         );
         assertThat(started.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
@@ -175,28 +188,38 @@ class AnalysisSseInfrastructureIntegrationTest {
         assertThat(capture.events().getLast().status()).isEqualTo("SUCCESS");
         assertThat(capture.events().getLast().progress()).isEqualTo(100);
 
-        AnalysisTaskResponse queried = restTemplate.getForObject(
+        AnalysisTaskResponse queried = restTemplate.exchange(
             baseUrl("/api/analysis/" + taskId),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             AnalysisTaskResponse.class
-        );
+        ).getBody();
         assertThat(queried).isNotNull();
         assertThat(queried.status()).isEqualTo("SUCCESS");
-        assertThat(restTemplate.getForObject(
+        assertThat(restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/transcript"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             TranscriptSegmentResponse[].class
-        )).isNotEmpty();
-        assertThat(restTemplate.getForObject(
+        ).getBody()).isNotEmpty();
+        assertThat(restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/summary"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoSummaryResponse.class
-        )).isNotNull();
-        assertThat(restTemplate.getForObject(
+        ).getBody()).isNotNull();
+        assertThat(restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/chapters"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoChapterResponse[].class
-        )).isNotEmpty();
-        assertThat(restTemplate.getForObject(
+        ).getBody()).isNotEmpty();
+        assertThat(restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/key-points"),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoKeyPointResponse[].class
-        )).isNotEmpty();
+        ).getBody()).isNotEmpty();
 
         redisTemplate.delete(RedisAnalysisProgressStore.key(taskId));
         SseCapture mysqlFallback = collectEvents(taskId);
@@ -210,6 +233,7 @@ class AnalysisSseInfrastructureIntegrationTest {
             .uri(URI.create(baseUrl("/api/analysis/" + taskId + "/events")))
             .timeout(Duration.ofSeconds(45))
             .header(HttpHeaders.ACCEPT, MediaType.TEXT_EVENT_STREAM_VALUE)
+            .header(HttpHeaders.AUTHORIZATION, "Bearer " + authSession.token())
             .GET()
             .build();
         HttpResponse<java.io.InputStream> response = HttpClient.newHttpClient().send(
@@ -239,6 +263,13 @@ class AnalysisSseInfrastructureIntegrationTest {
     }
 
     private long uploadVideo(byte[] bytes) {
+        if (authSession == null) {
+            authSession = TestAuthClient.registerAndLogin(
+                restTemplate,
+                baseUrl(""),
+                "m6-infra-" + System.nanoTime()
+            );
+        }
         HttpHeaders fileHeaders = new HttpHeaders();
         fileHeaders.setContentType(MediaType.valueOf("video/mp4"));
         ByteArrayResource file = new ByteArrayResource(bytes) {
@@ -252,6 +283,7 @@ class AnalysisSseInfrastructureIntegrationTest {
         body.add("title", "M6 SSE pipeline");
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.setBearerAuth(authSession.token());
 
         ResponseEntity<VideoUploadResponse> response = restTemplate.exchange(
             baseUrl("/api/videos"),

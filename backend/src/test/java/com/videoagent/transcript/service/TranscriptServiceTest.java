@@ -1,6 +1,7 @@
 package com.videoagent.transcript.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -10,11 +11,13 @@ import static org.mockito.Mockito.when;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.asr.TranscriptionResult;
+import com.videoagent.common.exception.ErrorCode;
+import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.transcript.dto.TranscriptSegmentResponse;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.video.entity.VideoEntity;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -25,8 +28,8 @@ class TranscriptServiceTest {
 
     private final VideoTranscriptSegmentRepository repository =
         mock(VideoTranscriptSegmentRepository.class);
-    private final VideoRepository videoRepository = mock(VideoRepository.class);
-    private final TranscriptService service = new TranscriptService(repository, videoRepository);
+    private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
+    private final TranscriptService service = new TranscriptService(repository, ownershipService);
 
     @Test
     void shouldPersistOneRowPerTimestampSegmentInOrder() {
@@ -59,19 +62,30 @@ class TranscriptServiceTest {
 
     @Test
     void shouldReturnRepositoryOrderAndEmptyListWhenTranscriptIsNotReady() {
-        when(videoRepository.selectById(7L)).thenReturn(new VideoEntity());
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
         when(repository.findLatestSuccessfulByVideoId(7L)).thenReturn(List.of(
             entity(2_000, 4_000, "second"),
             entity(4_000, 6_000, "third")
         ));
 
-        List<TranscriptSegmentResponse> response = service.getVideoTranscript(7L);
+        List<TranscriptSegmentResponse> response = service.getVideoTranscript(7L, 5L);
 
         assertThat(response).extracting(TranscriptSegmentResponse::startMs)
             .containsExactly(2_000L, 4_000L);
 
         when(repository.findLatestSuccessfulByVideoId(7L)).thenReturn(List.of());
-        assertThat(service.getVideoTranscript(7L)).isEmpty();
+        assertThat(service.getVideoTranscript(7L, 5L)).isEmpty();
+    }
+
+    @Test
+    void shouldHideAnotherUsersTranscript() {
+        when(ownershipService.requireOwned(7L, 6L))
+            .thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
+
+        assertThatThrownBy(() -> service.getVideoTranscript(7L, 6L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_NOT_FOUND)
+            );
     }
 
     private VideoTranscriptSegmentEntity entity(long startMs, long endMs, String text) {

@@ -9,6 +9,7 @@ import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,19 +19,22 @@ public class AnalysisQueryService {
 
     private final AnalysisTaskRepository analysisTaskRepository;
     private final AnalysisProgressStore progressStore;
+    private final VideoOwnershipService ownershipService;
 
     public AnalysisQueryService(
         AnalysisTaskRepository analysisTaskRepository,
-        AnalysisProgressStore progressStore
+        AnalysisProgressStore progressStore,
+        VideoOwnershipService ownershipService
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
         this.progressStore = progressStore;
+        this.ownershipService = ownershipService;
     }
 
     @Transactional(readOnly = true)
-    public AnalysisTaskResponse getTask(long taskId) {
+    public AnalysisTaskResponse getTask(long taskId, long userId) {
         AnalysisTaskEntity task = analysisTaskRepository.selectById(taskId);
-        if (task == null) {
+        if (task == null || !ownershipService.isOwned(task.getVideoId(), userId)) {
             throw new VideoAgentException(ErrorCode.ANALYSIS_NOT_FOUND);
         }
 

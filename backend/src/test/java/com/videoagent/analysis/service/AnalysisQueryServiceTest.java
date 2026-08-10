@@ -7,6 +7,9 @@ import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.common.exception.ErrorCode;
+import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,16 +19,19 @@ import java.util.Optional;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class AnalysisQueryServiceTest {
 
     private final AnalysisTaskRepository repository = mock(AnalysisTaskRepository.class);
     private final AnalysisProgressStore progressStore = mock(AnalysisProgressStore.class);
+    private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private AnalysisQueryService service;
 
     @BeforeEach
     void setUp() {
-        service = new AnalysisQueryService(repository, progressStore);
+        service = new AnalysisQueryService(repository, progressStore, ownershipService);
+        when(ownershipService.isOwned(7L, 5L)).thenReturn(true);
     }
 
     @Test
@@ -39,7 +45,7 @@ class AnalysisQueryServiceTest {
             new AnalysisProgressSnapshot("PROCESSING", "ANALYZING", 40, "正在模拟分析")
         ));
 
-        AnalysisTaskResponse response = service.getTask(101L);
+        AnalysisTaskResponse response = service.getTask(101L, 5L);
 
         assertThat(response.status()).isEqualTo("PROCESSING");
         assertThat(response.stage()).isEqualTo("ANALYZING");
@@ -53,7 +59,7 @@ class AnalysisQueryServiceTest {
         when(repository.selectById(101L)).thenReturn(task);
         when(progressStore.find(101L)).thenReturn(Optional.empty());
 
-        AnalysisTaskResponse response = service.getTask(101L);
+        AnalysisTaskResponse response = service.getTask(101L, 5L);
 
         assertThat(response.status()).isEqualTo("SUCCESS");
         assertThat(response.stage()).isEqualTo("DONE");
@@ -70,12 +76,23 @@ class AnalysisQueryServiceTest {
             new AnalysisProgressSnapshot("PROCESSING", "SAVING", 90, "正在保存结果")
         ));
 
-        AnalysisTaskResponse response = service.getTask(101L);
+        AnalysisTaskResponse response = service.getTask(101L, 5L);
 
         assertThat(response.status()).isEqualTo("SUCCESS");
         assertThat(response.stage()).isEqualTo("DONE");
         assertThat(response.progress()).isEqualTo(100);
         assertThat(response.message()).isEqualTo("分析完成");
+    }
+
+    @Test
+    void shouldHideAnotherUsersTask() {
+        when(repository.selectById(101L)).thenReturn(successfulTask());
+        when(ownershipService.isOwned(7L, 6L)).thenReturn(false);
+
+        assertThatThrownBy(() -> service.getTask(101L, 6L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_NOT_FOUND)
+            );
     }
 
     private AnalysisTaskEntity successfulTask() {

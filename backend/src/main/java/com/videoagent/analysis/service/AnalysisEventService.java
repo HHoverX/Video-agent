@@ -24,15 +24,15 @@ public class AnalysisEventService {
         this.properties = properties;
     }
 
-    public SseEmitter subscribe(long taskId) {
-        AnalysisTaskResponse beforeRegistration = queryService.getTask(taskId);
+    public SseEmitter subscribe(long taskId, long userId) {
+        AnalysisTaskResponse beforeRegistration = queryService.getTask(taskId, userId);
         AnalysisProgressEventResponse initialEvent = AnalysisProgressEventResponse.from(beforeRegistration);
         SseEmitter emitter = new SseEmitter(properties.timeout().toMillis());
         broadcaster.register(taskId, emitter);
         try {
             broadcaster.send(taskId, initialEvent);
             if (!terminal(beforeRegistration.status())) {
-                AnalysisTaskResponse afterRegistration = queryService.getTask(taskId);
+                AnalysisTaskResponse afterRegistration = queryService.getTask(taskId, userId);
                 AnalysisProgressEventResponse currentEvent = AnalysisProgressEventResponse.from(afterRegistration);
                 if (!currentEvent.equals(initialEvent)) {
                     broadcaster.send(taskId, currentEvent);

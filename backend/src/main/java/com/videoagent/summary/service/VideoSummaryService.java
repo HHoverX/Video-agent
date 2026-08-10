@@ -16,7 +16,7 @@ import com.videoagent.summary.provider.VideoSummaryResult;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,20 +31,20 @@ public class VideoSummaryService {
     private final VideoSummaryRepository summaryRepository;
     private final VideoChapterRepository chapterRepository;
     private final VideoKeyPointRepository keyPointRepository;
-    private final VideoRepository videoRepository;
+    private final VideoOwnershipService ownershipService;
     private final SummaryResultValidator validator;
 
     public VideoSummaryService(
         VideoSummaryRepository summaryRepository,
         VideoChapterRepository chapterRepository,
         VideoKeyPointRepository keyPointRepository,
-        VideoRepository videoRepository,
+        VideoOwnershipService ownershipService,
         SummaryResultValidator validator
     ) {
         this.summaryRepository = summaryRepository;
         this.chapterRepository = chapterRepository;
         this.keyPointRepository = keyPointRepository;
-        this.videoRepository = videoRepository;
+        this.ownershipService = ownershipService;
         this.validator = validator;
     }
 
@@ -83,23 +83,23 @@ public class VideoSummaryService {
     }
 
     @Transactional(readOnly = true)
-    public Optional<VideoSummaryResponse> getSummary(long videoId) {
-        requireVideo(videoId);
+    public Optional<VideoSummaryResponse> getSummary(long videoId, long userId) {
+        ownershipService.requireOwned(videoId, userId);
         return Optional.ofNullable(summaryRepository.findLatestSuccessfulByVideoId(videoId))
             .map(VideoSummaryResponse::from);
     }
 
     @Transactional(readOnly = true)
-    public List<VideoChapterResponse> getChapters(long videoId) {
-        requireVideo(videoId);
+    public List<VideoChapterResponse> getChapters(long videoId, long userId) {
+        ownershipService.requireOwned(videoId, userId);
         return chapterRepository.findLatestSuccessfulByVideoId(videoId).stream()
             .map(VideoChapterResponse::from)
             .toList();
     }
 
     @Transactional(readOnly = true)
-    public List<VideoKeyPointResponse> getKeyPoints(long videoId) {
-        requireVideo(videoId);
+    public List<VideoKeyPointResponse> getKeyPoints(long videoId, long userId) {
+        ownershipService.requireOwned(videoId, userId);
         return keyPointRepository.findLatestSuccessfulByVideoId(videoId).stream()
             .map(VideoKeyPointResponse::from)
             .toList();
@@ -126,12 +126,6 @@ public class VideoSummaryService {
         entity.setStartMs(point.startMs());
         entity.setEndMs(point.endMs());
         return entity;
-    }
-
-    private void requireVideo(long videoId) {
-        if (videoRepository.selectById(videoId) == null) {
-            throw new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND);
-        }
     }
 
     private void requireInsert(int inserted, String message) {

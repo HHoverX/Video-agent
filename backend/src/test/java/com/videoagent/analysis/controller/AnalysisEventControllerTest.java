@@ -10,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.videoagent.analysis.dto.AnalysisProgressEventResponse;
 import com.videoagent.analysis.service.AnalysisEventService;
+import com.videoagent.security.CurrentUserAccessor;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -23,6 +24,7 @@ class AnalysisEventControllerTest {
     @Test
     void shouldExposeProgressAsEventStream() throws Exception {
         AnalysisEventService eventService = mock(AnalysisEventService.class);
+        CurrentUserAccessor currentUser = mock(CurrentUserAccessor.class);
         SseEmitter emitter = new SseEmitter();
         emitter.send(SseEmitter.event()
             .name("progress")
@@ -30,9 +32,10 @@ class AnalysisEventControllerTest {
                 101L, 7L, "SUCCESS", "DONE", 100, "分析完成", null, null
             ), MediaType.APPLICATION_JSON));
         emitter.complete();
-        when(eventService.subscribe(101L)).thenReturn(emitter);
+        when(currentUser.userId()).thenReturn(5L);
+        when(eventService.subscribe(101L, 5L)).thenReturn(emitter);
         MockMvc mockMvc = MockMvcBuilders.standaloneSetup(
-            new AnalysisEventController(eventService)
+            new AnalysisEventController(eventService, currentUser)
         ).build();
 
         MvcResult pending = mockMvc.perform(get("/api/analysis/101/events"))

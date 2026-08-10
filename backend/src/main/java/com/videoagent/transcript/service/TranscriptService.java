@@ -8,7 +8,7 @@ import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.transcript.dto.TranscriptSegmentResponse;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.video.service.VideoOwnershipService;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,14 +20,14 @@ import java.util.List;
 public class TranscriptService {
 
     private final VideoTranscriptSegmentRepository segmentRepository;
-    private final VideoRepository videoRepository;
+    private final VideoOwnershipService ownershipService;
 
     public TranscriptService(
         VideoTranscriptSegmentRepository segmentRepository,
-        VideoRepository videoRepository
+        VideoOwnershipService ownershipService
     ) {
         this.segmentRepository = segmentRepository;
-        this.videoRepository = videoRepository;
+        this.ownershipService = ownershipService;
     }
 
     @Transactional
@@ -55,10 +55,8 @@ public class TranscriptService {
     }
 
     @Transactional(readOnly = true)
-    public List<TranscriptSegmentResponse> getVideoTranscript(long videoId) {
-        if (videoRepository.selectById(videoId) == null) {
-            throw new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND);
-        }
+    public List<TranscriptSegmentResponse> getVideoTranscript(long videoId, long userId) {
+        ownershipService.requireOwned(videoId, userId);
         return segmentRepository.findLatestSuccessfulByVideoId(videoId)
             .stream()
             .map(TranscriptSegmentResponse::from)

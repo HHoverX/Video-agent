@@ -1,10 +1,12 @@
 import axios from 'axios'
 
 import { api } from './api'
-import type { ApiErrorResponse, Video, VideoUploadResponse } from '@/types/video'
+import type { ApiErrorResponse, Video, VideoPage, VideoUploadResponse } from '@/types/video'
 
-export async function listVideos(): Promise<Video[]> {
-  const { data } = await api.get<Video[]>('/videos')
+export async function listVideos(page = 1, size = 10, keyword = ''): Promise<VideoPage> {
+  const { data } = await api.get<VideoPage>('/videos', {
+    params: { page, size, keyword: keyword.trim() || undefined },
+  })
   return data
 }
 
@@ -33,6 +35,15 @@ export async function uploadVideo(
     },
   })
   return data
+}
+
+export async function updateVideoTitle(videoId: number, title: string): Promise<Video> {
+  const { data } = await api.patch<Video>(`/videos/${videoId}`, { title: title.trim() })
+  return data
+}
+
+export async function deleteVideo(videoId: number): Promise<void> {
+  await api.delete(`/videos/${videoId}`)
 }
 
 export function apiErrorMessage(error: unknown, fallback: string): string {

@@ -3,6 +3,10 @@ package com.videoagent.video;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.videoagent.storage.StorageProperties;
+import com.videoagent.auth.repository.AppUserRepository;
+import com.videoagent.testsupport.TestAuthClient;
+import com.videoagent.testsupport.TestAuthClient.Session;
+import com.videoagent.video.dto.VideoPageResponse;
 import com.videoagent.video.dto.VideoResponse;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.entity.VideoEntity;
@@ -31,7 +35,10 @@ import org.springframework.util.MultiValueMap;
 import java.util.Arrays;
 
 @EnabledIfEnvironmentVariable(named = "VIDEOAGENT_M2_INFRA_TEST", matches = "true")
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = "videoagent.security.jwt.secret=" + TestAuthClient.JWT_SECRET
+)
 class VideoUploadInfrastructureIntegrationTest {
 
     private static final byte[] MP4_BYTES = {
@@ -49,6 +56,9 @@ class VideoUploadInfrastructureIntegrationTest {
     private VideoRepository videoRepository;
 
     @Autowired
+    private AppUserRepository userRepository;
+
+    @Autowired
     private MinioClient minioClient;
 
     @Autowired
@@ -56,6 +66,7 @@ class VideoUploadInfrastructureIntegrationTest {
 
     private Long createdVideoId;
     private String createdObjectKey;
+    private Session authSession;
 
     @AfterEach
     void cleanUp() throws Exception {
@@ -68,10 +79,18 @@ class VideoUploadInfrastructureIntegrationTest {
         if (createdVideoId != null) {
             videoRepository.deleteById(createdVideoId);
         }
+        if (authSession != null) {
+            userRepository.deleteById(authSession.userId());
+        }
     }
 
     @Test
     void shouldUploadToMinioPersistInMysqlAndServeQueries() throws Exception {
+        authSession = TestAuthClient.registerAndLogin(
+            restTemplate,
+            "http://127.0.0.1:" + port,
+            "m2-infra-" + System.nanoTime()
+        );
         HttpHeaders fileHeaders = new HttpHeaders();
         fileHeaders.setContentType(MediaType.valueOf("video/mp4"));
         ByteArrayResource fileResource = new ByteArrayResource(MP4_BYTES) {
@@ -87,6 +106,7 @@ class VideoUploadInfrastructureIntegrationTest {
 
         HttpHeaders requestHeaders = new HttpHeaders();
         requestHeaders.setContentType(MediaType.MULTIPART_FORM_DATA);
+        requestHeaders.setBearerAuth(authSession.token());
         ResponseEntity<VideoUploadResponse> uploadResponse = restTemplate.exchange(
             baseUrl("/api/videos"),
             HttpMethod.POST,
@@ -102,6 +122,7 @@ class VideoUploadInfrastructureIntegrationTest {
         assertThat(persisted).isNotNull();
         assertThat(persisted.getTitle()).isEqualTo("Infrastructure integration video");
         assertThat(persisted.getStatus()).isEqualTo("UPLOADED");
+        assertThat(persisted.getUserId()).isEqualTo(authSession.userId());
         assertThat(persisted.getFileHash()).hasSize(64);
         createdObjectKey = persisted.getObjectKey();
 
@@ -110,17 +131,21 @@ class VideoUploadInfrastructureIntegrationTest {
             .object(createdObjectKey)
             .build()).size()).isEqualTo(MP4_BYTES.length);
 
-        ResponseEntity<VideoResponse[]> listResponse = restTemplate.getForEntity(
+        ResponseEntity<VideoPageResponse> listResponse = restTemplate.exchange(
             baseUrl("/api/videos"),
-            VideoResponse[].class
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
+            VideoPageResponse.class
         );
         assertThat(listResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(listResponse.getBody()).isNotNull();
-        assertThat(Arrays.stream(listResponse.getBody()).map(VideoResponse::id))
+        assertThat(listResponse.getBody().items().stream().map(VideoResponse::id))
             .contains(createdVideoId);
 
-        ResponseEntity<VideoResponse> detailResponse = restTemplate.getForEntity(
+        ResponseEntity<VideoResponse> detailResponse = restTemplate.exchange(
             baseUrl("/api/videos/" + createdVideoId),
+            HttpMethod.GET,
+            new HttpEntity<>(authSession.headers()),
             VideoResponse.class
         );
         assertThat(detailResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
