@@ -67,7 +67,10 @@ M7 v2 keeps the single monolith (Spring Boot + MySQL + Redis + RocketMQ + MinIO 
   - `EXHAUSTED` after `OUTBOX_MAX_ATTEMPTS`.
   `findDuePending` only ever returns `status='PENDING' AND next_attempt_at <= now`, so dead records never reappear and cannot starve the batch.
 - **Code:** [OutboxPublisher.java](backend/src/main/java/com/videoagent/outbox/OutboxPublisher.java), [AnalysisOutboxEventRepository.java](backend/src/main/java/com/videoagent/outbox/repository/AnalysisOutboxEventRepository.java)
-- **Test evidence:** `OutboxPublisherTest.shouldCancelTerminalTaskPendingEventInsteadOfDroppingIt` and `shouldMarkInvalidUnreadablePayloadAndFailPendingDispatchTask` prove both paths leave PENDING. The due query is status-filtered by construction.
+- **Test evidence:** `OutboxPublisherTest.shouldCancelTerminalTaskPendingEventInsteadOfDroppingIt` and `shouldMarkInvalidUnreadablePayloadAndFailPendingDispatchTask` prove both paths leave PENDING. `OutboxStarvationTest` adds the batch-starvation proof:
+  - `shouldPublishFreshEventEvenWhenBatchIsFullOfDeadEvents` — a full batch (20) of terminal-task PENDING events is all CANCELLED in round 1; the single fresh due event is `producer.send()`-ed in the next round.
+  - `shouldClearInvalidEventsAndDeliverFreshOneAcrossRounds` — a batch mixing terminal (CANCELLED) and unreadable-payload (INVALID) events clears the batch; the fresh event is then delivered.
+  - `shouldDeliverFreshEventEvenWhenDeadEventsExhaustFirst` — a batch of broker-down events retries, then EXHAUSTS; the fresh event is delivered once the batch is free. All three assert zero events remain PENDING at the end.
 
 ### MEDIUM #6 — every FAILED path must send terminal SSE
 
@@ -97,7 +100,7 @@ M7 v2 keeps the single monolith (Spring Boot + MySQL + Redis + RocketMQ + MinIO 
 - **Root cause:** `markRetryWaiting()` committed, then `enqueueRetry()` ran in a second transaction; if the event insert failed, the task stayed `RETRY_WAITING` with no event.
 - **Fix:** `AnalysisRetryCoordinator.handleRetryableFailure` is `@Transactional`; the `markRetryWaitingForGeneration` UPDATE and the `outboxService.enqueueRetry` INSERT commit or roll back together. If the event insert fails, the state transition rolls back and the task stays `PROCESSING` for its current generation.
 - **Code:** [AnalysisRetryCoordinator.java](backend/src/main/java/com/videoagent/analysis/service/AnalysisRetryCoordinator.java), [OutboxService.java](backend/src/main/java/com/videoagent/outbox/OutboxService.java)
-- **Test evidence:** unit coverage in `AnalysisRetryCoordinatorTest` (retry-scheduled ⇒ event enqueued, never on failed transition). The same trigger-injection technique as CRITICAL #1 could be added, but the coordinator is already a single `@Transactional` method and the atomicity test for the initial path proves the mechanism works at the MySQL level.
+- **Test evidence (real MySQL):** `M7TransactionalAtomicityIntegrationTest.shouldRollBackRetryStateWhenRetryOutboxInsertFails` (gated `VIDEOAGENT_M7_INFRA_TEST=true`). A PROCESSING task (generation 2, `retry_count` 1) is inserted directly; the retry outbox INSERT is forced to fail inside `AnalysisRetryCoordinator.handleRetryableFailure`. The test asserts the whole transaction rolled back: the task is **still PROCESSING** at the original generation/stage with `retry_count` unchanged (not `RETRY_WAITING`), and **no retry outbox event row exists**. Unit coverage remains in `AnalysisRetryCoordinatorTest.shouldMoveToRetryWaitingAndEnqueuePerGenerationEvent`.
 
 ### MEDIUM #9 — outbox attempt_count must mean real send attempts
 
@@ -108,9 +111,12 @@ M7 v2 keeps the single monolith (Spring Boot + MySQL + Redis + RocketMQ + MinIO 
   - `reopenPublished` no longer touches `attempt_count`; only a real `producer.send` failure via `markRetry` increments it.
   - each analysis retry generation gets its own event key `retry:{taskId}:{generation}`, so one event's attempt budget is never polluted by a previous generation.
 - **Code:** [OutboxService.java](backend/src/main/java/com/videoagent/outbox/OutboxService.java), [AnalysisOutboxEventRepository.java](backend/src/main/java/com/videoagent/outbox/repository/AnalysisOutboxEventRepository.java)
-- **Test evidence:** `OutboxServiceTest.shouldUsePerGenerationRetryKeys` and `shouldCreateDistinctEventPerRetryGeneration` prove per-generation identity. `OutboxPublisherTest` exercises max-attempts exhaustion and, with `OutboxProperties` default 15, the publish-retry-count semantics.
-
----
+- **Test evidence:** `OutboxServiceTest.shouldUsePerGenerationRetryKeys` and `shouldCreateDistinctEventPerRetryGeneration` prove per-generation identity. `OutboxAttemptBudgetTest` adds the explicit boundary tests:
+  - `shouldStillSendAtLeastOnceWhenMaxAttemptsIsOne` — a fresh event with `OUTBOX_MAX_ATTEMPTS=1` and `attempt_count=0` is **not** exhausted before a real `producer.send`; it is published.
+  - `shouldExhaustOnlyAfterOneRealSendWhenMaxAttemptsIsOne` — with max=1, exactly one real `producer.send` happens, then the next round EXHAUSTS; no second send.
+  - `shouldGrantExactlyTwoRealSendsWhenMaxAttemptsIsTwo` — with max=2, exactly two real sends across two failed rounds, then EXHAUSTED on the third.
+  - `shouldNotInheritOldGenerationPublishBudget` — a fresh retry generation with `attempt_count=0` is still sendable even if the previous generation exhausted.
+  - `shouldStartEveryRetryGenerationWithZeroAttempts` — each `enqueueRetry` uses a distinct `retry:{taskId}:{generation}` key and starts from 0 attempts.
 
 ## Design notes
 
@@ -166,8 +172,8 @@ Redis remains a best-effort progress cache; it is not involved in claim, generat
 
 | Suite | Result |
 | --- | --- |
-| Backend default `mvn test` | **152 tests, 0 failures, 0 errors, 22 skipped** (skips are env-gated infra/FFmpeg/real-provider tests) |
-| M7 infra (`VIDEOAGENT_M7_INFRA_TEST=true`) | **8 tests, 0 failures** (7 reliability + 1 transactional-atomicity) against real MySQL/Redis/RocketMQ/MinIO/FFmpeg with Mock ASR/Summary |
+| Backend default `mvn test` | **161 tests, 0 failures, 0 errors, 23 skipped** (skips are env-gated infra/FFmpeg/real-provider tests) |
+| M7 infra (`VIDEOAGENT_M7_INFRA_TEST=true`) | **9 tests, 0 failures** (7 reliability + 2 transactional-atomicity, including the retry-state+retry-event rollback) against real MySQL/Redis/RocketMQ/MinIO/FFmpeg with Mock ASR/Summary |
 | M1–M6.6 infra regression | **9 tests, 0 failures** (health/M2/M3/M4/M5/M6/M6.6, Mock providers) |
 | Flyway V1→V7 | **clean migrate on MySQL 8.4** (verified on a fresh database) |
 | Frontend | `vue-tsc` + `tsc --noEmit` **PASS**; Vite build **PASS** |

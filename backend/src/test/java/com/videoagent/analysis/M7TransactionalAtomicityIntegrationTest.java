@@ -7,8 +7,10 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 
+import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisCommandService;
+import com.videoagent.analysis.service.AnalysisRetryCoordinator;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
 import com.videoagent.testsupport.TestAuthClient;
@@ -68,6 +70,9 @@ class M7TransactionalAtomicityIntegrationTest {
     private AnalysisCommandService commandService;
 
     @Autowired
+    private AnalysisRetryCoordinator retryCoordinator;
+
+    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     @MockitoBean
@@ -75,6 +80,7 @@ class M7TransactionalAtomicityIntegrationTest {
 
     private Session authSession;
     private Long videoId;
+    private Long insertedTaskId;
 
     @BeforeEach
     void setUp() {
@@ -101,6 +107,10 @@ class M7TransactionalAtomicityIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        if (insertedTaskId != null) {
+            taskRepository.deleteById(insertedTaskId);
+            insertedTaskId = null;
+        }
         if (videoId != null) {
             videoRepository.deleteById(videoId);
         }
@@ -128,6 +138,50 @@ class M7TransactionalAtomicityIntegrationTest {
             "SELECT COUNT(*) FROM analysis_outbox_event WHERE task_id IN (SELECT id FROM analysis_task WHERE video_id = ?)",
             Long.class,
             videoId
+        )).isZero();
+    }
+
+    @Test
+    void shouldRollBackRetryStateWhenRetryOutboxInsertFails() {
+        // MEDIUM #8: the RETRY_WAITING transition and the retry outbox INSERT
+        // must be one transaction. Insert a PROCESSING task directly, then run
+        // the retry coordinator with the outbox mapper forced to fail.
+        LocalDateTime now = LocalDateTime.now();
+        AnalysisTaskEntity task = new AnalysisTaskEntity();
+        task.setVideoId(videoId);
+        task.setAnalysisType("STRUCTURED_SUMMARY");
+        task.setModelVersion("m5-langchain4j-structured-v1");
+        task.setStatus("PROCESSING");
+        task.setStage("SUMMARIZING");
+        task.setProgress(85);
+        task.setRetryCount(1);
+        task.setProcessingGeneration(2);
+        task.setCreatedAt(now);
+        task.setUpdatedAt(now);
+        assertThat(taskRepository.insert(task)).isEqualTo(1);
+        Long taskId = task.getId();
+        insertedTaskId = taskId;
+
+        doThrow(new IllegalStateException("simulated retry outbox insert failure"))
+            .when(outboxEventRepository).insertPendingIfAbsent(anyString(), anyString(), anyLong(), anyLong(), anyString(), any(), any());
+
+        assertThatThrownBy(() -> retryCoordinator.handleRetryableFailure(
+            task, "SUMMARIZING", "LLM_SUMMARY_FAILED", "provider unavailable"
+        ))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("simulated retry outbox insert failure");
+
+        // The whole transaction must roll back: the task is still PROCESSING at
+        // the original generation (not RETRY_WAITING) and no retry event exists.
+        AnalysisTaskEntity after = taskRepository.selectById(taskId);
+        assertThat(after.getStatus()).isEqualTo("PROCESSING");
+        assertThat(after.getStage()).isEqualTo("SUMMARIZING");
+        assertThat(after.getProcessingGeneration()).isEqualTo(2);
+        assertThat(after.getRetryCount()).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM analysis_outbox_event WHERE task_id = ?",
+            Long.class,
+            taskId
         )).isZero();
     }
 
