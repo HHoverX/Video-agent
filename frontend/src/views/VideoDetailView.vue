@@ -51,6 +51,7 @@ const analysisStatusLabel = computed(() => {
   const labels: Record<AnalysisStatus, string> = {
     PENDING: '排队中',
     PROCESSING: '处理中',
+    RETRY_WAITING: '重试中',
     SUCCESS: '已完成',
     FAILED: '失败',
   }
@@ -64,7 +65,9 @@ const progressStatus = computed(() => {
 })
 
 const analysisActive = computed(
-  () => analysisTask.value?.status === 'PENDING' || analysisTask.value?.status === 'PROCESSING',
+  () => analysisTask.value?.status === 'PENDING'
+    || analysisTask.value?.status === 'PROCESSING'
+    || analysisTask.value?.status === 'RETRY_WAITING',
 )
 const analysisComplete = computed(
   () => analysisTask.value?.status === 'SUCCESS' || summary.value !== null,
@@ -265,7 +268,7 @@ async function recoverAnalysisTask() {
   try {
     const current = await getAnalysisTask(storedTaskId)
     analysisTask.value = current
-    if (current.status === 'PENDING' || current.status === 'PROCESSING') {
+    if (current.status === 'PENDING' || current.status === 'PROCESSING' || current.status === 'RETRY_WAITING') {
       analysisTransport.value = 'sse'
       connectAnalysisEvents(storedTaskId)
     } else {
@@ -365,6 +368,9 @@ onBeforeUnmount(() => {
           />
           <p v-if="analysisTask.status === 'FAILED'" class="analysis-failure">
             {{ analysisTask.errorMessage || '任务处理失败。' }}
+          </p>
+          <p v-else-if="analysisTask.status === 'RETRY_WAITING'" class="analysis-polling">
+            分析暂时失败，正在重试…
           </p>
           <p v-else-if="analysisTransport === 'sse'" class="analysis-polling">SSE 实时进度已连接</p>
           <p v-else-if="analysisTransport === 'polling' || pollingAnalysis" class="analysis-polling">

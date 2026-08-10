@@ -151,7 +151,8 @@ class GroqAsrProviderTest {
 
         assertThatThrownBy(() -> provider(Duration.ofSeconds(3)).transcribe(new AudioSource(audio)))
             .isInstanceOfSatisfying(VideoAgentException.class, exception -> {
-                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_REQUEST_FAILED);
+                // 401 is a deterministic provider rejection, not retryable.
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_PROVIDER_REJECTED);
                 assertThat(exception.getMessage()).doesNotContain("provider-confidential-diagnostic");
             });
     }

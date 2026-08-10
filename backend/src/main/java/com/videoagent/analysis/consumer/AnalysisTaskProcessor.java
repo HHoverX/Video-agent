@@ -8,8 +8,12 @@ import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisProperties;
 import com.videoagent.analysis.service.AnalysisProgressUpdateService;
+import com.videoagent.analysis.service.AnalysisRetryCoordinator;
+import com.videoagent.analysis.service.FailureClass;
+import com.videoagent.analysis.service.TerminalNotifier;
 import com.videoagent.asr.AsrProvider;
 import com.videoagent.asr.AudioSource;
+import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.asr.TranscriptionResult;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.media.AudioExtractResult;
@@ -30,6 +34,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Service
 public class AnalysisTaskProcessor {
@@ -47,6 +52,8 @@ public class AnalysisTaskProcessor {
     private final TranscriptService transcriptService;
     private final VideoSummaryProvider summaryProvider;
     private final VideoSummaryService summaryService;
+    private final AnalysisRetryCoordinator retryCoordinator;
+    private final TerminalNotifier terminalNotifier;
 
     public AnalysisTaskProcessor(
         AnalysisTaskRepository analysisTaskRepository,
@@ -59,7 +66,9 @@ public class AnalysisTaskProcessor {
         AsrProvider asrProvider,
         TranscriptService transcriptService,
         VideoSummaryProvider summaryProvider,
-        VideoSummaryService summaryService
+        VideoSummaryService summaryService,
+        AnalysisRetryCoordinator retryCoordinator,
+        TerminalNotifier terminalNotifier
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
         this.progressUpdateService = progressUpdateService;
@@ -72,6 +81,8 @@ public class AnalysisTaskProcessor {
         this.transcriptService = transcriptService;
         this.summaryProvider = summaryProvider;
         this.summaryService = summaryService;
+        this.retryCoordinator = retryCoordinator;
+        this.terminalNotifier = terminalNotifier;
     }
 
     public void process(AnalysisMessage message) {
@@ -96,7 +107,13 @@ public class AnalysisTaskProcessor {
                 task.getId(), task.getVideoId());
             return;
         }
-        if (!AnalysisStatus.PENDING.name().equals(task.getStatus())) {
+        if (AnalysisStatus.FAILED.name().equals(task.getStatus())) {
+            log.info("[taskId={}][videoId={}][stage=IDEMPOTENCY] task already FAILED; skipping duplicate message",
+                task.getId(), task.getVideoId());
+            return;
+        }
+        if (!AnalysisStatus.PENDING.name().equals(task.getStatus())
+            && !AnalysisStatus.RETRY_WAITING.name().equals(task.getStatus())) {
             log.info("[taskId={}][videoId={}][stage=IDEMPOTENCY] task status={} is not claimable; skipping",
                 task.getId(), task.getVideoId(), task.getStatus());
             return;
@@ -108,8 +125,13 @@ public class AnalysisTaskProcessor {
             return;
         }
 
-        int lastProgress = task.getProgress() == null ? 0 : task.getProgress();
+        int lastProgress = 0;
         try {
+            // HIGH #2/#4: the claim is a single conditional UPDATE. For
+            // RETRY_WAITING it also requires retry_not_before <= now, so a
+            // delayed duplicate cannot start the next attempt early. The claim
+            // increments processing_generation, which becomes this worker's
+            // fencing token for every subsequent write.
             int claimed = analysisTaskRepository.claimPending(
                 task.getId(),
                 AnalysisStage.PREPARING.name(),
@@ -117,10 +139,20 @@ public class AnalysisTaskProcessor {
                 LocalDateTime.now()
             );
             if (claimed != 1) {
-                log.info("[taskId={}][videoId={}][stage=IDEMPOTENCY] task was claimed by another consumer",
+                log.info("[taskId={}][videoId={}][stage=IDEMPOTENCY] task was claimed by another consumer or backoff not reached",
                     task.getId(), task.getVideoId());
                 return;
             }
+
+            // HIGH #4: re-read the persisted task after a successful claim so
+            // this worker uses the current generation / retry_count instead of
+            // a stale pre-claim snapshot.
+            AnalysisTaskEntity current = analysisTaskRepository.selectById(task.getId());
+            if (current == null) {
+                return;
+            }
+            task = current;
+            int generation = task.getProcessingGeneration() == null ? 0 : task.getProcessingGeneration();
 
             lastProgress = 10;
             publish(task, AnalysisStage.PREPARING, lastProgress);
@@ -130,64 +162,86 @@ public class AnalysisTaskProcessor {
                 throw new IllegalStateException("Video metadata no longer exists");
             }
 
+            boolean transcriptPersisted = transcriptService.taskHasPersistedSegments(task.getId());
             TranscriptionResult transcription;
-            try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
-                storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
-                lastProgress = advance(task, AnalysisStage.EXTRACTING_AUDIO, 35);
-                AudioExtractResult audio = mediaProcessor.extractAudio(
-                    workspace.videoFile(),
-                    workspace.audioFile()
+            if (transcriptPersisted) {
+                List<TranscriptSegment> segments = transcriptService.loadTaskSegments(task.getId());
+                transcription = new TranscriptionResult(segments);
+                log.info("[taskId={}][videoId={}][generation={}][stage=TRANSCRIPT_SAVED] resuming from persisted transcript",
+                    task.getId(), task.getVideoId(), generation);
+            } else {
+                try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
+                    storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
+                    lastProgress = advance(task, generation, AnalysisStage.EXTRACTING_AUDIO, 35);
+                    AudioExtractResult audio = mediaProcessor.extractAudio(
+                        workspace.videoFile(),
+                        workspace.audioFile()
+                    );
+                    lastProgress = advance(task, generation, AnalysisStage.TRANSCRIBING, 70);
+                    transcription = asrProvider.transcribe(new AudioSource(audio.audioFile()));
+                }
+                lastProgress = advance(task, generation, AnalysisStage.TRANSCRIPT_SAVED, 75);
+                transcriptService.replaceTaskSegments(task, transcription);
+            }
+
+            boolean summaryPersisted = summaryService.taskHasPersistedSummary(task.getId());
+            if (summaryPersisted) {
+                lastProgress = advance(task, generation, AnalysisStage.SUMMARY_SAVED, 95);
+                log.info("[taskId={}][videoId={}][generation={}][stage=SUMMARY_SAVED] resuming from persisted summary",
+                    task.getId(), task.getVideoId(), generation);
+            } else {
+                lastProgress = advance(task, generation, AnalysisStage.SUMMARIZING, 85);
+                VideoSummaryRequest summaryRequest = new VideoSummaryRequest(
+                    task.getVideoId(),
+                    task.getId(),
+                    transcription.segments()
                 );
-                lastProgress = advance(task, AnalysisStage.TRANSCRIBING, 70);
-                transcription = asrProvider.transcribe(new AudioSource(audio.audioFile()));
+                VideoSummaryResult summary = summaryProvider.summarize(summaryRequest);
+                lastProgress = advance(task, generation, AnalysisStage.SAVING, 95);
+                summaryService.replaceTaskResult(task, summaryRequest, summary);
             }
 
-            lastProgress = advance(task, AnalysisStage.SAVING_TRANSCRIPT, 75);
-            transcriptService.replaceTaskSegments(task, transcription);
-
-            VideoSummaryRequest summaryRequest = new VideoSummaryRequest(
-                task.getVideoId(),
-                task.getId(),
-                transcription.segments()
-            );
-            lastProgress = advance(task, AnalysisStage.SUMMARIZING, 85);
-            VideoSummaryResult summary = summaryProvider.summarize(summaryRequest);
-
-            lastProgress = advance(task, AnalysisStage.SAVING, 95);
-            summaryService.replaceTaskResult(task, summaryRequest, summary);
-
-            int completed = analysisTaskRepository.markSuccess(task.getId(), LocalDateTime.now());
+            int completed = analysisTaskRepository.markSuccess(task.getId(), generation, LocalDateTime.now());
             if (completed != 1) {
-                throw new IllegalStateException("Task could not transition to SUCCESS");
+                throw new FencingLostException(
+                    "Task could not transition to SUCCESS (fencing lost at generation " + generation + ")"
+                );
             }
-            publish(task, AnalysisStage.DONE, 100);
-            log.info("[taskId={}][videoId={}][stage=DONE] structured video summary completed",
-                task.getId(), task.getVideoId());
+            terminalNotifier.succeeded(task.getId(), task.getVideoId());
+            log.info("[taskId={}][videoId={}][generation={}][stage=DONE] structured video summary completed",
+                task.getId(), task.getVideoId(), generation);
+        } catch (FencingLostException exception) {
+            // The recovery (or another worker) already moved the task forward.
+            // This worker must not touch the lifecycle any further.
+            log.info("[taskId={}][videoId={}][stage=FENCED] worker lost its processing generation; stopping: {}",
+                task.getId(), task.getVideoId(), exception.getMessage());
         } catch (VideoAgentException exception) {
-            fail(task, lastProgress, exception.errorCode().name(), exception.getMessage(), exception);
+            handleFailure(task, lastProgress, exception.errorCode().name(), exception.getMessage());
         } catch (RuntimeException exception) {
-            fail(task, lastProgress, "ANALYSIS_PROCESSING_FAILED", exception.getMessage(), exception);
+            handleFailure(task, lastProgress, "INTERNAL_ANALYSIS_ERROR", exception.getMessage(), exception);
         }
     }
 
-    private int advance(AnalysisTaskEntity task, AnalysisStage stage, int progress) {
+    private int advance(AnalysisTaskEntity task, int generation, AnalysisStage stage, int progress) {
         int updated = analysisTaskRepository.updateProcessingProgress(
             task.getId(),
             stage.name(),
             progress,
+            generation,
             LocalDateTime.now()
         );
         if (updated != 1) {
-            throw new IllegalStateException("Task progress update was rejected at stage " + stage.name());
+            throw new FencingLostException(
+                "Task progress update was rejected at stage " + stage.name()
+                    + " (fencing lost at generation " + generation + ")"
+            );
         }
         publish(task, stage, progress);
         return progress;
     }
 
     private void publish(AnalysisTaskEntity task, AnalysisStage stage, int progress) {
-        String status = stage == AnalysisStage.DONE
-            ? AnalysisStatus.SUCCESS.name()
-            : AnalysisStatus.PROCESSING.name();
+        String status = AnalysisStatus.PROCESSING.name();
         progressUpdateService.update(task.getId(), task.getVideoId(), new AnalysisProgressSnapshot(
             status,
             stage.name(),
@@ -196,25 +250,83 @@ public class AnalysisTaskProcessor {
         ));
     }
 
-    private void fail(
+    private void handleFailure(
+        AnalysisTaskEntity task,
+        int progress,
+        String errorCode,
+        String message
+    ) {
+        handleFailure(task, progress, errorCode, message, null);
+    }
+
+    private void handleFailure(
         AnalysisTaskEntity task,
         int progress,
         String errorCode,
         String message,
-        Exception exception
+        RuntimeException cause
     ) {
         String safeMessage = message == null || message.isBlank() ? "分析任务处理失败" : message;
         if (safeMessage.length() > 1000) {
             safeMessage = safeMessage.substring(0, 1000);
         }
-        analysisTaskRepository.markFailed(task.getId(), errorCode, safeMessage, LocalDateTime.now());
-        progressUpdateService.update(task.getId(), task.getVideoId(), new AnalysisProgressSnapshot(
-            AnalysisStatus.FAILED.name(),
-            AnalysisStage.FAILED.name(),
-            progress,
-            safeMessage
-        ), errorCode, safeMessage);
-        log.error("[taskId={}][videoId={}][stage=FAILED] media transcription failed",
-            task.getId(), task.getVideoId(), exception);
+        boolean retryable = FailureClass.of(errorCode) == FailureClass.RETRYABLE;
+        if (retryable) {
+            String checkpointStage = checkpointStage(task);
+            AnalysisRetryCoordinator.RetryOutcome outcome =
+                retryCoordinator.handleRetryableFailure(task, checkpointStage, errorCode, safeMessage);
+            if (outcome == AnalysisRetryCoordinator.RetryOutcome.RETRY_SCHEDULED) {
+                progressUpdateService.update(task.getId(), task.getVideoId(), new AnalysisProgressSnapshot(
+                    AnalysisStatus.RETRY_WAITING.name(),
+                    AnalysisStage.RETRY_WAITING.name(),
+                    progress,
+                    AnalysisStage.RETRY_WAITING.message()
+                ), errorCode, safeMessage);
+                log.warn("[taskId={}][videoId={}][generation={}][stage=RETRY_WAITING] retryable failure recorded: {}",
+                    task.getId(), task.getVideoId(), task.getProcessingGeneration(), safeMessage);
+            } else if (outcome == AnalysisRetryCoordinator.RetryOutcome.FAILED_TERMINAL) {
+                // MEDIUM #6: budget exhausted inside the retry transition.
+                terminalNotifier.failed(task.getId(), task.getVideoId(), progress, errorCode, safeMessage);
+                log.warn("[taskId={}][videoId={}][generation={}][stage=FAILED] retry budget exhausted: {}",
+                    task.getId(), task.getVideoId(), task.getProcessingGeneration(), safeMessage);
+            } else {
+                log.info("[taskId={}][videoId={}][generation={}] retry transition lost concurrency; stopping",
+                    task.getId(), task.getVideoId(), task.getProcessingGeneration());
+            }
+        } else {
+            // Non-retryable failure. The worker's fence token is used so an
+            // abandoned worker can never mark the NEW attempt failed.
+            int failed = analysisTaskRepository.markFailedForGeneration(
+                task.getId(),
+                task.getProcessingGeneration() == null ? 0 : task.getProcessingGeneration(),
+                errorCode,
+                safeMessage,
+                LocalDateTime.now()
+            );
+            if (failed == 1) {
+                terminalNotifier.failed(task.getId(), task.getVideoId(), progress, errorCode, safeMessage);
+            } else {
+                log.info("[taskId={}][videoId={}][generation={}] non-retryable FAILED transition lost fencing; stopping",
+                    task.getId(), task.getVideoId(), task.getProcessingGeneration());
+            }
+            log.error("[taskId={}][videoId={}][stage=FAILED] non-retryable analysis failure: {}",
+                task.getId(), task.getVideoId(), safeMessage, cause);
+        }
+    }
+
+    private String checkpointStage(AnalysisTaskEntity task) {
+        if (summaryService.taskHasPersistedSummary(task.getId())) {
+            return AnalysisStage.SUMMARY_SAVED.name();
+        }
+        if (transcriptService.taskHasPersistedSegments(task.getId())) {
+            return AnalysisStage.TRANSCRIPT_SAVED.name();
+        }
+        return task.getStage() == null ? AnalysisStage.PREPARING.name() : task.getStage();
+    }
+
+    private static final class FencingLostException extends RuntimeException {
+        private FencingLostException(String message) {
+            super(message);
+        }
     }
 }

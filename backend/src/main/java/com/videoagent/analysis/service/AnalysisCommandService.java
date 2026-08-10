@@ -1,59 +1,48 @@
 package com.videoagent.analysis.service;
 
-import com.videoagent.analysis.dto.AnalysisMessage;
 import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.entity.AnalysisStage;
 import com.videoagent.analysis.entity.AnalysisStatus;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
-import com.videoagent.analysis.producer.AnalysisTaskProducer;
-import com.videoagent.common.exception.ErrorCode;
-import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.outbox.OutboxService;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class AnalysisCommandService {
 
     private final AnalysisTaskPersistenceService persistenceService;
-    private final AnalysisTaskProducer producer;
+    private final OutboxService outboxService;
     private final AnalysisProgressUpdateService progressUpdateService;
 
     public AnalysisCommandService(
         AnalysisTaskPersistenceService persistenceService,
-        AnalysisTaskProducer producer,
+        OutboxService outboxService,
         AnalysisProgressUpdateService progressUpdateService
     ) {
         this.persistenceService = persistenceService;
-        this.producer = producer;
+        this.outboxService = outboxService;
         this.progressUpdateService = progressUpdateService;
     }
 
+    /**
+     * CRITICAL #1: this is the single Spring transaction boundary that makes
+     * {@code analysis_task INSERT} + {@code initial outbox event INSERT} atomic.
+     * Both createPending() and enqueueDispatch() run with REQUIRED propagation
+     * and join this transaction; if either fails, both roll back.
+     */
+    @Transactional
     public StartAnalysisResponse start(long videoId, long userId) {
         AnalysisTaskEntity task = persistenceService.createPending(videoId, userId);
+        outboxService.enqueueDispatch(task);
         progressUpdateService.update(task.getId(), videoId, new AnalysisProgressSnapshot(
             AnalysisStatus.PENDING.name(),
             AnalysisStage.QUEUED.name(),
             0,
             AnalysisStage.QUEUED.message()
         ));
-
-        try {
-            producer.send(new AnalysisMessage(task.getId(), videoId));
-        } catch (RuntimeException exception) {
-            persistenceService.markDispatchFailed(task.getId(), exception.getMessage());
-            progressUpdateService.update(task.getId(), videoId, new AnalysisProgressSnapshot(
-                AnalysisStatus.FAILED.name(),
-                AnalysisStage.FAILED.name(),
-                0,
-                ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage()
-            ), ErrorCode.ANALYSIS_DISPATCH_FAILED.name(), ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage());
-            throw new VideoAgentException(
-                ErrorCode.ANALYSIS_DISPATCH_FAILED,
-                ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage(),
-                exception
-            );
-        }
 
         return new StartAnalysisResponse(task.getId(), videoId, AnalysisStatus.PENDING.name());
     }

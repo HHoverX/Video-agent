@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.auth.repository.AppUserRepository;
+import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
@@ -43,6 +44,9 @@ class HealthEndpointIntegrationTest {
 
     @MockitoBean
     private AnalysisTaskRepository analysisTaskRepository;
+
+    @MockitoBean
+    private AnalysisOutboxEventRepository analysisOutboxEventRepository;
 
     @MockitoBean
     private VideoTranscriptSegmentRepository transcriptSegmentRepository;

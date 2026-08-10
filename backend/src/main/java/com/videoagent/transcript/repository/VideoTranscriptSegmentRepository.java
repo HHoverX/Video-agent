@@ -16,6 +16,17 @@ public interface VideoTranscriptSegmentRepository extends BaseMapper<VideoTransc
     @Delete("DELETE FROM video_transcript_segment WHERE task_id = #{taskId}")
     int deleteByTaskId(@Param("taskId") long taskId);
 
+    @Select("SELECT COUNT(*) FROM video_transcript_segment WHERE task_id = #{taskId}")
+    long countByTaskId(@Param("taskId") long taskId);
+
+    @Select("""
+        SELECT *
+        FROM video_transcript_segment
+        WHERE task_id = #{taskId}
+        ORDER BY segment_index ASC, start_ms ASC, id ASC
+        """)
+    List<VideoTranscriptSegmentEntity> findByTaskId(@Param("taskId") long taskId);
+
     @Select("""
         SELECT segment.*
         FROM video_transcript_segment segment

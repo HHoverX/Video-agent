@@ -53,6 +53,8 @@ public class AnalysisTaskPersistenceService {
         task.setStage(AnalysisStage.QUEUED.name());
         task.setProgress(0);
         task.setRetryCount(0);
+        task.setProcessingGeneration(0);
+        task.setRetryNotBefore(now);
         task.setCreatedAt(now);
         task.setUpdatedAt(now);
 
@@ -72,16 +74,6 @@ public class AnalysisTaskPersistenceService {
         }
     }
 
-    @Transactional
-    public void markDispatchFailed(long taskId, String message) {
-        analysisTaskRepository.markFailed(
-            taskId,
-            "MQ_SEND_FAILED",
-            truncate(message),
-            LocalDateTime.now()
-        );
-    }
-
     private VideoAgentException duplicateTask(AnalysisTaskEntity task) {
         return duplicateTask(task, null);
     }
@@ -92,12 +84,5 @@ public class AnalysisTaskPersistenceService {
         return cause == null
             ? new VideoAgentException(ErrorCode.ANALYSIS_ALREADY_RUNNING, message)
             : new VideoAgentException(ErrorCode.ANALYSIS_ALREADY_RUNNING, message, cause);
-    }
-
-    private String truncate(String message) {
-        if (message == null || message.isBlank()) {
-            return ErrorCode.ANALYSIS_DISPATCH_FAILED.defaultMessage();
-        }
-        return message.length() <= 1000 ? message : message.substring(0, 1000);
     }
 }

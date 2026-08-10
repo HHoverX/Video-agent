@@ -82,6 +82,15 @@ public class VideoSummaryService {
         }
     }
 
+    /**
+     * Durable resume basis: whether a summary row already exists for this task
+     * in MySQL. Used to decide whether the LLM must run again or the existing
+     * summary/chapters/key points can be reused.
+     */
+    public boolean taskHasPersistedSummary(long taskId) {
+        return summaryRepository.countByTaskId(taskId) > 0;
+    }
+
     @Transactional(readOnly = true)
     public Optional<VideoSummaryResponse> getSummary(long videoId, long userId) {
         ownershipService.requireOwned(videoId, userId);

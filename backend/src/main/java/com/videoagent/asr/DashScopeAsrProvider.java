@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.provider.ProviderHttpFailure;
 
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -70,9 +71,12 @@ public class DashScopeAsrProvider implements AsrProvider {
                 .body(body)
                 .exchange((request, response) -> {
                     if (!response.getStatusCode().is2xxSuccessful()) {
-                        throw new VideoAgentException(
+                        throw ProviderHttpFailure.forStatus(
+                            response.getStatusCode().value(),
+                            "DashScope ASR",
+                            "语音转写",
                             ErrorCode.ASR_REQUEST_FAILED,
-                            "DashScope ASR 服务返回 HTTP " + response.getStatusCode().value()
+                            ErrorCode.ASR_PROVIDER_REJECTED
                         );
                     }
                     return parseSse(response.getBody());
@@ -86,7 +90,13 @@ public class DashScopeAsrProvider implements AsrProvider {
             }
             throw new VideoAgentException(ErrorCode.ASR_REQUEST_FAILED, "DashScope ASR 请求失败");
         } catch (RestClientResponseException exception) {
-            throw new VideoAgentException(ErrorCode.ASR_REQUEST_FAILED, "DashScope ASR 服务返回错误状态");
+            throw ProviderHttpFailure.forStatus(
+                exception.getStatusCode().value(),
+                "DashScope ASR",
+                "语音转写",
+                ErrorCode.ASR_REQUEST_FAILED,
+                ErrorCode.ASR_PROVIDER_REJECTED
+            );
         } catch (RestClientException exception) {
             if (isTimeout(exception)) {
                 throw new VideoAgentException(ErrorCode.ASR_TIMEOUT, "DashScope ASR 请求超时");

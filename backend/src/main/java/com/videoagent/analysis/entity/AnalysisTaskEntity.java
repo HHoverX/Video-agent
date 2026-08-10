@@ -18,6 +18,11 @@ public class AnalysisTaskEntity {
     private String stage;
     private Integer progress;
     private Integer retryCount;
+    private String lastErrorCode;
+    private String lastErrorMessage;
+    private Integer processingGeneration;
+    private LocalDateTime processingAt;
+    private LocalDateTime retryNotBefore;
     private String errorCode;
     private String errorMessage;
     private LocalDateTime startedAt;
@@ -87,6 +92,46 @@ public class AnalysisTaskEntity {
 
     public void setRetryCount(Integer retryCount) {
         this.retryCount = retryCount;
+    }
+
+    public String getLastErrorCode() {
+        return lastErrorCode;
+    }
+
+    public void setLastErrorCode(String lastErrorCode) {
+        this.lastErrorCode = lastErrorCode;
+    }
+
+    public String getLastErrorMessage() {
+        return lastErrorMessage;
+    }
+
+    public void setLastErrorMessage(String lastErrorMessage) {
+        this.lastErrorMessage = lastErrorMessage;
+    }
+
+    public Integer getProcessingGeneration() {
+        return processingGeneration;
+    }
+
+    public void setProcessingGeneration(Integer processingGeneration) {
+        this.processingGeneration = processingGeneration;
+    }
+
+    public LocalDateTime getProcessingAt() {
+        return processingAt;
+    }
+
+    public void setProcessingAt(LocalDateTime processingAt) {
+        this.processingAt = processingAt;
+    }
+
+    public LocalDateTime getRetryNotBefore() {
+        return retryNotBefore;
+    }
+
+    public void setRetryNotBefore(LocalDateTime retryNotBefore) {
+        this.retryNotBefore = retryNotBefore;
     }
 
     public String getErrorCode() {

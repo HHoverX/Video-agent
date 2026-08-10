@@ -54,6 +54,26 @@ public class TranscriptService {
         }
     }
 
+    /**
+     * Durable resume basis: whether transcript rows already exist for this task
+     * in MySQL. Used to decide whether the ASR/FFmpeg/MinIO pipeline must run
+     * again or can be skipped entirely.
+     */
+    public boolean taskHasPersistedSegments(long taskId) {
+        return segmentRepository.countByTaskId(taskId) > 0;
+    }
+
+    @Transactional(readOnly = true)
+    public List<TranscriptSegment> loadTaskSegments(long taskId) {
+        return segmentRepository.findByTaskId(taskId).stream()
+            .map(entity -> new TranscriptSegment(
+                entity.getStartMs(),
+                entity.getEndMs(),
+                entity.getText()
+            ))
+            .toList();
+    }
+
     @Transactional(readOnly = true)
     public List<TranscriptSegmentResponse> getVideoTranscript(long videoId, long userId) {
         ownershipService.requireOwned(videoId, userId);

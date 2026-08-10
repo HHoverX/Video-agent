@@ -1,19 +1,14 @@
 package com.videoagent.analysis.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.videoagent.analysis.dto.AnalysisMessage;
 import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
-import com.videoagent.analysis.producer.AnalysisTaskProducer;
-import com.videoagent.common.exception.ErrorCode;
-import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.outbox.OutboxService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,45 +16,29 @@ import org.junit.jupiter.api.Test;
 class AnalysisCommandServiceTest {
 
     private final AnalysisTaskPersistenceService persistenceService = mock(AnalysisTaskPersistenceService.class);
-    private final AnalysisTaskProducer producer = mock(AnalysisTaskProducer.class);
+    private final OutboxService outboxService = mock(OutboxService.class);
     private final AnalysisProgressUpdateService progressUpdateService = mock(AnalysisProgressUpdateService.class);
     private AnalysisCommandService service;
 
     @BeforeEach
     void setUp() {
-        service = new AnalysisCommandService(persistenceService, producer, progressUpdateService);
+        service = new AnalysisCommandService(persistenceService, outboxService, progressUpdateService);
     }
 
     @Test
-    void shouldPersistBeforeDispatchAndReturnPendingTask() {
+    void shouldPersistTaskAndEnqueueDispatchThenReportPending() {
         AnalysisTaskEntity task = pendingTask();
         when(persistenceService.createPending(7L, 5L)).thenReturn(task);
+        when(outboxService.enqueueDispatch(task)).thenReturn(1L);
 
         StartAnalysisResponse response = service.start(7L, 5L);
 
         assertThat(response).isEqualTo(new StartAnalysisResponse(101L, 7L, "PENDING"));
+        verify(persistenceService).createPending(7L, 5L);
+        verify(outboxService).enqueueDispatch(task);
         verify(progressUpdateService).update(101L, 7L, new AnalysisProgressSnapshot(
             "PENDING", "QUEUED", 0, "任务已进入队列"
         ));
-        verify(producer).send(new AnalysisMessage(101L, 7L));
-    }
-
-    @Test
-    void shouldMarkTaskFailedWhenBrokerRejectsMessage() {
-        AnalysisTaskEntity task = pendingTask();
-        when(persistenceService.createPending(7L, 5L)).thenReturn(task);
-        doThrow(new IllegalStateException("broker unavailable"))
-            .when(producer).send(new AnalysisMessage(101L, 7L));
-
-        assertThatThrownBy(() -> service.start(7L, 5L))
-            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
-                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_DISPATCH_FAILED)
-            );
-
-        verify(persistenceService).markDispatchFailed(101L, "broker unavailable");
-        verify(progressUpdateService).update(101L, 7L, new AnalysisProgressSnapshot(
-            "FAILED", "FAILED", 0, "分析任务投递失败"
-        ), "ANALYSIS_DISPATCH_FAILED", "分析任务投递失败");
     }
 
     private AnalysisTaskEntity pendingTask() {

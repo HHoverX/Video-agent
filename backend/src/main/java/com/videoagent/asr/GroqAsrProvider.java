@@ -2,6 +2,7 @@ package com.videoagent.asr;
 
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.provider.ProviderHttpFailure;
 
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.MediaType;
@@ -65,7 +66,13 @@ public class GroqAsrProvider implements AsrProvider {
             }
             throw new VideoAgentException(ErrorCode.ASR_REQUEST_FAILED, "Groq ASR 请求失败");
         } catch (RestClientResponseException exception) {
-            throw new VideoAgentException(ErrorCode.ASR_REQUEST_FAILED, "Groq ASR 服务返回错误状态");
+            throw ProviderHttpFailure.forStatus(
+                exception.getStatusCode().value(),
+                "Groq ASR",
+                "语音转写",
+                ErrorCode.ASR_REQUEST_FAILED,
+                ErrorCode.ASR_PROVIDER_REJECTED
+            );
         } catch (RestClientException exception) {
             if (isTimeout(exception)) {
                 throw new VideoAgentException(ErrorCode.ASR_TIMEOUT, "Groq ASR 请求超时");

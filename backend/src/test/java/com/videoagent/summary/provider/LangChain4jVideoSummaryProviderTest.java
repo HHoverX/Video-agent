@@ -7,8 +7,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.videoagent.asr.TranscriptSegment;
+import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.summary.service.SummaryResultValidator;
+
+import dev.langchain4j.exception.HttpException;
+import dev.langchain4j.exception.InvalidRequestException;
 
 import org.junit.jupiter.api.Test;
 
@@ -38,16 +42,52 @@ class LangChain4jVideoSummaryProviderTest {
     }
 
     @Test
-    void shouldMapAiServiceFailureWithoutLeakingProviderDetails() {
+    void shouldMapUnknownRuntimeExceptionToInternalAnalysisError() {
         when(aiService.summarize(contains("<transcript>")))
             .thenThrow(new IllegalStateException("remote 401: secret-token"));
 
         assertThatThrownBy(() -> provider.summarize(request()))
             .isInstanceOf(VideoAgentException.class)
             .satisfies(exception -> assertThat(((VideoAgentException) exception).errorCode().name())
-                .isEqualTo("LLM_SUMMARY_FAILED"))
-            .hasMessage("LLM 结构化总结调用失败")
+                .isEqualTo(ErrorCode.INTERNAL_ANALYSIS_ERROR.name()))
             .hasMessageNotContaining("secret-token");
+    }
+
+    @Test
+    void shouldMapHttp429And5xxAsRetryableSummaryFailure() {
+        for (int status : new int[] {408, 429, 500, 503}) {
+            when(aiService.summarize(contains("<transcript>")))
+                .thenThrow(new HttpException(status, "upstream unavailable"));
+
+            assertThatThrownBy(() -> provider.summarize(request()))
+                .isInstanceOf(VideoAgentException.class)
+                .satisfies(exception -> assertThat(((VideoAgentException) exception).errorCode().name())
+                    .isEqualTo(ErrorCode.LLM_SUMMARY_FAILED.name()));
+        }
+    }
+
+    @Test
+    void shouldMapHttp401403404AsProviderRejected() {
+        for (int status : new int[] {400, 401, 403, 404}) {
+            when(aiService.summarize(contains("<transcript>")))
+                .thenThrow(new HttpException(status, "request rejected"));
+
+            assertThatThrownBy(() -> provider.summarize(request()))
+                .isInstanceOf(VideoAgentException.class)
+                .satisfies(exception -> assertThat(((VideoAgentException) exception).errorCode().name())
+                    .isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED.name()));
+        }
+    }
+
+    @Test
+    void shouldMapInvalidRequestAsProviderRejected() {
+        when(aiService.summarize(contains("<transcript>")))
+            .thenThrow(new InvalidRequestException("bad model"));
+
+        assertThatThrownBy(() -> provider.summarize(request()))
+            .isInstanceOf(VideoAgentException.class)
+            .satisfies(exception -> assertThat(((VideoAgentException) exception).errorCode().name())
+                .isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED.name()));
     }
 
     private VideoSummaryRequest request() {

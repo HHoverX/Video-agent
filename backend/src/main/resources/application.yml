@@ -54,8 +54,20 @@ videoagent:
     analysis-type: ${VIDEO_ANALYSIS_TYPE:STRUCTURED_SUMMARY}
     model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m5-langchain4j-structured-v1}
     progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
+    reliability:
+      max-attempts: ${ANALYSIS_MAX_ATTEMPTS:3}
+      processing-lease: ${ANALYSIS_PROCESSING_LEASE:15m}
+      heartbeat-interval: ${ANALYSIS_HEARTBEAT_INTERVAL:2m}
+    recovery-interval-ms: ${ANALYSIS_RECOVERY_INTERVAL_MS:30000}
+    heartbeat-interval-ms: ${ANALYSIS_HEARTBEAT_INTERVAL_MS:120000}
     sse:
       timeout: ${VIDEO_ANALYSIS_SSE_TIMEOUT:30m}
+  outbox:
+    initial-backoff: ${OUTBOX_INITIAL_BACKOFF:5s}
+    backoff-multiplier: ${OUTBOX_BACKOFF_MULTIPLIER:2}
+    max-attempts: ${OUTBOX_MAX_ATTEMPTS:15}
+    batch-size: ${OUTBOX_BATCH_SIZE:20}
+    publish-interval-ms: ${OUTBOX_PUBLISH_INTERVAL:5000}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:30s}

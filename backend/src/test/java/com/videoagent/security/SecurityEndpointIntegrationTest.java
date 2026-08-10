@@ -22,6 +22,7 @@ import com.videoagent.auth.entity.AppUserEntity;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
@@ -67,6 +68,9 @@ class SecurityEndpointIntegrationTest {
 
     @MockitoBean
     private AnalysisTaskRepository taskRepository;
+
+    @MockitoBean
+    private AnalysisOutboxEventRepository outboxEventRepository;
 
     @MockitoBean
     private VideoTranscriptSegmentRepository transcriptRepository;

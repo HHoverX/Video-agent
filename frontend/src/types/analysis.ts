@@ -1,4 +1,4 @@
-export type AnalysisStatus = 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
+export type AnalysisStatus = 'PENDING' | 'PROCESSING' | 'RETRY_WAITING' | 'SUCCESS' | 'FAILED'
 
 export type AnalysisStage =
   | 'QUEUED'

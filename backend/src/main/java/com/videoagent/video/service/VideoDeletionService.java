@@ -44,7 +44,8 @@ public class VideoDeletionService {
                 .in(
                     AnalysisTaskEntity::getStatus,
                     AnalysisStatus.PENDING.name(),
-                    AnalysisStatus.PROCESSING.name()
+                    AnalysisStatus.PROCESSING.name(),
+                    AnalysisStatus.RETRY_WAITING.name()
                 )
         );
         if (activeTasks != null && activeTasks > 0) {

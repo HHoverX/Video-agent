@@ -14,6 +14,9 @@ public interface VideoSummaryRepository extends BaseMapper<VideoSummaryEntity> {
     @Delete("DELETE FROM video_summary WHERE task_id = #{taskId}")
     int deleteByTaskId(@Param("taskId") long taskId);
 
+    @Select("SELECT COUNT(*) FROM video_summary WHERE task_id = #{taskId}")
+    long countByTaskId(@Param("taskId") long taskId);
+
     @Select("""
         SELECT summary.*
         FROM video_summary summary
