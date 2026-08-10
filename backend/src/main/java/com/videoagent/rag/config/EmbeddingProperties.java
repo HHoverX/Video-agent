@@ -24,8 +24,14 @@ public record EmbeddingProperties(
         apiKey = apiKey == null ? "" : apiKey.strip();
         baseUrl = baseUrl == null ? "" : baseUrl.strip();
         model = model == null ? "" : model.strip();
-        dimension = dimension <= 0 ? 384 : dimension;
         timeout = timeout == null ? Duration.ofSeconds(30) : timeout;
+        boolean realProvider = "openai".equals(provider) || "dashscope".equals(provider);
+        if (realProvider && dimension <= 0) {
+            throw new IllegalArgumentException(
+                "EMBEDDING_DIMENSION must be positive for real embedding provider " + provider
+            );
+        }
+        dimension = dimension <= 0 ? 384 : dimension;
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("Embedding timeout must be positive");
         }

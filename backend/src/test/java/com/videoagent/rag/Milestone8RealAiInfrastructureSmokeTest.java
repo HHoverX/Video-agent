@@ -106,19 +106,31 @@ class Milestone8RealAiInfrastructureSmokeTest {
         assertThat(built.getBody().mode()).isEqualTo("RAG");
         assertThat(built.getBody().status()).isEqualTo("READY");
 
+        // Ask about a specific fact that only exists in segment index 50, so the
+        // retrieval must find that chunk and the citation must cover its time
+        // range (~50-51 seconds). This is what a human verifies on the answer.
         ResponseEntity<QaResponse> qa = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/qa"),
             HttpMethod.POST,
-            new HttpEntity<>("{\"question\":\"视频中介绍了哪些内容？\"}", jsonHeaders(session)),
+            new HttpEntity<>("{\"question\":\"为什么选择 Redis 作为任务进度缓存？\"}", jsonHeaders(session)),
             QaResponse.class
         );
         assertThat(qa.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(qa.getBody().mode()).isEqualTo("RAG");
         assertThat(qa.getBody().answer()).isNotBlank();
+        // The answer should be grounded in the transcript (it contains the
+        // Redis fact verbatim), and must carry a citation.
+        assertThat(qa.getBody().answer()).contains("Redis");
         assertThat(qa.getBody().citations()).isNotEmpty();
-        // Human verification required: answer grounded in transcript, citations
-        // fall within real time ranges, no cross-video data, no fabricated
-        // citations.
+        System.out.println("=== M8 REAL AI QA RESULT ===");
+        System.out.println("ANSWER: " + qa.getBody().answer());
+        for (var c : qa.getBody().citations()) {
+            System.out.println("CITATION: [" + c.startMs() + "," + c.endMs() + "] " + c.text());
+        }
+        // Human verification required: the citation time range must cover the
+        // segment that actually states the Redis fact (50s-51s), the answer must
+        // be grounded in the transcript, and no fabricated / cross-video
+        // citations may appear.
     }
 
     private HttpHeaders jsonHeaders(Session session) {
@@ -178,7 +190,14 @@ class Milestone8RealAiInfrastructureSmokeTest {
         List<String> lines = new ArrayList<>();
         String filler = "详细说明。".repeat(80);
         for (int i = 0; i < count; i++) {
-            lines.add("VideoAgent 视频分析系统知识点第 " + i + " 段。" + filler);
+            if (i == 50) {
+                // Distinctive fact: the retrieval must find THIS chunk for the
+                // Redis question, and the citation must cover ~50-51 seconds.
+                lines.add("选择 Redis 作为任务进度缓存，是因为 Redis 读写延迟低、支持过期时间，"
+                    + "并且能够在多实例间共享实时进度。这是本视频的核心结论。");
+            } else {
+                lines.add("VideoAgent 视频分析系统知识点第 " + i + " 段。" + filler);
+            }
         }
         return lines;
     }

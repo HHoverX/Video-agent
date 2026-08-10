@@ -4,7 +4,43 @@
 
 **PASS** — Adaptive Basic RAG is implemented, tested and committed on top of the M7 Reliability v2 baseline. All M1–M7 correctness is preserved (confirmed by the full default suite, M7 infra regression and M1–M6.6 infra regression).
 
+**Closing verification (M8.1 final):** embedding configuration is now fail-fast (no silent real→Mock fallback), the RAG index staleness constraint is documented, and the **Real Provider Acceptance PASSED** with a real embedding API + Qdrant + a real LLM.
+
 M8.1 adds an adaptive context strategy: short transcripts answer questions with the full transcript (DIRECT_CONTEXT), long transcripts use a real Basic RAG pipeline (chunking → embedding → Qdrant → top-K retrieval → LLM QA). Both modes return a grounded answer with **timestamp citations validated against real persisted transcript/chunk metadata** — the LLM never fabricates timestamps.
+
+## 0. Closing items
+
+### Embedding provider configuration is fail-fast
+
+- `EMBEDDING_PROVIDER=mock` (or unset) → `MockEmbeddingProvider`.
+- Explicit `openai` / `dashscope` → the provider **requires** `EMBEDDING_API_KEY`, `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, and a positive `EMBEDDING_DIMENSION` (the dimension check lives in `EmbeddingProperties` for real providers). Missing configuration raises a clear startup error naming the missing variable. There is **no** silent real→Mock fallback anymore.
+- Tests: `EmbeddingProviderConfigurationTest` (mock on mock/blank; fail-fast for missing apiKey/baseUrl/model; fail-fast on invalid dimension; real built only when complete; unknown provider rejected).
+
+### RAG index staleness — business constraint, no code change
+
+`analysis_task` has `UNIQUE KEY uk_analysis_task_business (video_id, analysis_type, model_version)`, and `AnalysisTaskPersistenceService.createPending` refuses to create a second task for the same video+analysis type+model version (it returns `ANALYSIS_ALREADY_RUNNING` even for a previously FAILED task). Therefore **a video can never produce a new successful AnalysisTask or a new Transcript** after the original one. `video_rag_index.analysis_task_id` always refers to the video's one and only analysis task, and `findLatestSuccessfulByVideoId` resolves to that same task's segments. Consequently an old-task READY index can never be mistakenly used against a new transcript — the scenario cannot occur in this system. This is documented as a business constraint rather than patched with a versioning scheme.
+
+### Real Provider Acceptance — PASS
+
+Gated by `VIDEOAGENT_M8_REAL_AI_TEST=true` (default OFF). A real run used:
+
+- Embedding: DashScope OpenAI-compatible `/compatible-mode/v1/embeddings`, `text-embedding-v3`, 1024 dimensions (key read from the local `.env`, never logged/committed).
+- Vector store: Qdrant `video_transcript_chunks` (1024-dim collection).
+- LLM: DeepSeek via the OpenAI-compatible LangChain4j chat model (existing `LLM_*` config).
+
+A 60-segment long transcript was indexed (20 chunks). The question "为什么选择 Redis 作为任务进度缓存？" was asked; the Redis fact exists only in segment 50 (~50–51 s).
+
+Human-verified result:
+
+- **Retrieval found the correct chunk**: top-5 hits were `[16, 4, 18, 17, 11]`; chunk 16 covers segments 48–52 including the Redis fact.
+- **Answer grounded**: the answer restated the transcript's Redis conclusion (读写延迟低、支持过期时间、多实例共享实时进度) — it came from the retrieved chunk, not outside knowledge.
+- **Citation matches a real time range**: the returned citation was `[48000, 53000]` ms (48–53 s), which covers the Redis segment.
+- **No hallucinated citation**: the timestamp came from Qdrant chunk metadata (derived from real transcript rows), not the LLM.
+- **No cross-video/user content**: search is filtered by `userId + videoId`; the test used a single user/video.
+
+Result: **`Milestone8RealAiInfrastructureSmokeTest` PASS (1/1)**, recorded as **Real Provider Acceptance PASS**.
+
+Note: this run surfaced a real-provider detail fixed during acceptance — DashScope's embedding endpoint has a batch limit of 10, so `RealEmbeddingProvider.embedDocuments` now batches requests by 10 (the mock path is unaffected).
 
 ## 1. Why not every video uses RAG
 
@@ -158,7 +194,7 @@ New M8.1 unit tests (all pass under `mvn test`, no paid providers):
 | Retrieval | `TranscriptRetrieverTest` (query embed, top-K, userId+videoId filter, ordering, empty) |
 | Controllers/security | `RagControllerTest` (status/build/QA OK, blank question 400, cross-user 404, RAG_INDEX_NOT_READY conflict) |
 
-Total default suite: **207 tests, 0 failures, 0 errors, 26 skipped** (skips are env-gated infra/real-provider tests).
+Total default suite: **215 tests, 0 failures, 0 errors, 26 skipped** (skips are env-gated infra/real-provider tests).
 
 ## 23. Infrastructure Acceptance
 
@@ -171,11 +207,14 @@ Total default suite: **207 tests, 0 failures, 0 errors, 26 skipped** (skips are 
 
 `VIDEOAGENT_M8_REAL_AI_TEST=true` (default **OFF**) gates `Milestone8RealAiInfrastructureSmokeTest`, which drives the real embedding + real LLM path entirely from environment variables. It never runs under `mvn test`. Manual acceptance requires confirming the answer is grounded in the transcript, citations fall within real time ranges, and no cross-video data or fabricated citations appear.
 
+**Real run result: PASS (1/1).** See section 0 for the full human-verified evidence (retrieval hit, grounded answer, `[48000,53000]` citation, no hallucination, no cross-video leakage).
+
 ## 25. M1–M7 Regression
 
-- Backend default suite: **207 tests, 0 failures**.
+- Backend default suite: **215 tests, 0 failures**.
 - M7 infra regression (`VIDEOAGENT_M7_INFRA_TEST=true`): **9/9 passed** — transactional outbox atomicity, retry rollback, fencing, max attempts, starvation, terminal events all still green.
 - M1–M6.6 infra regression (Mock providers): **9/9 passed**.
+- M8 RAG infra (`VIDEOAGENT_M8_RAG_INFRA_TEST=true`): **2/2 passed**.
 - Flyway V1→V8 clean migration: **passed** on a fresh MySQL database.
 - Frontend `vue-tsc` + `tsc` + Vite build: **passed**.
 - JWT/ownership/Video CRUD/MinIO/RocketMQ/Redis/SSE/outbox/claim/retry/fencing/stale-recovery/durable-resume remain unchanged.

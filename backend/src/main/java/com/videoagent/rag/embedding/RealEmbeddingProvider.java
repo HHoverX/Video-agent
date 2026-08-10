@@ -44,6 +44,8 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
         this.objectMapper = objectMapper;
     }
 
+    private static final int MAX_BATCH_SIZE = 10;
+
     @Override
     public String providerName() {
         return properties.provider();
@@ -56,7 +58,12 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
 
     @Override
     public List<float[]> embedDocuments(List<String> texts) {
-        return embed(texts);
+        List<float[]> all = new ArrayList<>();
+        for (int offset = 0; offset < texts.size(); offset += MAX_BATCH_SIZE) {
+            List<String> batch = texts.subList(offset, Math.min(texts.size(), offset + MAX_BATCH_SIZE));
+            all.addAll(embed(batch));
+        }
+        return all;
     }
 
     @Override
@@ -87,6 +94,7 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
         } catch (VideoAgentException exception) {
             throw exception;
         } catch (RestClientException exception) {
+            log.warn("[embedding] real embedding request failed: {}", exception.getMessage(), exception);
             throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务请求失败", exception);
         }
     }
