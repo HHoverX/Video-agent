@@ -4,8 +4,8 @@ import { RouterLink, useRoute } from 'vue-router'
 
 import { useAnalysisEvents } from '@/composables/useAnalysisEvents'
 import { getAnalysisTask, startAnalysis } from '@/services/analysis'
-import { askVideoQa, buildRagIndex, getRagStatus } from '@/services/rag'
-import type { QaResponse, RagIndexStatusResponse } from '@/services/rag'
+import { agenticStrategyLabel, askAgenticQa, buildRagIndex, getRagStatus } from '@/services/rag'
+import type { AgenticQaResponse, RagIndexStatusResponse } from '@/services/rag'
 import { getVideoChapters, getVideoKeyPoints, getVideoSummary } from '@/services/summary'
 import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
@@ -36,10 +36,11 @@ const summaryLoading = ref(false)
 const summaryError = ref('')
 const ragStatus = ref<RagIndexStatusResponse | null>(null)
 const ragModeLabel = ref('')
+const qaStrategyLabel = ref('')
 const qaQuestion = ref('')
 const qaLoading = ref(false)
 const qaError = ref('')
-const qaResult = ref<QaResponse | null>(null)
+const qaResult = ref<AgenticQaResponse | null>(null)
 const buildingIndex = ref(false)
 let pollTimer: number | undefined
 let fallbackPollCount = 0
@@ -169,8 +170,10 @@ async function handleAsk() {
   qaLoading.value = true
   qaError.value = ''
   qaResult.value = null
+  qaStrategyLabel.value = ''
   try {
-    qaResult.value = await askVideoQa(videoId, question)
+    qaResult.value = await askAgenticQa(videoId, question)
+    qaStrategyLabel.value = agenticStrategyLabel(qaResult.value.strategy)
   } catch (error) {
     qaError.value = apiErrorMessage(error, '问答请求失败。')
   } finally {
@@ -581,12 +584,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="qaResult" class="qa-result">
+          <p v-if="qaStrategyLabel" class="qa-strategy-label">检索方式：{{ qaStrategyLabel }}</p>
           <div class="qa-answer">{{ qaResult.answer }}</div>
           <div v-if="qaResult.citations.length" class="qa-citations">
             <p class="qa-citations-title">引用片段</p>
             <ul class="qa-citation-list">
               <li v-for="(citation, idx) in qaResult.citations" :key="idx">
-                <span class="qa-citation-time">
+                <span v-if="citation.startMs !== null && citation.endMs !== null" class="qa-citation-time">
                   [{{ formatTimestamp(citation.startMs) }} – {{ formatTimestamp(citation.endMs) }}]
                 </span>
                 <p>{{ citation.text }}</p>

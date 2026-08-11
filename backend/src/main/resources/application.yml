@@ -84,6 +84,14 @@ videoagent:
       model: ${EMBEDDING_MODEL:}
       dimension: ${EMBEDDING_DIMENSION:384}
       timeout: ${EMBEDDING_TIMEOUT:30s}
+  agent:
+    planner-provider: ${AGENT_PLANNER_PROVIDER:mock}
+    max-tool-calls: ${AGENT_MAX_TOOL_CALLS:4}
+    time-lookup-window-ms: ${AGENT_TIME_LOOKUP_WINDOW_MS:15000}
+    max-time-window-ms: ${AGENT_MAX_TIME_WINDOW_MS:120000}
+    max-evidence-items: ${AGENT_MAX_EVIDENCE_ITEMS:12}
+    max-evidence-chars: ${AGENT_MAX_EVIDENCE_CHARS:12000}
+    planner-model: ${AGENT_PLANNER_MODEL:}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:30s}

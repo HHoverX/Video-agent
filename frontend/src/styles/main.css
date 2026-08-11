@@ -767,6 +767,12 @@ p {
   white-space: pre-wrap;
 }
 
+.qa-strategy-label {
+  color: #8cf0d4;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
 .qa-citations {
   margin-top: 14px;
 }

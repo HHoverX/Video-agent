@@ -39,6 +39,7 @@ public enum ErrorCode {
     EMBEDDING_REQUEST_FAILED(HttpStatus.BAD_GATEWAY, "Embedding 服务请求失败"),
     RAG_INDEX_NOT_READY(HttpStatus.CONFLICT, "该视频的问答索引尚未就绪，请先构建索引"),
     RAG_INDEX_BUILD_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "问答索引构建失败"),
+    AGENT_PLANNER_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "检索规划失败"),
     INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "服务器内部错误");
 
     private final HttpStatus httpStatus;

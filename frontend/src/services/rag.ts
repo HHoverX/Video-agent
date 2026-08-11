@@ -19,10 +19,36 @@ export interface QaCitation {
   text: string
 }
 
+export interface AgenticCitation {
+  sourceType: string
+  startMs: number | null
+  endMs: number | null
+  text: string
+}
+
 export interface QaResponse {
   mode: QaContextMode
   answer: string
   citations: QaCitation[]
+}
+
+export interface AgenticQaResponse {
+  answer: string
+  strategy: string
+  contextMode: string | null
+  toolsUsed: string[]
+  citations: AgenticCitation[]
+}
+
+export function agenticStrategyLabel(strategy: string): string {
+  switch (strategy) {
+    case 'SUMMARY': return '摘要'
+    case 'TIME_LOOKUP': return '时间定位'
+    case 'SEMANTIC_SEARCH': return '语义检索'
+    case 'MULTI_SEARCH': return '多路检索'
+    case 'BASIC_FALLBACK': return '基础问答回退'
+    default: return strategy
+  }
 }
 
 export async function getRagStatus(videoId: number): Promise<RagIndexStatusResponse> {
@@ -37,5 +63,10 @@ export async function buildRagIndex(videoId: number): Promise<RagIndexStatusResp
 
 export async function askVideoQa(videoId: number, question: string): Promise<QaResponse> {
   const { data } = await api.post<QaResponse>(`/videos/${videoId}/qa`, { question })
+  return data
+}
+
+export async function askAgenticQa(videoId: number, question: string): Promise<AgenticQaResponse> {
+  const { data } = await api.post<AgenticQaResponse>(`/videos/${videoId}/qa/agentic`, { question })
   return data
 }
