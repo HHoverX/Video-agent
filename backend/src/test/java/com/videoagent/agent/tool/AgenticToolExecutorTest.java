@@ -7,10 +7,12 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.config.AgentProperties;
 import com.videoagent.agent.evidence.EvidenceItem;
 import com.videoagent.agent.evidence.EvidenceSourceType;
 import com.videoagent.agent.plan.RetrievalAction;
@@ -20,6 +22,7 @@ import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
+import com.videoagent.rag.service.RagIndexService;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
@@ -38,11 +41,15 @@ class AgenticToolExecutorTest {
     private final VideoTranscriptSegmentRepository segmentRepository = mock(VideoTranscriptSegmentRepository.class);
     private final VideoSummaryService summaryService = mock(VideoSummaryService.class);
     private final TranscriptRetriever transcriptRetriever = mock(TranscriptRetriever.class);
+    private final RagIndexService ragIndexService = mock(RagIndexService.class);
+    private final AgentProperties properties =
+        new AgentProperties("mock", 4, 15_000L, 120_000L, 12, 12_000, "");
     private AgenticToolExecutor executor;
 
     @BeforeEach
     void setUp() {
-        executor = new AgenticToolExecutor(segmentRepository, summaryService, transcriptRetriever);
+        executor = new AgenticToolExecutor(
+            segmentRepository, summaryService, transcriptRetriever, ragIndexService, properties);
     }
 
     private AgenticQaContext ragContext() {
@@ -104,11 +111,32 @@ class AgenticToolExecutorTest {
         assertThat(evidence).isEmpty();
     }
 
+    @Test
+    void shouldPropagateSummaryLookupFailureInsteadOfReturningEmpty() {
+        IllegalStateException failure = new IllegalStateException("database down");
+        when(summaryService.getSummary(7L, 1L)).thenThrow(failure);
+
+        assertThatThrownBy(() -> executor.execute(ragContext(), List.of(RetrievalAction.summary())))
+            .isSameAs(failure);
+    }
+
+    @Test
+    void shouldPropagateChapterMappingFailureInsteadOfReturningPartialSummary() {
+        when(summaryService.getSummary(7L, 1L)).thenReturn(java.util.Optional.of(
+            new VideoSummaryResponse(3L, "视频概述", LocalDateTime.now(), LocalDateTime.now())));
+        IllegalStateException failure = new IllegalStateException("mapping failed");
+        when(summaryService.getChapters(7L, 1L)).thenThrow(failure);
+
+        assertThatThrownBy(() -> executor.execute(ragContext(), List.of(RetrievalAction.summary())))
+            .isSameAs(failure);
+    }
+
     // ---- Time tool ----
 
     @Test
     void shouldReturnSegmentsInTimeWindow() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(segmentRepository.findOverlappingByTaskIdAndVideoId(3L, 7L, 2500L, 3500L))
+            .thenReturn(List.of(segments().get(1)));
 
         // Window [2500, 3500] covers only segment 1 [2000, 4000].
         List<EvidenceItem> evidence = executor.execute(ragContext(),
@@ -124,7 +152,8 @@ class AgenticToolExecutorTest {
 
     @Test
     void shouldReturnEmptyForOutOfRangeTime() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(segmentRepository.findOverlappingByTaskIdAndVideoId(
+            3L, 7L, 8_999_000L, 9_001_000L)).thenReturn(List.of());
 
         List<EvidenceItem> evidence = executor.execute(ragContext(),
             List.of(RetrievalAction.byTime(9_000_000, 1000)));
@@ -135,7 +164,8 @@ class AgenticToolExecutorTest {
 
     @Test
     void shouldPreserveSegmentOrderingAndTimestamps() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(segmentRepository.findOverlappingByTaskIdAndVideoId(3L, 7L, 0L, 7000L))
+            .thenReturn(segments());
 
         List<EvidenceItem> evidence = executor.execute(ragContext(),
             List.of(RetrievalAction.byTime(3000, 4000)));
@@ -146,6 +176,19 @@ class AgenticToolExecutorTest {
         assertThat(evidence).extracting(EvidenceItem::startMs).containsExactly(0L, 2000L, 4000L);
         assertThat(evidence).extracting(EvidenceItem::endMs).containsExactly(2000L, 4000L, 6000L);
         verify(transcriptRetriever, never()).retrieve(anyLong(), anyLong(), anyString());
+    }
+
+    @Test
+    void shouldUseConfiguredDefaultWindowAndDatabaseRangeQuery() {
+        when(segmentRepository.findOverlappingByTaskIdAndVideoId(
+            3L, 7L, 185_000L, 215_000L)).thenReturn(List.of());
+
+        executor.execute(ragContext(), List.of(new RetrievalAction(
+            RetrievalTool.GET_TRANSCRIPT_BY_TIME, null, 200_000L, null)));
+
+        verify(segmentRepository).findOverlappingByTaskIdAndVideoId(
+            3L, 7L, 185_000L, 215_000L);
+        verify(segmentRepository, never()).findLatestSuccessfulByVideoId(7L);
     }
 
     // ---- Search tool ----
@@ -165,7 +208,6 @@ class AgenticToolExecutorTest {
 
     @Test
     void shouldUseTranscriptRetrieverInRagReadyMode() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
         when(transcriptRetriever.retrieve(1L, 7L, "Redis 作用")).thenReturn(List.of(
             new RetrievedChunk(0, "Redis 缓存进度", 0, 2000, List.of(0), 0.9f)
         ));
@@ -177,28 +219,58 @@ class AgenticToolExecutorTest {
         assertThat(evidence.getFirst().sourceType()).isEqualTo(EvidenceSourceType.TRANSCRIPT_SEARCH);
         assertThat(evidence.getFirst().chunkIndex()).isEqualTo(0);
         assertThat(evidence.getFirst().score()).isEqualTo(0.9f);
+        verify(ragIndexService).requireReady(7L, 1L);
         verify(transcriptRetriever).retrieve(1L, 7L, "Redis 作用");
+        verify(segmentRepository, never()).findLatestSuccessfulByVideoId(7L);
     }
 
     @Test
-    void shouldRejectSearchWhenRagNotReady() {
-        AgenticQaContext notReady = new AgenticQaContext(1L, 7L, 3L, QaContextMode.RAG, true, true, "NOT_BUILT");
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+    void shouldRejectSearchWhenReadySnapshotBecomesBuilding() {
+        when(ragIndexService.requireReady(7L, 1L))
+            .thenThrow(new VideoAgentException(ErrorCode.RAG_INDEX_NOT_READY));
 
-        assertThatThrownBy(() -> executor.execute(notReady,
+        assertThatThrownBy(() -> executor.execute(ragContext(),
             List.of(RetrievalAction.search("Redis"))))
             .isInstanceOfSatisfying(VideoAgentException.class, e ->
                 assertThat(e.errorCode()).isEqualTo(ErrorCode.RAG_INDEX_NOT_READY));
+        verify(ragIndexService).requireReady(7L, 1L);
+        verify(transcriptRetriever, never()).retrieve(anyLong(), anyLong(), anyString());
     }
 
     @Test
     void shouldKeepUserIdAndVideoIdBoundInRetrieval() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
         when(transcriptRetriever.retrieve(1L, 7L, "query")).thenReturn(List.of());
 
         executor.execute(ragContext(), List.of(RetrievalAction.search("query")));
 
         // The retriever must be called with the server-bound user/video only.
         verify(transcriptRetriever).retrieve(1L, 7L, "query");
+    }
+
+    @Test
+    void shouldDeduplicateIdenticalSearchActionsBeforeExternalCalls() {
+        when(transcriptRetriever.retrieve(1L, 7L, "query")).thenReturn(List.of());
+
+        executor.execute(ragContext(), List.of(
+            RetrievalAction.search("query"),
+            RetrievalAction.search("query")
+        ));
+
+        verify(ragIndexService, times(1)).requireReady(7L, 1L);
+        verify(transcriptRetriever, times(1)).retrieve(1L, 7L, "query");
+    }
+
+    @Test
+    void shouldNotDeduplicateDifferentSearchQueries() {
+        when(transcriptRetriever.retrieve(anyLong(), anyLong(), anyString())).thenReturn(List.of());
+
+        executor.execute(ragContext(), List.of(
+            RetrievalAction.search("query-a"),
+            RetrievalAction.search("query-b")
+        ));
+
+        verify(ragIndexService, times(2)).requireReady(7L, 1L);
+        verify(transcriptRetriever).retrieve(1L, 7L, "query-a");
+        verify(transcriptRetriever).retrieve(1L, 7L, "query-b");
     }
 }

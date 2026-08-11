@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,6 +32,10 @@ import com.videoagent.video.service.VideoOwnershipService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -43,12 +48,15 @@ class RagIndexServiceTest {
     private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private final EmbeddingProvider embeddingProvider = mock(EmbeddingProvider.class);
     private final QdrantVectorStore vectorStore = mock(QdrantVectorStore.class);
+    private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
     private final RagProperties ragProperties = new RagProperties(1000, 200, 1, 5);
     private final EmbeddingProperties embeddingProperties = new EmbeddingProperties("mock", "", "", "", 384, java.time.Duration.ofSeconds(30));
     private RagIndexService service;
 
     @BeforeEach
     void setUp() {
+        when(transactionManager.getTransaction(any(TransactionDefinition.class)))
+            .thenReturn(new SimpleTransactionStatus());
         service = new RagIndexService(
             indexRepository,
             segmentRepository,
@@ -58,7 +66,8 @@ class RagIndexServiceTest {
             embeddingProvider,
             vectorStore,
             ragProperties,
-            embeddingProperties
+            embeddingProperties,
+            java.util.Optional.of(transactionManager)
         );
     }
 
@@ -95,8 +104,13 @@ class RagIndexServiceTest {
 
         assertThat(result.getStatus()).isEqualTo(RagIndexStatus.READY.name());
         verify(vectorStore).ensureCollection(384);
-        verify(vectorStore).deleteByVideo(1L, videoId);
+        verify(vectorStore).deleteByVideoStrict(1L, videoId);
         verify(vectorStore).upsertPoints(eq(1L), eq(7L), eq(3L), any());
+
+        InOrder order = inOrder(indexRepository, transactionManager, embeddingProvider);
+        order.verify(indexRepository).claimBuilding(eq(99L), any(LocalDateTime.class));
+        order.verify(transactionManager).commit(any());
+        order.verify(embeddingProvider).embedDocuments(any());
     }
 
     @Test
@@ -161,8 +175,32 @@ class RagIndexServiceTest {
 
         service.buildIndex(videoId, 1L);
 
-        verify(vectorStore).deleteByVideo(1L, videoId);
+        verify(vectorStore).deleteByVideoStrict(1L, videoId);
         verify(vectorStore).upsertPoints(eq(1L), eq(7L), eq(3L), any());
+    }
+
+    @Test
+    void shouldMarkFailedAndStopWhenStrictRebuildDeleteFails() {
+        long videoId = 7L;
+        when(segmentRepository.findLatestSuccessfulByVideoId(videoId)).thenReturn(segments(20));
+        VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.READY.name());
+        VideoRagIndexEntity failed = indexEntity(videoId, 3L, RagIndexStatus.FAILED.name());
+        when(indexRepository.findByVideoId(videoId)).thenReturn(index);
+        when(indexRepository.claimBuilding(anyLong(), any(LocalDateTime.class))).thenReturn(1);
+        when(embeddingProvider.embedDocuments(any())).thenReturn(
+            java.util.stream.IntStream.range(0, 20).mapToObj(i -> new float[384]).toList());
+        org.mockito.Mockito.doThrow(new VideoAgentException(
+            ErrorCode.RAG_INDEX_BUILD_FAILED, "delete failed"))
+            .when(vectorStore).deleteByVideoStrict(1L, videoId);
+        when(indexRepository.markFailed(anyLong(), anyString(), anyString(), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(indexRepository.selectById(99L)).thenReturn(failed);
+
+        VideoRagIndexEntity result = service.buildIndex(videoId, 1L);
+
+        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.FAILED.name());
+        verify(vectorStore, never()).upsertPoints(anyLong(), anyLong(), anyLong(), any());
+        verify(indexRepository, never()).markReady(anyLong(), anyInt(), any(LocalDateTime.class));
     }
 
     @Test
@@ -173,6 +211,29 @@ class RagIndexServiceTest {
         assertThatThrownBy(() -> service.requireReady(7L, 1L))
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.RAG_INDEX_NOT_READY));
+    }
+
+    @Test
+    void shouldReusePreloadedTranscriptWhenReadingStatus() {
+        List<VideoTranscriptSegmentEntity> preloaded = segments(2);
+        when(indexRepository.findByVideoId(7L)).thenReturn(null);
+
+        VideoRagIndexEntity result = service.getStatus(7L, 1L, preloaded);
+
+        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.NOT_REQUIRED.name());
+        assertThat(result.getAnalysisTaskId()).isEqualTo(3L);
+        verify(segmentRepository, never()).findLatestSuccessfulByVideoId(anyLong());
+    }
+
+    @Test
+    void shouldCheckOwnershipBeforeLoadingTranscriptForStatus() {
+        VideoAgentException failure = new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND);
+        org.mockito.Mockito.doThrow(failure).when(ownershipService).requireOwned(7L, 1L);
+
+        assertThatThrownBy(() -> service.getStatus(7L, 1L)).isSameAs(failure);
+
+        verify(segmentRepository, never()).findLatestSuccessfulByVideoId(anyLong());
+        verify(indexRepository, never()).findByVideoId(anyLong());
     }
 
     private VideoRagIndexEntity indexEntity(long videoId, long taskId, String status) {

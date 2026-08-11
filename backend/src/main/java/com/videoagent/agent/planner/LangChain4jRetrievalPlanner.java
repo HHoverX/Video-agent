@@ -7,6 +7,10 @@ import com.videoagent.agent.plan.RetrievalTool;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 
+import dev.langchain4j.exception.HttpException;
+import dev.langchain4j.exception.NonRetriableException;
+import dev.langchain4j.exception.RetriableException;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -28,7 +32,7 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
     public RetrievalPlan plan(AgenticQaContext context, String question) {
         try {
             PlannerAiResponse response = aiService.plan(prompt(context, question));
-            if (response == null || response.intent() == null || response.actions() == null) {
+            if (response == null || response.actions() == null) {
                 throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "Planner 返回空结果");
             }
             List<RetrievalAction> actions = new ArrayList<>();
@@ -39,9 +43,11 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
                 RetrievalTool tool = parseTool(action.tool());
                 actions.add(switch (tool) {
                     case GET_VIDEO_SUMMARY -> RetrievalAction.summary();
-                    case GET_TRANSCRIPT_BY_TIME -> RetrievalAction.byTime(
-                        action.timeMs() == null ? 0 : action.timeMs(),
-                        action.windowMs() == null ? 0 : action.windowMs()
+                    case GET_TRANSCRIPT_BY_TIME -> new RetrievalAction(
+                        RetrievalTool.GET_TRANSCRIPT_BY_TIME,
+                        null,
+                        action.timeMs(),
+                        action.windowMs()
                     );
                     case SEARCH_TRANSCRIPT -> RetrievalAction.search(action.query());
                 });
@@ -49,13 +55,35 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
             return new RetrievalPlan(response.intent(), response.strategyLabel(), actions);
         } catch (VideoAgentException exception) {
             throw exception;
+        } catch (HttpException exception) {
+            int status = exception.statusCode();
+            if (status == 408 || status == 429 || status >= 500) {
+                throw transientFailure(exception);
+            }
+            throw providerRejected("Planner Provider 拒绝了请求 (HTTP " + status + ")", exception);
+        } catch (NonRetriableException exception) {
+            throw providerRejected("Planner Provider 拒绝了请求", exception);
+        } catch (RetriableException exception) {
+            throw transientFailure(exception);
         } catch (RuntimeException exception) {
             throw new VideoAgentException(
-                ErrorCode.LLM_SUMMARY_FAILED,
-                "检索规划调用失败",
+                ErrorCode.INTERNAL_ERROR,
+                "检索规划发生内部错误",
                 exception
             );
         }
+    }
+
+    private VideoAgentException transientFailure(RuntimeException cause) {
+        return new VideoAgentException(
+            ErrorCode.AGENT_PLANNER_FAILED,
+            "检索规划服务暂时不可用",
+            cause
+        );
+    }
+
+    private VideoAgentException providerRejected(String message, RuntimeException cause) {
+        return new VideoAgentException(ErrorCode.LLM_PROVIDER_REJECTED, message, cause);
     }
 
     private RetrievalTool parseTool(String raw) {

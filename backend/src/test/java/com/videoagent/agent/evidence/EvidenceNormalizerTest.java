@@ -17,7 +17,7 @@ class EvidenceNormalizerTest {
     @BeforeEach
     void setUp() {
         // maxEvidenceItems=3, maxEvidenceChars=100.
-        AgentProperties properties = new AgentProperties("mock", 4, 15_000, 120_000, 3, 100, "");
+        AgentProperties properties = new AgentProperties("mock", 4, 15_000L, 120_000L, 3, 100, "");
         normalizer = new EvidenceNormalizer(properties);
     }
 

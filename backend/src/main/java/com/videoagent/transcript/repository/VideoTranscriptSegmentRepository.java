@@ -43,4 +43,20 @@ public interface VideoTranscriptSegmentRepository extends BaseMapper<VideoTransc
         ORDER BY segment.segment_index ASC, segment.start_ms ASC, segment.id ASC
         """)
     List<VideoTranscriptSegmentEntity> findLatestSuccessfulByVideoId(@Param("videoId") long videoId);
+
+    @Select("""
+        SELECT *
+        FROM video_transcript_segment
+        WHERE task_id = #{taskId}
+          AND video_id = #{videoId}
+          AND start_ms < #{toMs}
+          AND end_ms > #{fromMs}
+        ORDER BY segment_index ASC, start_ms ASC, id ASC
+        """)
+    List<VideoTranscriptSegmentEntity> findOverlappingByTaskIdAndVideoId(
+        @Param("taskId") long taskId,
+        @Param("videoId") long videoId,
+        @Param("fromMs") long fromMs,
+        @Param("toMs") long toMs
+    );
 }

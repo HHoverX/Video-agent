@@ -1,33 +1,40 @@
 package com.videoagent.agent.qa;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.summary.provider.SummaryProviderProperties;
 
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.service.AiServices;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration(proxyBeanMethods = false)
 public class AgenticAnswerProviderConfiguration {
 
-    private static final Logger log = LoggerFactory.getLogger(AgenticAnswerProviderConfiguration.class);
-
     @Bean
-    public AgenticAnswerProvider agenticAnswerProvider(SummaryProviderProperties properties) {
+    public AgenticAnswerProvider agenticAnswerProvider(
+        SummaryProviderProperties properties,
+        ObjectMapper objectMapper
+    ) {
         return switch (properties.provider()) {
-            case "openai" -> realOrMock(properties);
-            default -> new MockAgenticAnswerProvider();
+            case "mock" -> new MockAgenticAnswerProvider();
+            case "openai" -> realProvider(properties, objectMapper);
+            default -> throw new IllegalArgumentException(
+                "Unsupported LLM_PROVIDER for Agentic Answer: " + properties.provider()
+            );
         };
     }
 
-    private AgenticAnswerProvider realOrMock(SummaryProviderProperties properties) {
+    private AgenticAnswerProvider realProvider(
+        SummaryProviderProperties properties,
+        ObjectMapper objectMapper
+    ) {
         if (!properties.hasRealProviderConfiguration()) {
-            log.warn("LLM provider=openai is missing API key or model; using MockAgenticAnswerProvider");
-            return new MockAgenticAnswerProvider();
+            throw new IllegalStateException(
+                "LLM_PROVIDER=openai requires LLM_API_KEY and LLM_MODEL for Agentic Answer"
+            );
         }
         ChatModel chatModel = OpenAiChatModel.builder()
             .apiKey(properties.apiKey())
@@ -41,6 +48,6 @@ public class AgenticAnswerProviderConfiguration {
             LangChain4jAgenticAnswerAiService.class,
             chatModel
         );
-        return new LangChain4jAgenticAnswerProvider(aiService);
+        return new LangChain4jAgenticAnswerProvider(aiService, objectMapper);
     }
 }

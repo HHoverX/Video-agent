@@ -118,6 +118,15 @@ public class QdrantVectorStore {
 
     public void deleteByVideo(long userId, long videoId) {
         try {
+            deleteByVideoStrict(userId, videoId);
+        } catch (VideoAgentException exception) {
+            log.warn("[userId={}][videoId={}] qdrant delete best-effort failed: {}",
+                userId, videoId, safeMessage(exception));
+        }
+    }
+
+    public void deleteByVideoStrict(long userId, long videoId) {
+        try {
             restClient.post()
                 .uri(properties.baseUrl() + "/collections/" + properties.collection() + "/points/delete")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -128,8 +137,11 @@ public class QdrantVectorStore {
                 .retrieve()
                 .toBodilessEntity();
         } catch (RestClientException exception) {
-            log.warn("[userId={}][videoId={}] qdrant delete best-effort failed: {}",
-                userId, videoId, safeMessage(exception));
+            throw new VideoAgentException(
+                ErrorCode.RAG_INDEX_BUILD_FAILED,
+                "向量旧索引删除失败",
+                exception
+            );
         }
     }
 
@@ -221,7 +233,7 @@ public class QdrantVectorStore {
         return value == null ? "" : value.toString();
     }
 
-    private String safeMessage(RestClientException exception) {
+    private String safeMessage(RuntimeException exception) {
         String message = exception.getMessage();
         return message == null || message.isBlank() ? "qdrant request failed" : message;
     }

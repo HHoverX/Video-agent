@@ -17,7 +17,7 @@ class PlannerProviderConfigurationTest {
     @Test
     void shouldUseMockWhenProviderIsMock() {
         RetrievalPlannerProvider provider = configuration.retrievalPlannerProvider(
-            new AgentProperties("mock", 4, 15_000, 120_000, 12, 12_000, ""),
+            new AgentProperties("mock", 4, 15_000L, 120_000L, 12, 12_000, ""),
             new SummaryProviderProperties("openai", "", "", "", Duration.ofSeconds(5), 0, null)
         );
         assertThat(provider).isInstanceOf(MockRetrievalPlannerProvider.class);
@@ -26,7 +26,7 @@ class PlannerProviderConfigurationTest {
     @Test
     void shouldFailFastWhenRealPlannerMissingLlmConfig() {
         assertThatThrownBy(() -> configuration.retrievalPlannerProvider(
-            new AgentProperties("llm", 4, 15_000, 120_000, 12, 12_000, ""),
+            new AgentProperties("llm", 4, 15_000L, 120_000L, 12, 12_000, ""),
             new SummaryProviderProperties("openai", "", "", "", Duration.ofSeconds(5), 0, null)
         )).isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("AGENT_PLANNER_PROVIDER");
@@ -35,7 +35,7 @@ class PlannerProviderConfigurationTest {
     @Test
     void shouldBuildRealPlannerWhenLlmConfigured() {
         RetrievalPlannerProvider provider = configuration.retrievalPlannerProvider(
-            new AgentProperties("llm", 4, 15_000, 120_000, 12, 12_000, ""),
+            new AgentProperties("llm", 4, 15_000L, 120_000L, 12, 12_000, ""),
             new SummaryProviderProperties("openai", "test-key", "deepseek-v4-flash", "https://api.deepseek.com",
                 Duration.ofSeconds(30), 0, "json_object")
         );
@@ -45,9 +45,19 @@ class PlannerProviderConfigurationTest {
     @Test
     void shouldRejectUnknownProvider() {
         assertThatThrownBy(() -> configuration.retrievalPlannerProvider(
-            new AgentProperties("unknown", 4, 15_000, 120_000, 12, 12_000, ""),
+            new AgentProperties("unknown", 4, 15_000L, 120_000L, 12, 12_000, ""),
             new SummaryProviderProperties("openai", "", "", "", Duration.ofSeconds(5), 0, null)
         )).isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("Unsupported AGENT_PLANNER_PROVIDER");
+    }
+
+    @Test
+    void shouldRejectRealPlannerWhenLlmProviderIsTypoEvenWithCredentials() {
+        assertThatThrownBy(() -> configuration.retrievalPlannerProvider(
+            new AgentProperties("llm", 4, 15_000L, 120_000L, 12, 12_000, ""),
+            new SummaryProviderProperties("deepssek", "test-key", "model", "https://example.test",
+                Duration.ofSeconds(5), 0, "json_object")
+        )).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("LLM_PROVIDER=openai");
     }
 }

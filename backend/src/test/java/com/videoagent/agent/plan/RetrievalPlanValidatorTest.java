@@ -15,7 +15,7 @@ import java.util.List;
 
 class RetrievalPlanValidatorTest {
 
-    private final AgentProperties properties = new AgentProperties("mock", 4, 15_000, 120_000, 12, 12_000, "");
+    private final AgentProperties properties = new AgentProperties("mock", 4, 15_000L, 120_000L, 12, 12_000, "");
     private RetrievalPlanValidator validator;
     private final AgenticQaContext context = new AgenticQaContext(
         1L, 7L, 3L, QaContextMode.RAG, true, true, "READY"

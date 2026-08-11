@@ -33,7 +33,9 @@ import org.springframework.http.ResponseEntity;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -89,6 +91,7 @@ class Milestone8RagInfrastructureIntegrationTest {
 
     private final List<Long> videoIds = new ArrayList<>();
     private final List<Long> taskIds = new ArrayList<>();
+    private final Map<Long, Long> indexedVideoOwners = new LinkedHashMap<>();
     private Session userA;
     private Session userB;
 
@@ -100,6 +103,7 @@ class Milestone8RagInfrastructureIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        indexedVideoOwners.forEach((videoId, userId) -> vectorStore.deleteByVideo(userId, videoId));
         for (Long taskId : taskIds.reversed()) {
             taskRepository.deleteById(taskId);
         }
@@ -116,6 +120,7 @@ class Milestone8RagInfrastructureIntegrationTest {
         }
         taskIds.clear();
         videoIds.clear();
+        indexedVideoOwners.clear();
     }
 
     @Test
@@ -145,9 +150,9 @@ class Milestone8RagInfrastructureIntegrationTest {
     @Test
     void pathBLongTranscriptBuildsRagIndexAndAnswersWithIsolation() {
         long videoA = insertVideo(userA, "Long A");
-        insertTranscript(videoA, userA.userId(), longSegments(40, "Redis"));
+        insertTranscript(videoA, userA.userId(), longSegments(40, "USER_A_ONLY_REDIS"));
         long videoB = insertVideo(userB, "Long B");
-        insertTranscript(videoB, userB.userId(), longSegments(40, "RocketMQ"));
+        insertTranscript(videoB, userB.userId(), longSegments(40, "USER_B_ONLY_ROCKETMQ"));
 
         // B's video should be isolated from A's index operations. The status
         // endpoint for a foreign video must return 404 (resource hidden).
@@ -164,6 +169,10 @@ class Milestone8RagInfrastructureIntegrationTest {
         assertThat(built.mode()).isEqualTo("RAG");
         assertThat(built.status()).isEqualTo("READY");
         assertThat(built.chunkCount()).isGreaterThan(0);
+
+        RagIndexStatusResponse builtB = ragBuild(videoB, userB);
+        assertThat(builtB.status()).isEqualTo("READY");
+        assertThat(builtB.chunkCount()).isGreaterThan(0);
 
         // QA in RAG mode.
         QaResponse qa = askQa(videoA, userA, "Redis 用来做什么？");
@@ -187,6 +196,10 @@ class Milestone8RagInfrastructureIntegrationTest {
         // A's video has its own chunks; nothing from B should appear because the
         // filter is userId+videoId.
         assertThat(aHits).isNotEmpty();
+        assertThat(aHits).allSatisfy(hit -> {
+            assertThat(hit.text()).contains("USER_A_ONLY_REDIS");
+            assertThat(hit.text()).doesNotContain("USER_B_ONLY_ROCKETMQ");
+        });
     }
 
     private RagIndexStatusResponse ragStatus(long videoId, Session session) {
@@ -208,6 +221,9 @@ class Milestone8RagInfrastructureIntegrationTest {
             RagIndexStatusResponse.class
         );
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        if (response.getBody() != null && "READY".equals(response.getBody().status())) {
+            indexedVideoOwners.put(videoId, session.userId());
+        }
         return response.getBody();
     }
 

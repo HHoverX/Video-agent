@@ -1,6 +1,7 @@
 package com.videoagent.agent.tool;
 
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.config.AgentProperties;
 import com.videoagent.agent.evidence.EvidenceItem;
 import com.videoagent.agent.evidence.EvidenceSourceType;
 import com.videoagent.agent.plan.RetrievalAction;
@@ -10,6 +11,7 @@ import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
+import com.videoagent.rag.service.RagIndexService;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
@@ -22,6 +24,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -39,15 +42,21 @@ public class AgenticToolExecutor {
     private final VideoTranscriptSegmentRepository segmentRepository;
     private final VideoSummaryService summaryService;
     private final TranscriptRetriever transcriptRetriever;
+    private final RagIndexService ragIndexService;
+    private final AgentProperties properties;
 
     public AgenticToolExecutor(
         VideoTranscriptSegmentRepository segmentRepository,
         VideoSummaryService summaryService,
-        TranscriptRetriever transcriptRetriever
+        TranscriptRetriever transcriptRetriever,
+        RagIndexService ragIndexService,
+        AgentProperties properties
     ) {
         this.segmentRepository = segmentRepository;
         this.summaryService = summaryService;
         this.transcriptRetriever = transcriptRetriever;
+        this.ragIndexService = ragIndexService;
+        this.properties = properties;
     }
 
     /**
@@ -57,7 +66,16 @@ public class AgenticToolExecutor {
     public List<EvidenceItem> execute(AgenticQaContext context, List<RetrievalAction> actions) {
         AtomicInteger idCounter = new AtomicInteger(1);
         List<EvidenceItem> evidence = new ArrayList<>();
-        for (RetrievalAction action : actions) {
+        List<RetrievalAction> uniqueActions = actions == null
+            ? List.of()
+            : new ArrayList<>(new LinkedHashSet<>(actions));
+        List<VideoTranscriptSegmentEntity> directSearchSegments =
+            context.contextMode() == QaContextMode.DIRECT_CONTEXT
+                && uniqueActions.stream().anyMatch(action -> action != null
+                    && action.tool() == RetrievalTool.SEARCH_TRANSCRIPT)
+                ? loadSegments(context.videoId())
+                : List.of();
+        for (RetrievalAction action : uniqueActions) {
             if (action == null || action.tool() == null) {
                 continue;
             }
@@ -66,60 +84,55 @@ public class AgenticToolExecutor {
             } else if (action.tool() == RetrievalTool.GET_TRANSCRIPT_BY_TIME) {
                 evidence.addAll(timeEvidence(context, action, idCounter));
             } else if (action.tool() == RetrievalTool.SEARCH_TRANSCRIPT) {
-                evidence.addAll(searchEvidence(context, action.query(), idCounter));
+                evidence.addAll(searchEvidence(
+                    context, action.query(), directSearchSegments, idCounter));
             }
         }
         return evidence;
     }
 
     private List<EvidenceItem> summaryEvidence(AgenticQaContext context, AtomicInteger idCounter) {
-        try {
-            VideoSummaryResponse summary = summaryService.getSummary(context.videoId(), context.currentUserId())
-                .orElse(null);
-            if (summary == null) {
-                return List.of();
-            }
-            List<VideoChapterResponse> chapters = summaryService.getChapters(
-                context.videoId(), context.currentUserId());
-            List<VideoKeyPointResponse> keyPoints = summaryService.getKeyPoints(
-                context.videoId(), context.currentUserId());
-
-            StringBuilder text = new StringBuilder("概述：" + (summary.overview() == null ? "" : summary.overview()));
-            if (!chapters.isEmpty()) {
-                text.append("\n章节：");
-                for (VideoChapterResponse chapter : chapters) {
-                    text.append("\n[")
-                        .append(chapter.title())
-                        .append("] ")
-                        .append(chapter.summary());
-                }
-            }
-            if (!keyPoints.isEmpty()) {
-                text.append("\n要点：");
-                for (VideoKeyPointResponse point : keyPoints) {
-                    text.append("\n- ").append(point.content());
-                }
-            }
-            List<EvidenceItem> items = new ArrayList<>();
-            items.add(new EvidenceItem(
-                evidenceId(idCounter),
-                EvidenceSourceType.SUMMARY,
-                text.toString(),
-                null,
-                null,
-                null,
-                null,
-                List.of(),
-                null
-            ));
-            log.info("[userId={}][videoId={}][tool=GET_VIDEO_SUMMARY][summaryAvailable=true]",
-                context.currentUserId(), context.videoId());
-            return items;
-        } catch (RuntimeException exception) {
-            log.info("[userId={}][videoId={}][tool=GET_VIDEO_SUMMARY][summaryAvailable=false]",
-                context.currentUserId(), context.videoId());
+        VideoSummaryResponse summary = summaryService.getSummary(context.videoId(), context.currentUserId())
+            .orElse(null);
+        if (summary == null) {
             return List.of();
         }
+        List<VideoChapterResponse> chapters = summaryService.getChapters(
+            context.videoId(), context.currentUserId());
+        List<VideoKeyPointResponse> keyPoints = summaryService.getKeyPoints(
+            context.videoId(), context.currentUserId());
+
+        StringBuilder text = new StringBuilder("概述：" + (summary.overview() == null ? "" : summary.overview()));
+        if (!chapters.isEmpty()) {
+            text.append("\n章节：");
+            for (VideoChapterResponse chapter : chapters) {
+                text.append("\n[")
+                    .append(chapter.title())
+                    .append("] ")
+                    .append(chapter.summary());
+            }
+        }
+        if (!keyPoints.isEmpty()) {
+            text.append("\n要点：");
+            for (VideoKeyPointResponse point : keyPoints) {
+                text.append("\n- ").append(point.content());
+            }
+        }
+        List<EvidenceItem> items = new ArrayList<>();
+        items.add(new EvidenceItem(
+            evidenceId(idCounter),
+            EvidenceSourceType.SUMMARY,
+            text.toString(),
+            null,
+            null,
+            null,
+            null,
+            List.of(),
+            null
+        ));
+        log.info("[userId={}][videoId={}][tool=GET_VIDEO_SUMMARY][summaryAvailable=true]",
+            context.currentUserId(), context.videoId());
+        return items;
     }
 
     private List<EvidenceItem> timeEvidence(
@@ -127,29 +140,32 @@ public class AgenticToolExecutor {
         RetrievalAction action,
         AtomicInteger idCounter
     ) {
-        long timeMs = action.timeMs() == null ? 0 : action.timeMs();
-        long windowMs = action.windowMs() == null ? 15_000 : action.windowMs();
-        List<VideoTranscriptSegmentEntity> segments = loadSegments(context.videoId());
+        long timeMs = action.timeMs();
+        long windowMs = action.windowMs() == null ? properties.timeLookupWindowMs() : action.windowMs();
         long from = Math.max(0, timeMs - windowMs);
         long to = timeMs + windowMs;
+        if (context.analysisTaskId() == null) {
+            throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "当前字幕缺少 analysisTaskId");
+        }
+        List<VideoTranscriptSegmentEntity> segments =
+            segmentRepository.findOverlappingByTaskIdAndVideoId(
+                context.analysisTaskId(), context.videoId(), from, to);
 
         List<EvidenceItem> items = new ArrayList<>();
         for (VideoTranscriptSegmentEntity segment : segments) {
             long startMs = segment.getStartMs() == null ? 0L : segment.getStartMs();
             long endMs = segment.getEndMs() == null ? startMs : segment.getEndMs();
-            if (overlaps(startMs, endMs, from, to)) {
-                items.add(new EvidenceItem(
-                    evidenceId(idCounter),
-                    EvidenceSourceType.TRANSCRIPT_TIME,
-                    segment.getText() == null ? "" : segment.getText(),
-                    startMs,
-                    endMs,
-                    segment.getSegmentIndex(),
-                    null,
-                    List.of(),
-                    null
-                ));
-            }
+            items.add(new EvidenceItem(
+                evidenceId(idCounter),
+                EvidenceSourceType.TRANSCRIPT_TIME,
+                segment.getText() == null ? "" : segment.getText(),
+                startMs,
+                endMs,
+                segment.getSegmentIndex(),
+                null,
+                List.of(),
+                null
+            ));
         }
         log.info("[userId={}][videoId={}][tool=GET_TRANSCRIPT_BY_TIME][requestedTimeMs={}][matchedSegmentIndexes={}]",
             context.currentUserId(), context.videoId(), timeMs,
@@ -160,16 +176,16 @@ public class AgenticToolExecutor {
     private List<EvidenceItem> searchEvidence(
         AgenticQaContext context,
         String query,
+        List<VideoTranscriptSegmentEntity> directSearchSegments,
         AtomicInteger idCounter
     ) {
-        List<VideoTranscriptSegmentEntity> segments = loadSegments(context.videoId());
         QaContextMode mode = context.contextMode();
 
         if (mode == QaContextMode.DIRECT_CONTEXT) {
             // Short transcript: the full transcript is the evidence. No
             // embedding, no Qdrant.
             List<EvidenceItem> items = new ArrayList<>();
-            for (VideoTranscriptSegmentEntity segment : segments) {
+            for (VideoTranscriptSegmentEntity segment : directSearchSegments) {
                 long startMs = segment.getStartMs() == null ? 0L : segment.getStartMs();
                 long endMs = segment.getEndMs() == null ? startMs : segment.getEndMs();
                 items.add(new EvidenceItem(
@@ -187,9 +203,7 @@ public class AgenticToolExecutor {
             return items;
         }
 
-        if (!context.ragReady()) {
-            throw new VideoAgentException(ErrorCode.RAG_INDEX_NOT_READY);
-        }
+        ragIndexService.requireReady(context.videoId(), context.currentUserId());
 
         List<RetrievedChunk> chunks = transcriptRetriever.retrieve(
             context.currentUserId(),
@@ -218,10 +232,6 @@ public class AgenticToolExecutor {
 
     private List<VideoTranscriptSegmentEntity> loadSegments(long videoId) {
         return segmentRepository.findLatestSuccessfulByVideoId(videoId);
-    }
-
-    private boolean overlaps(long startMs, long endMs, long from, long to) {
-        return startMs < to && endMs > from;
     }
 
     private String evidenceId(AtomicInteger counter) {

@@ -36,6 +36,11 @@ public class PlannerProviderConfiguration {
         AgentProperties agentProperties,
         SummaryProviderProperties llmProperties
     ) {
+        if (!"openai".equals(llmProperties.provider())) {
+            throw new IllegalStateException(
+                "AGENT_PLANNER_PROVIDER=llm requires LLM_PROVIDER=openai"
+            );
+        }
         if (!llmProperties.hasRealProviderConfiguration()) {
             throw new IllegalStateException(
                 "AGENT_PLANNER_PROVIDER=llm requires LLM configuration "
