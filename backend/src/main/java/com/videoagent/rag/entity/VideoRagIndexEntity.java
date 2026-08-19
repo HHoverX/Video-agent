@@ -22,6 +22,8 @@ public class VideoRagIndexEntity {
     private Integer embeddingDimension;
     private String lastErrorCode;
     private String lastErrorMessage;
+    private String buildToken;
+    private LocalDateTime buildStartedAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -120,6 +122,14 @@ public class VideoRagIndexEntity {
     public void setLastErrorMessage(String lastErrorMessage) {
         this.lastErrorMessage = lastErrorMessage;
     }
+
+    public String getBuildToken() { return buildToken; }
+
+    public void setBuildToken(String buildToken) { this.buildToken = buildToken; }
+
+    public LocalDateTime getBuildStartedAt() { return buildStartedAt; }
+
+    public void setBuildStartedAt(LocalDateTime buildStartedAt) { this.buildStartedAt = buildStartedAt; }
 
     public LocalDateTime getCreatedAt() {
         return createdAt;

@@ -28,7 +28,9 @@ class AnalysisRecoveryJobTest {
     private final OutboxService outboxService = mock(OutboxService.class);
     private final AnalysisOutboxEventRepository outboxEventRepository = mock(AnalysisOutboxEventRepository.class);
     private final TerminalNotifier terminalNotifier = mock(TerminalNotifier.class);
-    private final AnalysisReliabilityProperties properties = new AnalysisReliabilityProperties(3, Duration.ofMinutes(15), Duration.ofMinutes(2));
+    private final AnalysisReliabilityProperties properties = new AnalysisReliabilityProperties(
+        3, Duration.ofMinutes(15), Duration.ofMinutes(2), Duration.ofHours(2)
+    );
     private AnalysisRecoveryJob job;
 
     @BeforeEach

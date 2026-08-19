@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.config.EmbeddingProperties;
+import com.videoagent.provider.ProviderHttpFailure;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +13,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.client.ResourceAccessException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -81,21 +84,33 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
                 .retrieve()
                 .body(EmbeddingResponse.class);
             if (response == null || response.data() == null || response.data().size() != texts.size()) {
-                throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务返回结果数量不匹配");
+                throw new VideoAgentException(ErrorCode.EMBEDDING_RESPONSE_INVALID, "Embedding 服务返回结果数量不匹配");
             }
             List<float[]> vectors = new ArrayList<>(response.data().size());
             for (EmbeddingData data : response.data()) {
                 if (data.embedding() == null || data.embedding().length == 0) {
-                    throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务返回空向量");
+                    throw new VideoAgentException(ErrorCode.EMBEDDING_RESPONSE_INVALID, "Embedding 服务返回空向量");
                 }
                 vectors.add(data.embedding());
             }
             return vectors;
         } catch (VideoAgentException exception) {
             throw exception;
+        } catch (RestClientResponseException exception) {
+            throw ProviderHttpFailure.forStatus(
+                exception.getStatusCode().value(),
+                exception.getResponseHeaders() == null ? null : exception.getResponseHeaders().getFirst("Retry-After"),
+                "Embedding",
+                "向量化",
+                ErrorCode.EMBEDDING_REQUEST_FAILED,
+                ErrorCode.EMBEDDING_PROVIDER_REJECTED
+            );
+        } catch (ResourceAccessException exception) {
+            log.warn("[embedding] network or timeout failure: {}", exception.getMessage());
+            throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务网络请求失败", exception);
         } catch (RestClientException exception) {
             log.warn("[embedding] real embedding request failed: {}", exception.getMessage(), exception);
-            throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务请求失败", exception);
+            throw new VideoAgentException(ErrorCode.EMBEDDING_RESPONSE_INVALID, "Embedding 服务响应无法解析", exception);
         }
     }
 

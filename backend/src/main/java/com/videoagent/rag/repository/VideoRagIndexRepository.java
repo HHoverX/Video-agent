@@ -22,31 +22,43 @@ public interface VideoRagIndexRepository extends BaseMapper<VideoRagIndexEntity>
     VideoRagIndexEntity findByVideoId(@Param("videoId") long videoId);
 
     /**
-     * Atomically claims the index for a build. Only NOT_BUILT or FAILED or
-     * READY (rebuild) indexes can move to BUILDING, which prevents two
-     * concurrent builds from double-writing Qdrant.
+     * Atomically claims the index for a build. A live BUILDING lease cannot be
+     * stolen; a crashed builder becomes reclaimable only after staleBefore.
      */
     @Update("""
         UPDATE video_rag_index
         SET status = 'BUILDING',
+            build_token = #{buildToken},
+            build_started_at = #{now},
             last_error_code = NULL,
             last_error_message = NULL,
             updated_at = #{now}
         WHERE id = #{id}
-          AND status IN ('NOT_BUILT', 'FAILED', 'READY')
+          AND (
+                status IN ('NOT_BUILT', 'FAILED', 'READY')
+                OR (status = 'BUILDING' AND (build_started_at IS NULL OR build_started_at <= #{staleBefore}))
+              )
         """)
-    int claimBuilding(@Param("id") long id, @Param("now") LocalDateTime now);
+    int claimBuilding(
+        @Param("id") long id,
+        @Param("buildToken") String buildToken,
+        @Param("staleBefore") LocalDateTime staleBefore,
+        @Param("now") LocalDateTime now
+    );
 
     @Update("""
         UPDATE video_rag_index
         SET status = 'READY',
             chunk_count = #{chunkCount},
+            build_started_at = NULL,
             updated_at = #{now}
         WHERE id = #{id}
           AND status = 'BUILDING'
+          AND build_token = #{buildToken}
         """)
     int markReady(
         @Param("id") long id,
+        @Param("buildToken") String buildToken,
         @Param("chunkCount") int chunkCount,
         @Param("now") LocalDateTime now
     );
@@ -56,12 +68,15 @@ public interface VideoRagIndexRepository extends BaseMapper<VideoRagIndexEntity>
         SET status = 'FAILED',
             last_error_code = #{errorCode},
             last_error_message = #{errorMessage},
+            build_started_at = NULL,
             updated_at = #{now}
         WHERE id = #{id}
           AND status = 'BUILDING'
+          AND build_token = #{buildToken}
         """)
     int markFailed(
         @Param("id") long id,
+        @Param("buildToken") String buildToken,
         @Param("errorCode") String errorCode,
         @Param("errorMessage") String errorMessage,
         @Param("now") LocalDateTime now

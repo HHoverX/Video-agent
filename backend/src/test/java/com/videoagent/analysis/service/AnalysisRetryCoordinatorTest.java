@@ -26,7 +26,9 @@ class AnalysisRetryCoordinatorTest {
 
     private final AnalysisTaskRepository taskRepository = mock(AnalysisTaskRepository.class);
     private final OutboxService outboxService = mock(OutboxService.class);
-    private final AnalysisReliabilityProperties properties = new AnalysisReliabilityProperties(3, Duration.ofMinutes(15), Duration.ofMinutes(2));
+    private final AnalysisReliabilityProperties properties = new AnalysisReliabilityProperties(
+        3, Duration.ofMinutes(15), Duration.ofMinutes(2), Duration.ofHours(2)
+    );
     private AnalysisRetryCoordinator coordinator;
 
     @BeforeEach
@@ -96,6 +98,14 @@ class AnalysisRetryCoordinatorTest {
         assertThat(coordinator.backoffDuration(2)).isEqualTo(Duration.ofSeconds(10));
         assertThat(coordinator.backoffDuration(4)).isEqualTo(Duration.ofSeconds(40));
         assertThat(coordinator.backoffDuration(10)).isEqualTo(Duration.ofSeconds(60));
+    }
+
+    @Test
+    void shouldRespectRetryAfterAheadOfExponentialBackoff() {
+        Duration delay = coordinator.retryDelay(1, Duration.ofSeconds(45));
+
+        assertThat(delay).isGreaterThanOrEqualTo(Duration.ofSeconds(45));
+        assertThat(delay).isLessThanOrEqualTo(Duration.ofMinutes(15));
     }
 
     private AnalysisTaskEntity task(int retryCount, int generation) {

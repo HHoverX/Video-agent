@@ -11,6 +11,7 @@ import com.videoagent.analysis.service.AnalysisProgressUpdateService;
 import com.videoagent.analysis.service.AnalysisRetryCoordinator;
 import com.videoagent.analysis.service.FailureClass;
 import com.videoagent.analysis.service.TerminalNotifier;
+import com.videoagent.analysis.service.ActiveAnalysisLeaseRegistry;
 import com.videoagent.asr.AsrProvider;
 import com.videoagent.asr.AudioSource;
 import com.videoagent.asr.TranscriptSegment;
@@ -28,6 +29,7 @@ import com.videoagent.summary.service.VideoSummaryService;
 import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.rag.service.RagIndexService;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,6 +56,8 @@ public class AnalysisTaskProcessor {
     private final VideoSummaryService summaryService;
     private final AnalysisRetryCoordinator retryCoordinator;
     private final TerminalNotifier terminalNotifier;
+    private final RagIndexService ragIndexService;
+    private final ActiveAnalysisLeaseRegistry activeLeases;
 
     public AnalysisTaskProcessor(
         AnalysisTaskRepository analysisTaskRepository,
@@ -68,7 +72,9 @@ public class AnalysisTaskProcessor {
         VideoSummaryProvider summaryProvider,
         VideoSummaryService summaryService,
         AnalysisRetryCoordinator retryCoordinator,
-        TerminalNotifier terminalNotifier
+        TerminalNotifier terminalNotifier,
+        RagIndexService ragIndexService,
+        ActiveAnalysisLeaseRegistry activeLeases
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
         this.progressUpdateService = progressUpdateService;
@@ -83,6 +89,8 @@ public class AnalysisTaskProcessor {
         this.summaryService = summaryService;
         this.retryCoordinator = retryCoordinator;
         this.terminalNotifier = terminalNotifier;
+        this.ragIndexService = ragIndexService;
+        this.activeLeases = activeLeases;
     }
 
     public void process(AnalysisMessage message) {
@@ -126,6 +134,7 @@ public class AnalysisTaskProcessor {
         }
 
         int lastProgress = 0;
+        Integer activeGeneration = null;
         try {
             // HIGH #2/#4: the claim is a single conditional UPDATE. For
             // RETRY_WAITING it also requires retry_not_before <= now, so a
@@ -153,6 +162,8 @@ public class AnalysisTaskProcessor {
             }
             task = current;
             int generation = task.getProcessingGeneration() == null ? 0 : task.getProcessingGeneration();
+            activeLeases.register(task.getId(), task.getVideoId(), generation);
+            activeGeneration = generation;
 
             lastProgress = 10;
             publish(task, AnalysisStage.PREPARING, lastProgress);
@@ -201,6 +212,10 @@ public class AnalysisTaskProcessor {
                 summaryService.replaceTaskResult(task, summaryRequest, summary);
             }
 
+            lastProgress = advance(task, generation, AnalysisStage.INDEXING, 97);
+            ragIndexService.ensureAnalysisIndex(task, video.getUserId());
+            lastProgress = advance(task, generation, AnalysisStage.INDEX_SAVED, 99);
+
             int completed = analysisTaskRepository.markSuccess(task.getId(), generation, LocalDateTime.now());
             if (completed != 1) {
                 throw new FencingLostException(
@@ -216,9 +231,20 @@ public class AnalysisTaskProcessor {
             log.info("[taskId={}][videoId={}][stage=FENCED] worker lost its processing generation; stopping: {}",
                 task.getId(), task.getVideoId(), exception.getMessage());
         } catch (VideoAgentException exception) {
-            handleFailure(task, lastProgress, exception.errorCode().name(), exception.getMessage());
+            handleFailure(
+                task,
+                lastProgress,
+                exception.errorCode().name(),
+                exception.getMessage(),
+                exception,
+                exception.retryAfter()
+            );
         } catch (RuntimeException exception) {
             handleFailure(task, lastProgress, "INTERNAL_ANALYSIS_ERROR", exception.getMessage(), exception);
+        } finally {
+            if (activeGeneration != null) {
+                activeLeases.unregister(task.getId(), activeGeneration);
+            }
         }
     }
 
@@ -256,7 +282,7 @@ public class AnalysisTaskProcessor {
         String errorCode,
         String message
     ) {
-        handleFailure(task, progress, errorCode, message, null);
+        handleFailure(task, progress, errorCode, message, null, null);
     }
 
     private void handleFailure(
@@ -266,6 +292,17 @@ public class AnalysisTaskProcessor {
         String message,
         RuntimeException cause
     ) {
+        handleFailure(task, progress, errorCode, message, cause, null);
+    }
+
+    private void handleFailure(
+        AnalysisTaskEntity task,
+        int progress,
+        String errorCode,
+        String message,
+        RuntimeException cause,
+        java.time.Duration retryAfter
+    ) {
         String safeMessage = message == null || message.isBlank() ? "分析任务处理失败" : message;
         if (safeMessage.length() > 1000) {
             safeMessage = safeMessage.substring(0, 1000);
@@ -274,7 +311,9 @@ public class AnalysisTaskProcessor {
         if (retryable) {
             String checkpointStage = checkpointStage(task);
             AnalysisRetryCoordinator.RetryOutcome outcome =
-                retryCoordinator.handleRetryableFailure(task, checkpointStage, errorCode, safeMessage);
+                retryCoordinator.handleRetryableFailure(
+                    task, checkpointStage, errorCode, safeMessage, retryAfter
+                );
             if (outcome == AnalysisRetryCoordinator.RetryOutcome.RETRY_SCHEDULED) {
                 progressUpdateService.update(task.getId(), task.getVideoId(), new AnalysisProgressSnapshot(
                     AnalysisStatus.RETRY_WAITING.name(),

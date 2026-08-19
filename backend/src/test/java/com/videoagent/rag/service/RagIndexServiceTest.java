@@ -49,7 +49,7 @@ class RagIndexServiceTest {
     private final EmbeddingProvider embeddingProvider = mock(EmbeddingProvider.class);
     private final QdrantVectorStore vectorStore = mock(QdrantVectorStore.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
-    private final RagProperties ragProperties = new RagProperties(1000, 200, 1, 5);
+    private final RagProperties ragProperties = new RagProperties(1000, 200, 1, 5, 0.0f);
     private final EmbeddingProperties embeddingProperties = new EmbeddingProperties("mock", "", "", "", 384, java.time.Duration.ofSeconds(30));
     private RagIndexService service;
 
@@ -94,10 +94,10 @@ class RagIndexServiceTest {
         VideoRagIndexEntity ready = indexEntity(videoId, 3L, RagIndexStatus.READY.name());
         ready.setChunkCount(2);
         when(indexRepository.findByVideoId(videoId)).thenReturn(index);
-        when(indexRepository.claimBuilding(eq(99L), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.claimBuilding(eq(99L), anyString(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
         when(embeddingProvider.embedDocuments(any())).thenReturn(java.util.stream.IntStream.range(0, 20).mapToObj(i -> new float[384]).toList());
         when(embeddingProvider.providerName()).thenReturn("mock");
-        when(indexRepository.markReady(eq(99L), anyInt(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.markReady(eq(99L), anyString(), anyInt(), any(LocalDateTime.class))).thenReturn(1);
         when(indexRepository.selectById(99L)).thenReturn(ready);
 
         VideoRagIndexEntity result = service.buildIndex(videoId, 1L);
@@ -108,9 +108,29 @@ class RagIndexServiceTest {
         verify(vectorStore).upsertPoints(eq(1L), eq(7L), eq(3L), any());
 
         InOrder order = inOrder(indexRepository, transactionManager, embeddingProvider);
-        order.verify(indexRepository).claimBuilding(eq(99L), any(LocalDateTime.class));
+        order.verify(indexRepository).claimBuilding(
+            eq(99L), anyString(), any(LocalDateTime.class), any(LocalDateTime.class)
+        );
         order.verify(transactionManager).commit(any());
         order.verify(embeddingProvider).embedDocuments(any());
+    }
+
+    @Test
+    void shouldNotEmbedWhenAnotherBuilderOwnsLiveLease() {
+        long videoId = 7L;
+        when(segmentRepository.findLatestSuccessfulByVideoId(videoId)).thenReturn(segments(20));
+        when(indexRepository.findByVideoId(videoId))
+            .thenReturn(indexEntity(videoId, 3L, RagIndexStatus.BUILDING.name()));
+        when(indexRepository.claimBuilding(
+            anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class)
+        )).thenReturn(0);
+
+        assertThatThrownBy(() -> service.buildIndex(videoId, 1L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.RAG_INDEX_BUILD_FAILED));
+
+        verify(embeddingProvider, never()).embedDocuments(any());
+        verify(vectorStore, never()).upsertPoints(anyLong(), anyLong(), anyLong(), any());
     }
 
     @Test
@@ -128,9 +148,9 @@ class RagIndexServiceTest {
         when(segmentRepository.findLatestSuccessfulByVideoId(videoId)).thenReturn(segments(20));
         VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.NOT_BUILT.name());
         when(indexRepository.findByVideoId(videoId)).thenReturn(index);
-        when(indexRepository.claimBuilding(anyLong(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.claimBuilding(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
         when(embeddingProvider.embedDocuments(any())).thenReturn(java.util.stream.IntStream.range(0, 20).mapToObj(i -> new float[384]).toList());
-        when(indexRepository.markReady(anyLong(), anyInt(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.markReady(anyLong(), anyString(), anyInt(), any(LocalDateTime.class))).thenReturn(1);
         when(indexRepository.selectById(anyLong())).thenReturn(index);
 
         service.buildIndex(videoId, 1L);
@@ -150,9 +170,9 @@ class RagIndexServiceTest {
         VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.NOT_BUILT.name());
         VideoRagIndexEntity failed = indexEntity(videoId, 3L, RagIndexStatus.FAILED.name());
         when(indexRepository.findByVideoId(videoId)).thenReturn(index);
-        when(indexRepository.claimBuilding(anyLong(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.claimBuilding(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
         when(embeddingProvider.embedDocuments(any())).thenThrow(new IllegalStateException("embedding down"));
-        when(indexRepository.markFailed(anyLong(), anyString(), anyString(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.markFailed(anyLong(), anyString(), anyString(), anyString(), any(LocalDateTime.class))).thenReturn(1);
         when(indexRepository.selectById(99L)).thenReturn(failed);
 
         VideoRagIndexEntity result = service.buildIndex(videoId, 1L);
@@ -168,9 +188,9 @@ class RagIndexServiceTest {
         when(segmentRepository.findLatestSuccessfulByVideoId(videoId)).thenReturn(segments(20));
         VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.READY.name());
         when(indexRepository.findByVideoId(videoId)).thenReturn(index);
-        when(indexRepository.claimBuilding(anyLong(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.claimBuilding(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
         when(embeddingProvider.embedDocuments(any())).thenReturn(java.util.stream.IntStream.range(0, 20).mapToObj(i -> new float[384]).toList());
-        when(indexRepository.markReady(anyLong(), anyInt(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.markReady(anyLong(), anyString(), anyInt(), any(LocalDateTime.class))).thenReturn(1);
         when(indexRepository.selectById(anyLong())).thenReturn(index);
 
         service.buildIndex(videoId, 1L);
@@ -186,13 +206,13 @@ class RagIndexServiceTest {
         VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.READY.name());
         VideoRagIndexEntity failed = indexEntity(videoId, 3L, RagIndexStatus.FAILED.name());
         when(indexRepository.findByVideoId(videoId)).thenReturn(index);
-        when(indexRepository.claimBuilding(anyLong(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.claimBuilding(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class))).thenReturn(1);
         when(embeddingProvider.embedDocuments(any())).thenReturn(
             java.util.stream.IntStream.range(0, 20).mapToObj(i -> new float[384]).toList());
         org.mockito.Mockito.doThrow(new VideoAgentException(
             ErrorCode.RAG_INDEX_BUILD_FAILED, "delete failed"))
             .when(vectorStore).deleteByVideoStrict(1L, videoId);
-        when(indexRepository.markFailed(anyLong(), anyString(), anyString(), any(LocalDateTime.class)))
+        when(indexRepository.markFailed(anyLong(), anyString(), anyString(), anyString(), any(LocalDateTime.class)))
             .thenReturn(1);
         when(indexRepository.selectById(99L)).thenReturn(failed);
 
@@ -200,7 +220,7 @@ class RagIndexServiceTest {
 
         assertThat(result.getStatus()).isEqualTo(RagIndexStatus.FAILED.name());
         verify(vectorStore, never()).upsertPoints(anyLong(), anyLong(), anyLong(), any());
-        verify(indexRepository, never()).markReady(anyLong(), anyInt(), any(LocalDateTime.class));
+        verify(indexRepository, never()).markReady(anyLong(), anyString(), anyInt(), any(LocalDateTime.class));
     }
 
     @Test

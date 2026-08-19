@@ -1,0 +1,149 @@
+package com.videoagent.upload.service;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.videoagent.analysis.dto.StartAnalysisResponse;
+import com.videoagent.analysis.service.AnalysisCommandService;
+import com.videoagent.common.exception.ErrorCode;
+import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.storage.ObjectStorageService;
+import com.videoagent.storage.StoredObject;
+import com.videoagent.upload.dto.CompleteUploadResponse;
+import com.videoagent.upload.entity.VideoUploadPartEntity;
+import com.videoagent.upload.entity.VideoUploadSessionEntity;
+import com.videoagent.upload.repository.VideoUploadPartRepository;
+import com.videoagent.upload.repository.VideoUploadSessionRepository;
+import com.videoagent.video.entity.VideoEntity;
+import com.videoagent.video.repository.VideoRepository;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+class UploadCompletionTransactionTest {
+
+    private final VideoUploadSessionRepository sessions = mock(VideoUploadSessionRepository.class);
+    private final VideoUploadPartRepository parts = mock(VideoUploadPartRepository.class);
+    private final VideoRepository videos = mock(VideoRepository.class);
+    private final ObjectStorageService storage = mock(ObjectStorageService.class);
+    private final AnalysisCommandService analysis = mock(AnalysisCommandService.class);
+    private final UploadTemporaryObjectCleaner cleaner = mock(UploadTemporaryObjectCleaner.class);
+    private UploadCompletionTransaction transaction;
+
+    @BeforeEach
+    void setUp() {
+        transaction = new UploadCompletionTransaction(sessions, parts, videos, storage, analysis, cleaner);
+    }
+
+    @Test
+    void shouldComposeCreateExactlyOneVideoAndAnalysisTask() {
+        VideoUploadSessionEntity session = session("UPLOADING");
+        when(sessions.lockById("u1")).thenReturn(session);
+        when(parts.findByUploadId("u1")).thenReturn(List.of(part(1, 16, "e1"), part(2, 8, "e2")));
+        when(storage.statObject("upload-parts/u1/part-00001"))
+            .thenReturn(new StoredObject("p1", 16, "e1", "application/octet-stream"));
+        when(storage.statObject("upload-parts/u1/part-00002"))
+            .thenReturn(new StoredObject("p2", 8, "e2", "application/octet-stream"));
+        when(storage.statObject("videos/final.mp4"))
+            .thenReturn(new StoredObject("videos/final.mp4", 24, "final", "video/mp4"));
+        when(storage.readObjectRange("videos/final.mp4", 0, 12)).thenReturn(mp4Header());
+        when(videos.insert(any(VideoEntity.class))).thenAnswer(invocation -> {
+            VideoEntity video = invocation.getArgument(0);
+            video.setId(42L);
+            return 1;
+        });
+        when(analysis.start(42L, 7L)).thenReturn(new StartAnalysisResponse(91L, 42L, "PENDING"));
+
+        CompleteUploadResponse response = transaction.complete(7L, "u1");
+
+        assertThat(response.videoId()).isEqualTo(42L);
+        assertThat(response.analysisTaskId()).isEqualTo(91L);
+        verify(storage).composeObject(eq("videos/final.mp4"), any(), eq("video/mp4"));
+        verify(videos).insert(any(VideoEntity.class));
+        verify(analysis).start(42L, 7L);
+        assertThat(session.getStatus()).isEqualTo("COMPLETED");
+        verify(cleaner).cleanupAfterCommit(session);
+    }
+
+    @Test
+    void shouldReturnExistingResultForRepeatedOrConcurrentComplete() {
+        VideoUploadSessionEntity session = session("COMPLETED");
+        session.setVideoId(42L);
+        session.setAnalysisTaskId(91L);
+        when(sessions.lockById("u1")).thenReturn(session);
+
+        CompleteUploadResponse first = transaction.complete(7L, "u1");
+        CompleteUploadResponse second = transaction.complete(7L, "u1");
+
+        assertThat(first).isEqualTo(second);
+        verify(storage, never()).composeObject(any(), any(), any());
+        verify(videos, never()).insert(any(VideoEntity.class));
+        verify(analysis, never()).start(anyLong(), anyLong());
+    }
+
+    @Test
+    void shouldRejectMissingPartAndFinalSizeMismatch() {
+        VideoUploadSessionEntity missing = session("UPLOADING");
+        when(sessions.lockById("u1")).thenReturn(missing);
+        when(parts.findByUploadId("u1")).thenReturn(List.of(part(1, 16, "e1")));
+        assertThatThrownBy(() -> transaction.complete(7L, "u1"))
+            .isInstanceOfSatisfying(VideoAgentException.class,
+                error -> assertThat(error.errorCode()).isEqualTo(ErrorCode.UPLOAD_PART_INVALID));
+        verify(storage, never()).composeObject(any(), any(), any());
+    }
+
+    @Test
+    void shouldRejectExpiredSessionBeforeCompose() {
+        VideoUploadSessionEntity expired = session("UPLOADING");
+        expired.setExpiresAt(LocalDateTime.now().minusMinutes(1));
+        when(sessions.lockById("u1")).thenReturn(expired);
+
+        assertThatThrownBy(() -> transaction.complete(7L, "u1"))
+            .isInstanceOfSatisfying(VideoAgentException.class,
+                error -> assertThat(error.errorCode()).isEqualTo(ErrorCode.UPLOAD_SESSION_EXPIRED));
+        verify(storage, never()).composeObject(any(), any(), any());
+    }
+
+    private VideoUploadSessionEntity session(String status) {
+        VideoUploadSessionEntity session = new VideoUploadSessionEntity();
+        session.setId("u1");
+        session.setUserId(7L);
+        session.setFileName("lesson.mp4");
+        session.setTitle("lesson");
+        session.setFileSize(24L);
+        session.setContentType("video/mp4");
+        session.setChunkSize(16L);
+        session.setTotalParts(2);
+        session.setTempPrefix("upload-parts/u1");
+        session.setObjectKey("videos/final.mp4");
+        session.setStatus(status);
+        session.setExpiresAt(LocalDateTime.now().plusHours(1));
+        return session;
+    }
+
+    private VideoUploadPartEntity part(int number, long size, String etag) {
+        VideoUploadPartEntity part = new VideoUploadPartEntity();
+        part.setUploadId("u1");
+        part.setPartNumber(number);
+        part.setObjectKey("upload-parts/u1/part-%05d".formatted(number));
+        part.setExpectedSize(size);
+        part.setActualSize(size);
+        part.setEtag(etag);
+        part.setStatus("COMPLETED");
+        return part;
+    }
+
+    private byte[] mp4Header() {
+        return new byte[] {0, 0, 0, 0, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'};
+    }
+}

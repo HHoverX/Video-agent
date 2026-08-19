@@ -21,7 +21,7 @@ class TranscriptRetrieverTest {
 
     private final EmbeddingProvider embeddingProvider = mock(EmbeddingProvider.class);
     private final QdrantVectorStore vectorStore = mock(QdrantVectorStore.class);
-    private final RagProperties properties = new RagProperties(1000, 200, 1, 5);
+    private final RagProperties properties = new RagProperties(1000, 200, 1, 5, 0.0f);
     private TranscriptRetriever retriever;
 
     @BeforeEach
@@ -53,5 +53,21 @@ class TranscriptRetrieverTest {
         List<RetrievedChunk> chunks = retriever.retrieve(1L, 7L, "nothing");
 
         assertThat(chunks).isEmpty();
+    }
+
+    @Test
+    void shouldDropHitsBelowConfiguredEvidenceScore() {
+        TranscriptRetriever thresholdRetriever = new TranscriptRetriever(
+            embeddingProvider, vectorStore, new RagProperties(1000, 200, 1, 5, 0.75f)
+        );
+        when(embeddingProvider.embedQuery("question")).thenReturn(new float[384]);
+        when(vectorStore.search(1L, 7L, new float[384], 5)).thenReturn(List.of(
+            VectorPoint.retrieved(2, "strong", 4000, 6000, 0.90f),
+            VectorPoint.retrieved(0, "weak", 0, 2000, 0.74f)
+        ));
+
+        List<RetrievedChunk> chunks = thresholdRetriever.retrieve(1L, 7L, "question");
+
+        assertThat(chunks).extracting(RetrievedChunk::text).containsExactly("strong");
     }
 }

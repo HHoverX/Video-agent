@@ -62,7 +62,7 @@ class AgenticVideoQaServiceTest {
     private final VideoQaService basicQaService = mock(VideoQaService.class);
     private AgenticVideoQaService service;
 
-    private final RagProperties ragProperties = new RagProperties(100, 200, 1, 5);
+    private final RagProperties ragProperties = new RagProperties(100, 200, 1, 5, 0.0f);
 
     @BeforeEach
     void setUp() {

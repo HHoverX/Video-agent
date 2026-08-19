@@ -289,6 +289,9 @@ class Milestone7ReliabilityInfrastructureIntegrationTest {
         task.setProcessingGeneration(1);
         task.setStatus("PROCESSING");
         task.setStage("TRANSCRIBING");
+        // Lease recovery is driven by processing_at. updated_at may change for
+        // unrelated metadata and must not decide whether a worker is alive.
+        task.setProcessingAt(LocalDateTime.now().minusHours(1));
         task.setUpdatedAt(LocalDateTime.now().minusHours(1));
         assertThat(taskRepository.updateById(task)).isEqualTo(1);
 

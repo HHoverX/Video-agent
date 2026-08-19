@@ -1,7 +1,7 @@
 # VideoAgent v1.0.0 FINAL AI Handoff
 
 > 最后更新：2026-08-13
-> 最终基线：`main` / `v1.0.0` / `0d04a7fe73baf6f7309f31214687c78be736b0c4`
+> 最终基线：`v1.0.0` / `0d04a7fe73baf6f7309f31214687c78be736b0c4`
 > 最终提交：`fix: close milestone 8.2 audit findings`
 > 项目状态：**Feature Complete / Frozen**
 

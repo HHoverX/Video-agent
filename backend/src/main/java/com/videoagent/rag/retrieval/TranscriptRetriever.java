@@ -40,6 +40,7 @@ public class TranscriptRetriever {
             properties.topK()
         );
         return hits.stream()
+            .filter(hit -> hit.score() >= properties.minimumScore())
             .map(hit -> new RetrievedChunk(
                 hit.chunkIndex(),
                 hit.text(),

@@ -45,6 +45,7 @@ import java.util.Set;
 public class VideoQaService {
 
     private static final Logger log = LoggerFactory.getLogger(VideoQaService.class);
+    private static final String INSUFFICIENT_EVIDENCE = "根据当前视频内容无法确定。";
 
     private final VideoOwnershipService ownershipService;
     private final VideoTranscriptSegmentRepository segmentRepository;
@@ -104,15 +105,20 @@ public class VideoQaService {
             byIndex.put(item.index(), item);
         }
         List<QaCitation> citations = resolveCitations(result.citationIndexes(), byIndex);
+        String answer = citations.isEmpty() ? INSUFFICIENT_EVIDENCE : result.answer();
 
         log.info("[userId={}][videoId={}][contextMode=DIRECT_CONTEXT][transcriptChars={}][segmentCount={}] qa answered",
             userId, videoId, strategyResolver.transcriptChars(segments), segments.size());
-        return new QaResponse(QaContextMode.DIRECT_CONTEXT.name(), result.answer(), citations);
+        return new QaResponse(QaContextMode.DIRECT_CONTEXT.name(), answer, citations);
     }
 
     private QaResponse answerRag(long videoId, long userId, String question) {
         VideoRagIndexEntity index = ragIndexService.requireReady(videoId, userId);
         List<RetrievedChunk> chunks = retriever.retrieve(userId, videoId, question);
+        if (chunks.isEmpty()) {
+            log.info("[userId={}][videoId={}][contextMode=RAG] no evidence above minimum score", userId, videoId);
+            return new QaResponse(QaContextMode.RAG.name(), INSUFFICIENT_EVIDENCE, List.of());
+        }
 
         List<VideoQaRequest.ContextItem> context = new ArrayList<>(chunks.size());
         for (RetrievedChunk chunk : chunks) {
@@ -130,12 +136,13 @@ public class VideoQaService {
             byIndex.put(item.index(), item);
         }
         List<QaCitation> citations = resolveCitations(result.citationIndexes(), byIndex);
+        String answer = citations.isEmpty() ? INSUFFICIENT_EVIDENCE : result.answer();
 
         List<Integer> retrievedIndexes = chunks.stream().map(RetrievedChunk::chunkIndex).toList();
         log.info("[userId={}][videoId={}][analysisTaskId={}][ragIndexId={}][contextMode=RAG][retrievalTopK={}][retrievedChunkIndexes={}] qa answered",
             userId, videoId, index.getAnalysisTaskId(), index.getId(),
             chunks.size(), retrievedIndexes);
-        return new QaResponse(QaContextMode.RAG.name(), result.answer(), citations);
+        return new QaResponse(QaContextMode.RAG.name(), answer, citations);
     }
 
     /**

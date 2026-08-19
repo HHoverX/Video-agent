@@ -32,7 +32,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
         SELECT *
         FROM analysis_task
         WHERE status = 'PROCESSING'
-          AND updated_at <= #{staleBefore}
+          AND processing_at <= #{staleBefore}
         ORDER BY id ASC
         """)
     List<AnalysisTaskEntity> findStaleProcessing(@Param("staleBefore") LocalDateTime staleBefore);
@@ -70,8 +70,6 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
             processing_at = #{now},
             error_code = NULL,
             error_message = NULL,
-            last_error_code = NULL,
-            last_error_message = NULL,
             updated_at = #{now}
         WHERE id = #{taskId}
           AND (
@@ -126,8 +124,6 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
             progress = 100,
             error_code = NULL,
             error_message = NULL,
-            last_error_code = NULL,
-            last_error_message = NULL,
             processing_generation = processing_generation + 1,
             processing_at = NULL,
             retry_not_before = NULL,
@@ -146,6 +142,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Update("""
         UPDATE analysis_task
         SET status = 'FAILED',
+            last_failure_stage = stage,
             stage = 'FAILED',
             error_code = #{errorCode},
             error_message = #{errorMessage},
@@ -171,6 +168,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Update("""
         UPDATE analysis_task
         SET status = 'FAILED',
+            last_failure_stage = stage,
             stage = 'FAILED',
             error_code = #{errorCode},
             error_message = #{errorMessage},
@@ -198,6 +196,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Update("""
         UPDATE analysis_task
         SET status = 'RETRY_WAITING',
+            last_failure_stage = #{stage},
             stage = #{stage},
             error_code = #{errorCode},
             error_message = #{errorMessage},
@@ -233,6 +232,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Update("""
         UPDATE analysis_task
         SET status = 'FAILED',
+            last_failure_stage = stage,
             stage = 'FAILED',
             error_code = #{errorCode},
             error_message = #{errorMessage},
@@ -267,6 +267,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Update("""
         UPDATE analysis_task
         SET status = 'RETRY_WAITING',
+            last_failure_stage = stage,
             stage = 'RETRY_WAITING',
             error_code = #{errorCode},
             error_message = #{errorMessage},
@@ -279,7 +280,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
             updated_at = #{now}
         WHERE id = #{taskId}
           AND status = 'PROCESSING'
-          AND updated_at <= #{staleBefore}
+          AND processing_at <= #{staleBefore}
           AND retry_count + 1 < #{maxAttempts}
         """)
     int reclaimStaleProcessingWithBudget(
@@ -300,6 +301,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Update("""
         UPDATE analysis_task
         SET status = 'FAILED',
+            last_failure_stage = stage,
             stage = 'FAILED',
             error_code = #{errorCode},
             error_message = #{errorMessage},
@@ -313,7 +315,7 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
             updated_at = #{now}
         WHERE id = #{taskId}
           AND status = 'PROCESSING'
-          AND updated_at <= #{staleBefore}
+          AND processing_at <= #{staleBefore}
           AND retry_count + 1 >= #{maxAttempts}
         """)
     int reclaimStaleProcessingExhausted(

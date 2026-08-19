@@ -20,6 +20,7 @@ public class AnalysisTaskEntity {
     private Integer retryCount;
     private String lastErrorCode;
     private String lastErrorMessage;
+    private String lastFailureStage;
     private Integer processingGeneration;
     private LocalDateTime processingAt;
     private LocalDateTime retryNotBefore;
@@ -109,6 +110,10 @@ public class AnalysisTaskEntity {
     public void setLastErrorMessage(String lastErrorMessage) {
         this.lastErrorMessage = lastErrorMessage;
     }
+
+    public String getLastFailureStage() { return lastFailureStage; }
+
+    public void setLastFailureStage(String lastFailureStage) { this.lastFailureStage = lastFailureStage; }
 
     public Integer getProcessingGeneration() {
         return processingGeneration;

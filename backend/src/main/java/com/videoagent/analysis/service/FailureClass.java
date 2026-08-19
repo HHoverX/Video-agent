@@ -23,7 +23,9 @@ public enum FailureClass {
         ErrorCode.LLM_SUMMARY_FAILED.name(),
         ErrorCode.TRANSCRIPTION_FAILED.name(),
         ErrorCode.SUMMARY_PERSISTENCE_FAILED.name(),
-        ErrorCode.STORAGE_ERROR.name()
+        ErrorCode.STORAGE_ERROR.name(),
+        ErrorCode.EMBEDDING_REQUEST_FAILED.name(),
+        ErrorCode.RAG_INDEX_BUILD_FAILED.name()
     );
 
     private static final Set<String> NON_RETRYABLE_CODES = Set.of(
@@ -35,6 +37,8 @@ public enum FailureClass {
         ErrorCode.ASR_INPUT_TOO_LARGE.name(),
         ErrorCode.LLM_PROVIDER_REJECTED.name(),
         ErrorCode.LLM_SUMMARY_INVALID.name(),
+        ErrorCode.EMBEDDING_PROVIDER_REJECTED.name(),
+        ErrorCode.EMBEDDING_RESPONSE_INVALID.name(),
         ErrorCode.INTERNAL_ANALYSIS_ERROR.name(),
         ErrorCode.ANALYSIS_DISPATCH_EXHAUSTED.name(),
         ErrorCode.ANALYSIS_RETRY_EXHAUSTED.name()

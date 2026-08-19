@@ -12,7 +12,8 @@ public record RagProperties(
     int directContextMaxChars,
     int chunkMaxChars,
     int chunkOverlapSegments,
-    int topK
+    int topK,
+    float minimumScore
 ) {
 
     public RagProperties {
@@ -20,5 +21,7 @@ public record RagProperties(
         chunkMaxChars = chunkMaxChars <= 0 ? 2_000 : chunkMaxChars;
         chunkOverlapSegments = chunkOverlapSegments < 0 ? 1 : chunkOverlapSegments;
         topK = topK <= 0 ? 5 : topK;
+        minimumScore = minimumScore < 0 || minimumScore > 1 ? 0.45f : minimumScore;
     }
+
 }

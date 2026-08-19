@@ -20,7 +20,7 @@ class VideoFileValidatorTest {
     @Test
     void shouldAcceptMp4AndDeriveTitle() {
         VideoFileValidator validator = new VideoFileValidator(
-            new VideoUploadProperties(DataSize.ofMegabytes(1))
+            uploadProperties(DataSize.ofMegabytes(1))
         );
         MockMultipartFile file = new MockMultipartFile(
             "file",
@@ -40,7 +40,7 @@ class VideoFileValidatorTest {
     @Test
     void shouldRejectUnsupportedContent() {
         VideoFileValidator validator = new VideoFileValidator(
-            new VideoUploadProperties(DataSize.ofMegabytes(1))
+            uploadProperties(DataSize.ofMegabytes(1))
         );
         MockMultipartFile file = new MockMultipartFile(
             "file",
@@ -58,7 +58,7 @@ class VideoFileValidatorTest {
     @Test
     void shouldRejectFileOverConfiguredLimit() {
         VideoFileValidator validator = new VideoFileValidator(
-            new VideoUploadProperties(DataSize.ofBytes(10))
+            uploadProperties(DataSize.ofBytes(10))
         );
         MockMultipartFile file = new MockMultipartFile(
             "file",
@@ -71,5 +71,18 @@ class VideoFileValidatorTest {
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_FILE_TOO_LARGE)
             );
+    }
+
+    private VideoUploadProperties uploadProperties(DataSize maxFileSize) {
+        return new VideoUploadProperties(
+            maxFileSize,
+            DataSize.ofMegabytes(16),
+            DataSize.ofMegabytes(5),
+            DataSize.ofMegabytes(128),
+            10_000,
+            java.time.Duration.ofHours(24),
+            java.time.Duration.ofMinutes(15),
+            3
+        );
     }
 }

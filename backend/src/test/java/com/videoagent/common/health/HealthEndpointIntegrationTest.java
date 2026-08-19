@@ -11,6 +11,8 @@ import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
 import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.upload.repository.VideoUploadSessionRepository;
+import com.videoagent.upload.repository.VideoUploadPartRepository;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 
 import org.junit.jupiter.api.Test;
@@ -42,6 +44,12 @@ class HealthEndpointIntegrationTest {
 
     @MockitoBean
     private VideoRepository videoRepository;
+
+    @MockitoBean
+    private VideoUploadSessionRepository videoUploadSessionRepository;
+
+    @MockitoBean
+    private VideoUploadPartRepository videoUploadPartRepository;
 
     @MockitoBean
     private AnalysisTaskRepository analysisTaskRepository;

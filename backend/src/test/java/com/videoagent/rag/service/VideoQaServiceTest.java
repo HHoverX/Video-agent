@@ -39,7 +39,7 @@ class VideoQaServiceTest {
     private final VideoQaProvider qaProvider = mock(VideoQaProvider.class);
     private final TranscriptRetriever retriever = mock(TranscriptRetriever.class);
     private final RagIndexService ragIndexService = mock(RagIndexService.class);
-    private final RagProperties properties = new RagProperties(100, 200, 1, 5);
+    private final RagProperties properties = new RagProperties(100, 200, 1, 5, 0.0f);
     private VideoQaService service;
 
     @BeforeEach

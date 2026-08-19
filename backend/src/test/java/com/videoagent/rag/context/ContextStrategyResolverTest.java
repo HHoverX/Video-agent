@@ -14,7 +14,7 @@ import java.util.List;
 
 class ContextStrategyResolverTest {
 
-    private final RagProperties properties = new RagProperties(1000, 200, 1, 5);
+    private final RagProperties properties = new RagProperties(1000, 200, 1, 5, 0.0f);
     private final ContextStrategyResolver resolver = new ContextStrategyResolver(properties);
 
     @Test

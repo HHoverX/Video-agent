@@ -29,6 +29,8 @@ import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.upload.repository.VideoUploadSessionRepository;
+import com.videoagent.upload.repository.VideoUploadPartRepository;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -66,6 +68,12 @@ class SecurityEndpointIntegrationTest {
 
     @MockitoBean
     private VideoRepository videoRepository;
+
+    @MockitoBean
+    private VideoUploadSessionRepository uploadSessionRepository;
+
+    @MockitoBean
+    private VideoUploadPartRepository uploadPartRepository;
 
     @MockitoBean
     private AnalysisTaskRepository taskRepository;

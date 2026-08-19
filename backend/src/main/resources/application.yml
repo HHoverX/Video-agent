@@ -58,6 +58,7 @@ videoagent:
       max-attempts: ${ANALYSIS_MAX_ATTEMPTS:3}
       processing-lease: ${ANALYSIS_PROCESSING_LEASE:15m}
       heartbeat-interval: ${ANALYSIS_HEARTBEAT_INTERVAL:2m}
+      max-execution-time: ${ANALYSIS_MAX_EXECUTION_TIME:2h}
     recovery-interval-ms: ${ANALYSIS_RECOVERY_INTERVAL_MS:30000}
     heartbeat-interval-ms: ${ANALYSIS_HEARTBEAT_INTERVAL_MS:120000}
     sse:
@@ -73,6 +74,7 @@ videoagent:
     chunk-max-chars: ${RAG_CHUNK_MAX_CHARS:2000}
     chunk-overlap-segments: ${RAG_CHUNK_OVERLAP_SEGMENTS:1}
     top-k: ${RAG_TOP_K:5}
+    minimum-score: ${RAG_MINIMUM_SCORE:0.45}
     qdrant:
       host: ${QDRANT_HOST:localhost}
       port: ${QDRANT_REST_PORT:6333}
@@ -98,7 +100,15 @@ videoagent:
     temp-root: ${MEDIA_TEMP_ROOT:${java.io.tmpdir}/videoagent-media}
     stderr-max-chars: ${FFMPEG_STDERR_MAX_CHARS:4000}
   upload:
-    max-file-size: ${VIDEO_MAX_FILE_SIZE:500MB}
+    max-file-size: ${VIDEO_RESUMABLE_MAX_FILE_SIZE:20GB}
+    default-chunk-size: ${VIDEO_UPLOAD_DEFAULT_CHUNK_SIZE:16MB}
+    min-chunk-size: ${VIDEO_UPLOAD_MIN_CHUNK_SIZE:5MB}
+    max-chunk-size: ${VIDEO_UPLOAD_MAX_CHUNK_SIZE:128MB}
+    max-parts: ${VIDEO_UPLOAD_MAX_PARTS:10000}
+    session-ttl: ${VIDEO_UPLOAD_SESSION_TTL:24h}
+    presign-ttl: ${VIDEO_UPLOAD_PRESIGN_TTL:15m}
+    max-client-concurrency: ${VIDEO_UPLOAD_MAX_CONCURRENCY:3}
+    cleanup-interval-ms: ${VIDEO_UPLOAD_CLEANUP_INTERVAL_MS:300000}
   storage:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
     access-key: ${MINIO_ACCESS_KEY:}

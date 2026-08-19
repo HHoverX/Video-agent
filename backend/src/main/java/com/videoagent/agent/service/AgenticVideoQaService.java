@@ -142,6 +142,15 @@ public class AgenticVideoQaService {
             byId.put(item.evidenceId(), item);
         }
         List<AgenticCitation> citations = resolveCitations(result.citationEvidenceIds(), byId);
+        if (citations.isEmpty()) {
+            return new AgenticQaResponse(
+                "根据当前视频内容无法确定。",
+                strategy.name(),
+                context.contextMode() == null ? null : context.contextMode().name(),
+                toolsUsed,
+                List.of()
+            );
+        }
 
         log.info("[requestId={}][userId={}][videoId={}][strategy={}][contextMode={}][toolCount={}][toolsUsed={}] agentic qa answered",
             requestId, userId, videoId, strategy,

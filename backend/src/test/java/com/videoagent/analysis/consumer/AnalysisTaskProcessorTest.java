@@ -22,6 +22,7 @@ import com.videoagent.analysis.service.AnalysisProgressUpdateService;
 import com.videoagent.analysis.service.AnalysisRetryCoordinator;
 import com.videoagent.analysis.service.AnalysisRetryCoordinator.RetryOutcome;
 import com.videoagent.analysis.service.TerminalNotifier;
+import com.videoagent.analysis.service.ActiveAnalysisLeaseRegistry;
 import com.videoagent.asr.AsrProvider;
 import com.videoagent.asr.AudioSource;
 import com.videoagent.asr.TranscriptSegment;
@@ -42,6 +43,7 @@ import com.videoagent.summary.service.VideoSummaryService;
 import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.rag.service.RagIndexService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,6 +68,8 @@ class AnalysisTaskProcessorTest {
     private final VideoSummaryService summaryService = mock(VideoSummaryService.class);
     private final AnalysisRetryCoordinator retryCoordinator = mock(AnalysisRetryCoordinator.class);
     private final TerminalNotifier terminalNotifier = mock(TerminalNotifier.class);
+    private final RagIndexService ragIndexService = mock(RagIndexService.class);
+    private final ActiveAnalysisLeaseRegistry activeLeases = new ActiveAnalysisLeaseRegistry();
     private final MediaWorkspace workspace = mock(MediaWorkspace.class);
     private AnalysisTaskProcessor processor;
 
@@ -91,7 +95,9 @@ class AnalysisTaskProcessorTest {
             summaryProvider,
             summaryService,
             retryCoordinator,
-            terminalNotifier
+            terminalNotifier,
+            ragIndexService,
+            activeLeases
         );
     }
 
@@ -158,14 +164,14 @@ class AnalysisTaskProcessorTest {
 
         ArgumentCaptor<AnalysisProgressSnapshot> progressCaptor =
             ArgumentCaptor.forClass(AnalysisProgressSnapshot.class);
-        verify(progressUpdateService, times(6)).update(eq(101L), eq(7L), progressCaptor.capture());
+        verify(progressUpdateService, times(8)).update(eq(101L), eq(7L), progressCaptor.capture());
         List<AnalysisProgressSnapshot> snapshots = progressCaptor.getAllValues();
         assertThat(snapshots).extracting(AnalysisProgressSnapshot::progress)
-            .containsExactly(10, 35, 70, 75, 85, 95);
+            .containsExactly(10, 35, 70, 75, 85, 95, 97, 99);
         assertThat(snapshots).extracting(AnalysisProgressSnapshot::stage)
             .containsExactly(
                 "PREPARING", "EXTRACTING_AUDIO", "TRANSCRIBING", "TRANSCRIPT_SAVED",
-                "SUMMARIZING", "SAVING"
+                "SUMMARIZING", "SAVING", "INDEXING", "INDEX_SAVED"
             );
     }
 
@@ -285,13 +291,19 @@ class AnalysisTaskProcessorTest {
         when(summaryProvider.summarize(any())).thenThrow(
             new VideoAgentException(ErrorCode.LLM_SUMMARY_FAILED, "provider unavailable")
         );
-        when(retryCoordinator.handleRetryableFailure(eq(claimed), anyString(), eq("LLM_SUMMARY_FAILED"), eq("provider unavailable")))
+        when(retryCoordinator.handleRetryableFailure(
+            eq(claimed), anyString(), eq("LLM_SUMMARY_FAILED"), eq("provider unavailable"),
+            org.mockito.ArgumentMatchers.nullable(Duration.class)
+        ))
             .thenReturn(RetryOutcome.RETRY_SCHEDULED);
 
         processor.process(new AnalysisMessage(101L, 7L));
 
         verify(transcriptService).replaceTaskSegments(claimed, transcription);
-        verify(retryCoordinator).handleRetryableFailure(eq(claimed), anyString(), eq("LLM_SUMMARY_FAILED"), eq("provider unavailable"));
+        verify(retryCoordinator).handleRetryableFailure(
+            eq(claimed), anyString(), eq("LLM_SUMMARY_FAILED"), eq("provider unavailable"),
+            org.mockito.ArgumentMatchers.nullable(Duration.class)
+        );
         verify(repository, never()).markFailedForGeneration(anyLong(), anyInt(), anyString(), anyString(), any());
         verify(repository, never()).markSuccess(anyLong(), anyInt(), any());
     }
@@ -320,7 +332,10 @@ class AnalysisTaskProcessorTest {
         when(summaryProvider.summarize(any())).thenThrow(
             new VideoAgentException(ErrorCode.LLM_SUMMARY_FAILED, "provider unavailable")
         );
-        when(retryCoordinator.handleRetryableFailure(eq(claimed), anyString(), eq("LLM_SUMMARY_FAILED"), eq("provider unavailable")))
+        when(retryCoordinator.handleRetryableFailure(
+            eq(claimed), anyString(), eq("LLM_SUMMARY_FAILED"), eq("provider unavailable"),
+            org.mockito.ArgumentMatchers.nullable(Duration.class)
+        ))
             .thenReturn(RetryOutcome.FAILED_TERMINAL);
 
         processor.process(new AnalysisMessage(101L, 7L));
@@ -446,6 +461,7 @@ class AnalysisTaskProcessorTest {
     private VideoEntity video() {
         VideoEntity video = new VideoEntity();
         video.setId(7L);
+        video.setUserId(1L);
         video.setObjectKey("videos/demo.mp4");
         return video;
     }

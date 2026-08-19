@@ -68,6 +68,7 @@ public class GroqAsrProvider implements AsrProvider {
         } catch (RestClientResponseException exception) {
             throw ProviderHttpFailure.forStatus(
                 exception.getStatusCode().value(),
+                exception.getResponseHeaders() == null ? null : exception.getResponseHeaders().getFirst("Retry-After"),
                 "Groq ASR",
                 "语音转写",
                 ErrorCode.ASR_REQUEST_FAILED,

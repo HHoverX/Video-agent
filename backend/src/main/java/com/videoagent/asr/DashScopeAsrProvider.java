@@ -73,6 +73,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                     if (!response.getStatusCode().is2xxSuccessful()) {
                         throw ProviderHttpFailure.forStatus(
                             response.getStatusCode().value(),
+                            response.getHeaders().getFirst("Retry-After"),
                             "DashScope ASR",
                             "语音转写",
                             ErrorCode.ASR_REQUEST_FAILED,
@@ -92,6 +93,7 @@ public class DashScopeAsrProvider implements AsrProvider {
         } catch (RestClientResponseException exception) {
             throw ProviderHttpFailure.forStatus(
                 exception.getStatusCode().value(),
+                exception.getResponseHeaders() == null ? null : exception.getResponseHeaders().getFirst("Retry-After"),
                 "DashScope ASR",
                 "语音转写",
                 ErrorCode.ASR_REQUEST_FAILED,

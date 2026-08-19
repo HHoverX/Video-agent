@@ -8,13 +8,15 @@ import java.time.Duration;
 public record AnalysisReliabilityProperties(
     int maxAttempts,
     Duration processingLease,
-    Duration heartbeatInterval
+    Duration heartbeatInterval,
+    Duration maxExecutionTime
 ) {
 
     public AnalysisReliabilityProperties {
         maxAttempts = maxAttempts <= 0 ? 3 : maxAttempts;
         processingLease = processingLease == null ? Duration.ofMinutes(15) : processingLease;
         heartbeatInterval = heartbeatInterval == null ? Duration.ofMinutes(2) : heartbeatInterval;
+        maxExecutionTime = maxExecutionTime == null ? Duration.ofHours(2) : maxExecutionTime;
         if (processingLease.isZero() || processingLease.isNegative()) {
             throw new IllegalArgumentException("videoagent.analysis.reliability.processing-lease must be positive");
         }
@@ -25,6 +27,9 @@ public record AnalysisReliabilityProperties(
             throw new IllegalArgumentException(
                 "heartbeat interval must be smaller than processing lease"
             );
+        }
+        if (maxExecutionTime.isZero() || maxExecutionTime.isNegative()) {
+            throw new IllegalArgumentException("analysis max execution time must be positive");
         }
     }
 }

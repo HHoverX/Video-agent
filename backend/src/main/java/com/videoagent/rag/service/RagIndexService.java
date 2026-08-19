@@ -1,8 +1,8 @@
 package com.videoagent.rag.service;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.rag.chunk.TranscriptChunk;
 import com.videoagent.rag.chunk.TranscriptChunker;
 import com.videoagent.rag.config.EmbeddingProperties;
@@ -26,10 +26,12 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Builds and tracks the RAG index lifecycle in MySQL (the source of truth),
@@ -42,6 +44,7 @@ import java.util.Optional;
 public class RagIndexService {
 
     private static final Logger log = LoggerFactory.getLogger(RagIndexService.class);
+    private static final Duration BUILD_LEASE = Duration.ofMinutes(15);
 
     private final VideoRagIndexRepository indexRepository;
     private final VideoTranscriptSegmentRepository segmentRepository;
@@ -131,23 +134,63 @@ public class RagIndexService {
             return notRequired;
         }
 
+        String buildToken = UUID.randomUUID().toString();
         VideoRagIndexEntity index = transactions().execute(status -> {
             VideoRagIndexEntity candidate = upsertIndex(videoId, userId, segments, chars, mode);
-            int claimed = indexRepository.claimBuilding(candidate.getId(), LocalDateTime.now());
+            int claimed = claimBuild(candidate.getId(), buildToken);
             if (claimed != 1) {
                 throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
                     "问答索引正在构建或状态不允许重建");
             }
             return candidate;
         });
-        return build(index, userId, videoId, segments);
+        return build(index, userId, videoId, segments, buildToken, false);
+    }
+
+    /**
+     * Analysis-worker entry point. It reads transcript rows by the currently
+     * running task id (the task is intentionally not SUCCESS yet), persists
+     * NOT_REQUIRED for short transcripts, and treats a READY row for the same
+     * task as an embedding checkpoint so retries do not pay for embeddings twice.
+     */
+    public VideoRagIndexEntity ensureAnalysisIndex(AnalysisTaskEntity task, long userId) {
+        long videoId = task.getVideoId();
+        ownershipService.requireOwned(videoId, userId);
+        List<VideoTranscriptSegmentEntity> segments = strategyResolver.requireNonEmpty(
+            segmentRepository.findByTaskId(task.getId())
+        );
+        long chars = strategyResolver.transcriptChars(segments);
+        QaContextMode mode = strategyResolver.resolveMode(segments);
+        VideoRagIndexEntity existing = indexRepository.findByVideoId(videoId);
+        if (existing != null
+            && task.getId().equals(existing.getAnalysisTaskId())
+            && (RagIndexStatus.READY.name().equals(existing.getStatus())
+                || RagIndexStatus.NOT_REQUIRED.name().equals(existing.getStatus()))) {
+            return existing;
+        }
+        if (mode == QaContextMode.DIRECT_CONTEXT) {
+            return transactions().execute(status -> upsertIndex(videoId, userId, segments, chars, mode));
+        }
+        String buildToken = UUID.randomUUID().toString();
+        VideoRagIndexEntity index = transactions().execute(status -> {
+            VideoRagIndexEntity candidate = upsertIndex(videoId, userId, segments, chars, mode);
+            int claimed = claimBuild(candidate.getId(), buildToken);
+            if (claimed != 1) {
+                throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
+                    "问答索引正在由其他 Worker 构建");
+            }
+            return candidate;
+        });
+        return build(index, userId, videoId, segments, buildToken, true);
     }
 
     private VideoRagIndexEntity build(
         VideoRagIndexEntity index,
         long userId,
         long videoId,
-        List<VideoTranscriptSegmentEntity> segments
+        List<VideoTranscriptSegmentEntity> segments,
+        String buildToken,
+        boolean propagateFailure
     ) {
         try {
             List<TranscriptChunk> chunks = chunker.chunk(segments);
@@ -173,7 +216,7 @@ public class RagIndexService {
             vectorStore.upsertPoints(userId, videoId, index.getAnalysisTaskId(), points);
 
             int ready = transactions().execute(status ->
-                indexRepository.markReady(index.getId(), chunks.size(), LocalDateTime.now()));
+                indexRepository.markReady(index.getId(), buildToken, chunks.size(), LocalDateTime.now()));
             if (ready != 1) {
                 throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
                     "问答索引状态更新失败");
@@ -185,14 +228,23 @@ public class RagIndexService {
         } catch (RuntimeException exception) {
             transactions().executeWithoutResult(status -> indexRepository.markFailed(
                 index.getId(),
+                buildToken,
                 ErrorCode.RAG_INDEX_BUILD_FAILED.name(),
                 safeMessage(exception),
                 LocalDateTime.now()
             ));
             log.warn("[userId={}][videoId={}][ragIndexId={}] index build failed: {}",
                 userId, videoId, index.getId(), safeMessage(exception));
+            if (propagateFailure) {
+                throw exception;
+            }
             return indexRepository.selectById(index.getId());
         }
+    }
+
+    private int claimBuild(long indexId, String buildToken) {
+        LocalDateTime now = LocalDateTime.now();
+        return indexRepository.claimBuilding(indexId, buildToken, now.minus(BUILD_LEASE), now);
     }
 
     private VideoRagIndexEntity upsertIndex(

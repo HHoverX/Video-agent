@@ -1,6 +1,5 @@
 package com.videoagent.analysis.service;
 
-import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 
 import org.slf4j.Logger;
@@ -8,8 +7,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
-import java.util.List;
 
 /**
  * Lightweight, generation-guarded heartbeat. Runs on a modest interval (much
@@ -25,32 +25,41 @@ public class AnalysisHeartbeatJob {
 
     private final AnalysisTaskRepository taskRepository;
     private final AnalysisReliabilityProperties properties;
+    private final ActiveAnalysisLeaseRegistry activeLeases;
 
     public AnalysisHeartbeatJob(
         AnalysisTaskRepository taskRepository,
-        AnalysisReliabilityProperties properties
+        AnalysisReliabilityProperties properties,
+        ActiveAnalysisLeaseRegistry activeLeases
     ) {
         this.taskRepository = taskRepository;
         this.properties = properties;
+        this.activeLeases = activeLeases;
     }
 
     @Scheduled(fixedDelayString = "${videoagent.analysis.heartbeat-interval-ms:120000}")
     public void heartbeatStaleEligibleTasks() {
-        List<AnalysisTaskEntity> processing = taskRepository.findProcessingTasks();
         LocalDateTime now = LocalDateTime.now();
-        for (AnalysisTaskEntity task : processing) {
-            int generation = task.getProcessingGeneration() == null ? 0 : task.getProcessingGeneration();
+        Instant clock = Instant.now();
+        for (ActiveAnalysisLeaseRegistry.ActiveLease lease : activeLeases.snapshot()) {
+            if (Duration.between(lease.startedAt(), clock).compareTo(properties.maxExecutionTime()) >= 0) {
+                activeLeases.unregister(lease.taskId(), lease.generation());
+                log.warn(
+                    "[taskId={}][videoId={}][generation={}] max execution time reached; heartbeat stopped so recovery can fence this worker",
+                    lease.taskId(), lease.videoId(), lease.generation()
+                );
+                continue;
+            }
             int updated = taskRepository.heartbeat(
-                task.getId(),
-                generation,
+                lease.taskId(),
+                lease.generation(),
                 now
             );
             if (updated != 1) {
-                // Fencing lost: the recovery (or another worker) moved the task
-                // forward; this heartbeat must not refresh a different attempt.
+                activeLeases.unregister(lease.taskId(), lease.generation());
                 log.info(
                     "[taskId={}][videoId={}][generation={}] heartbeat lost fencing; task moved on",
-                    task.getId(), task.getVideoId(), generation
+                    lease.taskId(), lease.videoId(), lease.generation()
                 );
             }
         }

@@ -19,18 +19,20 @@ import java.util.List;
 class AnalysisHeartbeatJobTest {
 
     private final AnalysisTaskRepository taskRepository = mock(AnalysisTaskRepository.class);
-    private final AnalysisReliabilityProperties properties = new AnalysisReliabilityProperties(3, Duration.ofMinutes(15), Duration.ofMinutes(2));
+    private final AnalysisReliabilityProperties properties = new AnalysisReliabilityProperties(
+        3, Duration.ofMinutes(15), Duration.ofMinutes(2), Duration.ofHours(2)
+    );
+    private final ActiveAnalysisLeaseRegistry activeLeases = new ActiveAnalysisLeaseRegistry();
     private AnalysisHeartbeatJob job;
 
     @BeforeEach
     void setUp() {
-        job = new AnalysisHeartbeatJob(taskRepository, properties);
+        job = new AnalysisHeartbeatJob(taskRepository, properties, activeLeases);
     }
 
     @Test
     void shouldRefreshProcessingAtOnlyForMatchingGeneration() {
-        AnalysisTaskEntity processing = processingTask(101L, 3);
-        when(taskRepository.findProcessingTasks()).thenReturn(List.of(processing));
+        activeLeases.register(101L, 7L, 3);
         when(taskRepository.heartbeat(eq(101L), eq(3), any(LocalDateTime.class))).thenReturn(1);
 
         job.heartbeatStaleEligibleTasks();
@@ -44,8 +46,7 @@ class AnalysisHeartbeatJobTest {
         // must not extend the new attempt's lease. heartbeat() returns 0 when
         // the generation no longer matches, and the job must not treat that as
         // a success.
-        AnalysisTaskEntity processing = processingTask(202L, 2);
-        when(taskRepository.findProcessingTasks()).thenReturn(List.of(processing));
+        activeLeases.register(202L, 7L, 2);
         when(taskRepository.heartbeat(eq(202L), eq(2), any(LocalDateTime.class))).thenReturn(0);
 
         job.heartbeatStaleEligibleTasks();

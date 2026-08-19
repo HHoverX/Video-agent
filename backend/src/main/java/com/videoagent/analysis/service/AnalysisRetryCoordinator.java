@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Service
 public class AnalysisRetryCoordinator {
@@ -24,6 +25,7 @@ public class AnalysisRetryCoordinator {
     private static final Logger log = LoggerFactory.getLogger(AnalysisRetryCoordinator.class);
     private static final long BACKOFF_BASE_SECONDS = 5;
     private static final long BACKOFF_CAP_SECONDS = 60;
+    private static final Duration RETRY_AFTER_CAP = Duration.ofMinutes(15);
 
     private final AnalysisTaskRepository taskRepository;
     private final OutboxService outboxService;
@@ -53,10 +55,21 @@ public class AnalysisRetryCoordinator {
         String errorCode,
         String errorMessage
     ) {
+        return handleRetryableFailure(task, stage, errorCode, errorMessage, null);
+    }
+
+    @Transactional
+    public RetryOutcome handleRetryableFailure(
+        AnalysisTaskEntity task,
+        String stage,
+        String errorCode,
+        String errorMessage,
+        Duration providerRetryAfter
+    ) {
         int generation = task.getProcessingGeneration() == null ? 0 : task.getProcessingGeneration();
         int attemptCount = task.getRetryCount() == null ? 0 : task.getRetryCount();
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime nextAttemptAt = now.plus(backoffDuration(attemptCount + 1));
+        LocalDateTime nextAttemptAt = now.plus(retryDelay(attemptCount + 1, providerRetryAfter));
         int newGeneration = generation + 1;
 
         int updated = taskRepository.markRetryWaitingForGeneration(
@@ -104,5 +117,19 @@ public class AnalysisRetryCoordinator {
     public Duration backoffDuration(int nextAttempt) {
         long seconds = BACKOFF_BASE_SECONDS * (1L << Math.min(nextAttempt - 1, 16));
         return Duration.ofSeconds(Math.min(seconds, BACKOFF_CAP_SECONDS));
+    }
+
+    /** Exponential delay plus bounded random jitter; Retry-After wins when longer. */
+    public Duration retryDelay(int nextAttempt, Duration providerRetryAfter) {
+        Duration base = backoffDuration(nextAttempt);
+        long jitterBound = Math.max(1, Math.min(2_000, base.toMillis() / 4));
+        Duration withJitter = base.plusMillis(ThreadLocalRandom.current().nextLong(jitterBound));
+        if (providerRetryAfter == null || providerRetryAfter.isNegative()) {
+            return withJitter;
+        }
+        Duration boundedProviderDelay = providerRetryAfter.compareTo(RETRY_AFTER_CAP) > 0
+            ? RETRY_AFTER_CAP
+            : providerRetryAfter;
+        return boundedProviderDelay.compareTo(withJitter) > 0 ? boundedProviderDelay : withJitter;
     }
 }

@@ -12,7 +12,7 @@ import java.util.List;
 
 class TranscriptChunkerTest {
 
-    private final RagProperties properties = new RagProperties(1000, 200, 1, 5);
+    private final RagProperties properties = new RagProperties(1000, 200, 1, 5, 0.0f);
     private final TranscriptChunker chunker = new TranscriptChunker(properties);
 
     @Test
