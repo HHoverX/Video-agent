@@ -33,8 +33,7 @@ async function logout() {
     </main>
 
     <footer class="app-footer">
-      <span>VideoAgent · Milestone 6.6</span>
-      <span>JWT Authentication · Video Ownership · Authenticated SSE</span>
+      <span>VideoAgent</span>
     </footer>
   </div>
 </template>

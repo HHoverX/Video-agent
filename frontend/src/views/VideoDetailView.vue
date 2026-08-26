@@ -2,15 +2,19 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
+import AiContentPanel from '@/components/AiContentPanel.vue'
+import AnalysisStatusCard from '@/components/AnalysisStatusCard.vue'
+import TranscriptPanel from '@/components/TranscriptPanel.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
+import VideoQaPanel from '@/components/VideoQaPanel.vue'
 import { useAnalysisEvents } from '@/composables/useAnalysisEvents'
 import { getAnalysisTask, getCurrentAnalysisTask, startAnalysis } from '@/services/analysis'
-import { agenticStrategyLabel, askAgenticQa, buildRagIndex, getRagStatus } from '@/services/rag'
+import { askAgenticQa, buildRagIndex, getRagStatus } from '@/services/rag'
 import type { AgenticQaResponse, RagIndexStatusResponse } from '@/services/rag'
 import { getVideoChapters, getVideoKeyPoints, getVideoSummary } from '@/services/summary'
 import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
-import type { AnalysisProgressEvent, AnalysisTask, AnalysisStatus } from '@/types/analysis'
+import type { AnalysisProgressEvent, AnalysisTask } from '@/types/analysis'
 import { resolveAnalysisRecovery } from '@/utils/analysisRecovery'
 import type { VideoChapter, VideoKeyPoint, VideoSummary } from '@/types/summary'
 import type { TranscriptSegment } from '@/types/transcript'
@@ -38,9 +42,6 @@ const keyPoints = ref<VideoKeyPoint[]>([])
 const summaryLoading = ref(false)
 const summaryError = ref('')
 const ragStatus = ref<RagIndexStatusResponse | null>(null)
-const ragModeLabel = ref('')
-const qaStrategyLabel = ref('')
-const qaQuestion = ref('')
 const qaLoading = ref(false)
 const qaError = ref('')
 const qaResult = ref<AgenticQaResponse | null>(null)
@@ -61,23 +62,6 @@ const { connect: connectAnalysisEvents, close: closeAnalysisEvents } = useAnalys
   },
 })
 
-const analysisStatusLabel = computed(() => {
-  const labels: Record<AnalysisStatus, string> = {
-    PENDING: '排队中',
-    PROCESSING: '处理中',
-    RETRY_WAITING: '重试中',
-    SUCCESS: '已完成',
-    FAILED: '失败',
-  }
-  return analysisTask.value ? labels[analysisTask.value.status] : '尚未开始'
-})
-
-const progressStatus = computed(() => {
-  if (analysisTask.value?.status === 'SUCCESS') return 'success'
-  if (analysisTask.value?.status === 'FAILED') return 'exception'
-  return undefined
-})
-
 const analysisActive = computed(
   () => analysisTask.value?.status === 'PENDING'
     || analysisTask.value?.status === 'PROCESSING'
@@ -96,15 +80,6 @@ function formatDate(value: string) {
     dateStyle: 'long',
     timeStyle: 'short',
   }).format(new Date(value))
-}
-
-function formatTimestamp(milliseconds: number) {
-  const totalSeconds = Math.floor(milliseconds / 1000)
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  const base = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-  return hours > 0 ? `${hours.toString().padStart(2, '0')}:${base}` : base
 }
 
 async function loadTranscript() {
@@ -145,9 +120,6 @@ async function loadRagStatus() {
   if (!Number.isSafeInteger(videoId) || videoId <= 0) return
   try {
     ragStatus.value = await getRagStatus(videoId)
-    ragModeLabel.value = ragStatus.value.mode === 'DIRECT_CONTEXT'
-      ? '直接上下文'
-      : '向量检索'
   } catch {
     // RAG status is auxiliary; a failure here should not block the page.
   }
@@ -159,7 +131,6 @@ async function handleBuildIndex() {
   qaError.value = ''
   try {
     ragStatus.value = await buildRagIndex(videoId)
-    ragModeLabel.value = ragStatus.value.mode === 'DIRECT_CONTEXT' ? '直接上下文' : '向量检索'
   } catch (error) {
     qaError.value = apiErrorMessage(error, '索引构建失败。')
   } finally {
@@ -167,17 +138,15 @@ async function handleBuildIndex() {
   }
 }
 
-async function handleAsk() {
-  const question = qaQuestion.value.trim()
-  if (!question || qaLoading.value) return
+async function handleAsk(question: string) {
+  const normalizedQuestion = question.trim()
+  if (!normalizedQuestion || qaLoading.value) return
   const videoId = Number(route.params.id)
   qaLoading.value = true
   qaError.value = ''
   qaResult.value = null
-  qaStrategyLabel.value = ''
   try {
-    qaResult.value = await askAgenticQa(videoId, question)
-    qaStrategyLabel.value = agenticStrategyLabel(qaResult.value.strategy)
+    qaResult.value = await askAgenticQa(videoId, normalizedQuestion)
   } catch (error) {
     qaError.value = apiErrorMessage(error, '问答请求失败。')
   } finally {
@@ -391,7 +360,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="page-section detail-page">
-    <RouterLink class="back-link" to="/">← 返回视频库</RouterLink>
+    <RouterLink v-if="loading || errorMessage" class="back-link" to="/">← 返回视频库</RouterLink>
 
     <div v-if="loading" class="content-panel loading-panel">
       <el-skeleton :rows="6" animated />
@@ -400,246 +369,73 @@ onBeforeUnmount(() => {
     <div v-else-if="errorMessage" class="notice notice--error">{{ errorMessage }}</div>
 
     <template v-else-if="video">
-      <div class="detail-hero">
-        <VideoPlayer class="detail-visual" :video-id="video.id" />
+      <div class="detail-header">
         <div class="detail-copy">
-          <p class="eyebrow">VIDEO #{{ video.id }}</p>
+          <RouterLink class="back-link" to="/">← 返回视频库</RouterLink>
+          <p class="eyebrow">视频详情</p>
           <h1>{{ video.title }}</h1>
           <p>{{ video.originalFilename }}</p>
-          <span class="status-badge status-badge--large">已上传</span>
+          <span class="status-badge status-badge--large">视频已就绪</span>
+        </div>
+        <div class="detail-meta-grid">
+          <div class="detail-meta-item">
+            <span>文件大小</span>
+            <strong>{{ formatBytes(video.fileSize) }}</strong>
+          </div>
+          <div class="detail-meta-item">
+            <span>MIME 类型</span>
+            <strong>{{ video.mimeType }}</strong>
+          </div>
+          <div class="detail-meta-item">
+            <span>视频时长</span>
+            <strong>{{ video.durationSeconds ? `${video.durationSeconds} 秒` : '待后续媒体阶段提取' }}</strong>
+          </div>
+          <div class="detail-meta-item">
+            <span>上传时间</span>
+            <strong>{{ formatDate(video.createdAt) }}</strong>
+          </div>
         </div>
       </div>
 
-      <div class="detail-grid">
-        <div class="detail-item">
-          <span>文件大小</span>
-          <strong>{{ formatBytes(video.fileSize) }}</strong>
-        </div>
-        <div class="detail-item">
-          <span>MIME 类型</span>
-          <strong>{{ video.mimeType }}</strong>
-        </div>
-        <div class="detail-item">
-          <span>视频时长</span>
-          <strong>{{ video.durationSeconds ? `${video.durationSeconds} 秒` : '待后续媒体阶段提取' }}</strong>
-        </div>
-        <div class="detail-item">
-          <span>上传时间</span>
-          <strong>{{ formatDate(video.createdAt) }}</strong>
-        </div>
-      </div>
-
-      <div class="analysis-panel content-panel">
-        <div class="analysis-panel__heading">
-          <div>
-            <p class="eyebrow">MILESTONE 6 · SSE REAL-TIME PROGRESS</p>
-            <h2>AI 视频分析</h2>
-            <p>通过 SSE 实时展示音频提取、时间戳转录和结构化总结进度，GET 查询作为断线兜底。</p>
-          </div>
-          <el-button
-            class="analysis-start-button"
-            :disabled="!analysisTaskResolved || analysisActive || analysisComplete"
-            :loading="startingAnalysis"
-            @click="handleStartAnalysis"
-          >
-            {{ !analysisTaskResolved ? '正在恢复分析状态' : analysisActive ? '分析进行中' : analysisComplete ? '分析已完成' : analysisTask?.status === 'FAILED' ? '重试分析' : '开始 AI 分析' }}
-          </el-button>
-        </div>
-
-        <div v-if="analysisError" class="notice notice--error analysis-notice">
-          {{ analysisError }}
-        </div>
-
-        <div v-if="analysisTask" class="analysis-progress" aria-live="polite">
-          <div class="analysis-progress__meta">
-            <div>
-              <span>任务 #{{ analysisTask.taskId }}</span>
-              <strong>{{ analysisStatusLabel }}</strong>
-            </div>
-            <span>{{ analysisTask.message }}</span>
-          </div>
-          <el-progress
-            :percentage="analysisTask.progress"
-            :status="progressStatus"
-            :stroke-width="10"
-          />
-          <p v-if="analysisTask.status === 'FAILED'" class="analysis-failure">
-            {{ analysisTask.errorMessage || '任务处理失败。' }}
-          </p>
-          <p v-else-if="analysisTask.status === 'RETRY_WAITING'" class="analysis-polling">
-            分析暂时失败，正在重试…
-          </p>
-          <p v-else-if="analysisTransport === 'sse'" class="analysis-polling">SSE 实时进度已连接</p>
-          <p v-else-if="analysisTransport === 'polling' || pollingAnalysis" class="analysis-polling">
-            SSE 不可用，正在使用 GET 查询兜底…
-          </p>
-        </div>
-
-        <div v-else class="analysis-empty">
-          {{
-            !analysisTaskResolved
-              ? '正在从服务端恢复当前分析任务。'
-              : '尚未创建分析任务。点击按钮后，接口会立即返回任务编号并建立 SSE 实时连接。'
-          }}
-        </div>
-      </div>
-
-      <div class="summary-panel content-panel">
-        <div class="summary-panel__heading">
-          <div>
-            <p class="eyebrow">AI SUMMARY</p>
-            <h2>结构化视频总结</h2>
-          </div>
-          <span v-if="summary" class="summary-task-label">任务 #{{ summary.taskId }}</span>
-        </div>
-
-        <div v-if="summaryError" class="notice notice--error summary-notice">
-          {{ summaryError }}
-        </div>
-        <div v-else-if="summaryLoading" class="summary-loading">
-          <el-skeleton :rows="6" animated />
-        </div>
-        <div v-else-if="summary" class="summary-content">
-          <section class="summary-overview">
-            <h3>Overview</h3>
-            <p>{{ summary.overview }}</p>
-          </section>
-
-          <section class="summary-section">
-            <div class="summary-section__title">
-              <h3>Chapters</h3>
-              <span>{{ chapters.length }} 章</span>
-            </div>
-            <ol class="chapter-list">
-              <li v-for="chapter in chapters" :key="chapter.chapterIndex">
-                <span class="summary-timestamp">
-                  {{ formatTimestamp(chapter.startMs) }} – {{ formatTimestamp(chapter.endMs) }}
-                </span>
-                <div>
-                  <h4>{{ chapter.title }}</h4>
-                  <p>{{ chapter.summary }}</p>
-                </div>
-              </li>
-            </ol>
-          </section>
-
-          <section class="summary-section">
-            <div class="summary-section__title">
-              <h3>Key Points</h3>
-              <span>{{ keyPoints.length }} 条</span>
-            </div>
-            <ul class="key-point-list">
-              <li v-for="point in keyPoints" :key="point.pointIndex">
-                <span class="summary-timestamp">
-                  {{ formatTimestamp(point.startMs) }} – {{ formatTimestamp(point.endMs) }}
-                </span>
-                <p>{{ point.content }}</p>
-              </li>
-            </ul>
-          </section>
-        </div>
-        <div v-else class="summary-empty">
-          尚未生成结构化总结。启动上方分析后，Overview、Chapters 与 Key Points 会显示在这里。
-        </div>
-      </div>
-
-      <div class="transcript-panel content-panel">
-        <div class="transcript-panel__heading">
-          <div>
-            <p class="eyebrow">TIMESTAMPED TRANSCRIPT</p>
-            <h2>视频字幕</h2>
-          </div>
-          <span v-if="transcript.length" class="transcript-count">
-            {{ transcript.length }} 个片段
-          </span>
-        </div>
-
-        <div v-if="transcriptError" class="notice notice--error transcript-notice">
-          {{ transcriptError }}
-        </div>
-        <div v-else-if="transcriptLoading" class="transcript-loading">
-          <el-skeleton :rows="3" animated />
-        </div>
-        <ol v-else-if="transcript.length" class="transcript-list">
-          <li v-for="segment in transcript" :key="`${segment.startMs}-${segment.endMs}`">
-            <span class="transcript-timestamp">{{ formatTimestamp(segment.startMs) }}</span>
-            <p>{{ segment.text }}</p>
-          </li>
-        </ol>
-        <div v-else class="transcript-empty">
-          尚未生成字幕。完成上方转录任务后，带时间戳的片段会显示在这里。
-        </div>
-      </div>
-
-      <div class="qa-panel content-panel">
-        <div class="qa-panel__heading">
-          <div>
-            <p class="eyebrow">VIDEO QA</p>
-            <h2>视频问答</h2>
-            <p>基于视频字幕的接地问答，答案附时间戳引用。</p>
-          </div>
-          <span v-if="ragStatus" class="qa-mode-tag">{{ ragModeLabel }}</span>
-        </div>
-
-        <div v-if="qaError" class="notice notice--error qa-notice">{{ qaError }}</div>
-
-        <div v-if="ragStatus && ragStatus.mode === 'DIRECT_CONTEXT'" class="qa-body">
-          <div class="qa-input-row">
-            <el-input
-              v-model="qaQuestion"
-              placeholder="输入关于视频内容的问题…"
-              :disabled="qaLoading"
-              @keyup.enter="handleAsk"
-            />
-            <el-button type="primary" :loading="qaLoading" @click="handleAsk">提问</el-button>
-          </div>
-        </div>
-
-        <div v-else-if="ragStatus && ragStatus.status === 'NOT_BUILT'" class="qa-body">
-          <p class="qa-hint">该视频文本较长，需要建立问答索引后才能提问。</p>
-          <el-button :loading="buildingIndex" @click="handleBuildIndex">构建问答索引</el-button>
-        </div>
-
-        <div v-else-if="ragStatus && ragStatus.status === 'BUILDING'" class="qa-body">
-          <p class="qa-hint">索引构建中，请稍候…</p>
-        </div>
-
-        <div v-else-if="ragStatus && ragStatus.status === 'FAILED'" class="qa-body">
-          <p class="qa-hint">索引构建失败：{{ ragStatus.lastErrorMessage || '未知错误' }}</p>
-          <el-button :loading="buildingIndex" @click="handleBuildIndex">重新构建</el-button>
-        </div>
-
-        <div v-else-if="ragStatus && ragStatus.status === 'READY'" class="qa-body">
-          <div class="qa-input-row">
-            <el-input
-              v-model="qaQuestion"
-              placeholder="输入关于视频内容的问题…"
-              :disabled="qaLoading"
-              @keyup.enter="handleAsk"
-            />
-            <el-button type="primary" :loading="qaLoading" @click="handleAsk">提问</el-button>
-          </div>
-        </div>
-
-        <div v-else-if="!ragStatus" class="qa-body">
-          <p class="qa-hint">加载问答状态…</p>
-        </div>
-
-        <div v-if="qaResult" class="qa-result">
-          <p v-if="qaStrategyLabel" class="qa-strategy-label">检索方式：{{ qaStrategyLabel }}</p>
-          <div class="qa-answer">{{ qaResult.answer }}</div>
-          <div v-if="qaResult.citations.length" class="qa-citations">
-            <p class="qa-citations-title">引用片段</p>
-            <ul class="qa-citation-list">
-              <li v-for="(citation, idx) in qaResult.citations" :key="idx">
-                <span v-if="citation.startMs !== null && citation.endMs !== null" class="qa-citation-time">
-                  [{{ formatTimestamp(citation.startMs) }} – {{ formatTimestamp(citation.endMs) }}]
-                </span>
-                <p>{{ citation.text }}</p>
-              </li>
-            </ul>
-          </div>
-        </div>
+      <div class="video-workspace">
+        <AnalysisStatusCard
+          class="video-workspace__analysis"
+          :status="analysisTask?.status ?? null"
+          :progress="analysisTask?.progress ?? 0"
+          :message="analysisTask?.message ?? ''"
+          :task-error="analysisTask?.errorMessage ?? null"
+          :recovery-error="analysisError"
+          :resolved="analysisTaskResolved"
+          :starting="startingAnalysis"
+          @start="handleStartAnalysis"
+          @retry="handleStartAnalysis"
+        />
+        <VideoPlayer class="detail-visual video-workspace__player" :video-id="video.id" />
+        <AiContentPanel
+          class="video-workspace__content"
+          :summary="summary"
+          :chapters="chapters"
+          :key-points="keyPoints"
+          :loading="summaryLoading"
+          :error="summaryError"
+        />
+        <VideoQaPanel
+          :key="video.id"
+          class="video-workspace__qa"
+          :rag-status="ragStatus"
+          :loading="qaLoading"
+          :building="buildingIndex"
+          :error="qaError"
+          :result="qaResult"
+          @ask="handleAsk"
+          @prepare="handleBuildIndex"
+        />
+        <TranscriptPanel
+          class="video-workspace__transcript"
+          :segments="transcript"
+          :loading="transcriptLoading"
+          :error="transcriptError"
+        />
       </div>
     </template>
   </section>

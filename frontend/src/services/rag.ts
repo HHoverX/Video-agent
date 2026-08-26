@@ -40,17 +40,6 @@ export interface AgenticQaResponse {
   citations: AgenticCitation[]
 }
 
-export function agenticStrategyLabel(strategy: string): string {
-  switch (strategy) {
-    case 'SUMMARY': return '摘要'
-    case 'TIME_LOOKUP': return '时间定位'
-    case 'SEMANTIC_SEARCH': return '语义检索'
-    case 'MULTI_SEARCH': return '多路检索'
-    case 'BASIC_FALLBACK': return '基础问答回退'
-    default: return strategy
-  }
-}
-
 export async function getRagStatus(videoId: number): Promise<RagIndexStatusResponse> {
   const { data } = await api.get<RagIndexStatusResponse>(`/videos/${videoId}/rag/status`)
   return data
