@@ -50,6 +50,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 @SpringBootTest(properties = {
@@ -248,6 +249,40 @@ class SecurityEndpointIntegrationTest {
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isNotFound())
             .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+    }
+
+    @Test
+    void shouldSecureCurrentAnalysisTaskQuery() throws Exception {
+        mockMvc.perform(get("/api/videos/9/analysis"))
+            .andExpect(status().isUnauthorized())
+            .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+
+        String token = loginToken();
+        LocalDateTime now = LocalDateTime.now();
+        when(queryService.getCurrentTask(9L, 7L)).thenReturn(Optional.of(new AnalysisTaskResponse(
+            101L, 9L, "PROCESSING", "ANALYZING", 40, "正在分析",
+            null, null, now, now, null
+        )));
+        when(queryService.getCurrentTask(10L, 7L)).thenReturn(Optional.empty());
+        when(queryService.getCurrentTask(11L, 7L)).thenThrow(
+            new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND)
+        );
+        when(queryService.getCurrentTask(12L, 7L)).thenThrow(
+            new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND)
+        );
+
+        mockMvc.perform(get("/api/videos/9/analysis").header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.taskId").value(101))
+            .andExpect(jsonPath("$.status").value("PROCESSING"));
+        mockMvc.perform(get("/api/videos/10/analysis").header("Authorization", "Bearer " + token))
+            .andExpect(status().isNoContent());
+        mockMvc.perform(get("/api/videos/11/analysis").header("Authorization", "Bearer " + token))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("VIDEO_NOT_FOUND"));
+        mockMvc.perform(get("/api/videos/12/analysis").header("Authorization", "Bearer " + token))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("VIDEO_NOT_FOUND"));
     }
 
     @Test

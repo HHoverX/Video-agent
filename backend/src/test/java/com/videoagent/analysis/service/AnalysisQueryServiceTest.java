@@ -14,10 +14,14 @@ import com.videoagent.video.service.VideoOwnershipService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Optional;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -26,11 +30,14 @@ class AnalysisQueryServiceTest {
     private final AnalysisTaskRepository repository = mock(AnalysisTaskRepository.class);
     private final AnalysisProgressStore progressStore = mock(AnalysisProgressStore.class);
     private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
+    private final AnalysisProperties properties = new AnalysisProperties(
+        null, null, "STRUCTURED_SUMMARY", "m5-langchain4j-structured-v1", Duration.ofHours(24)
+    );
     private AnalysisQueryService service;
 
     @BeforeEach
     void setUp() {
-        service = new AnalysisQueryService(repository, progressStore, ownershipService);
+        service = new AnalysisQueryService(repository, progressStore, ownershipService, properties);
         when(ownershipService.isOwned(7L, 5L)).thenReturn(true);
     }
 
@@ -113,6 +120,67 @@ class AnalysisQueryServiceTest {
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_NOT_FOUND)
             );
+    }
+
+    @Test
+    void shouldReturnCurrentConfiguredTaskAfterOwnershipCheck() {
+        AnalysisTaskEntity task = successfulTask();
+        task.setStatus("PROCESSING");
+        task.setStage("ANALYZING");
+        task.setProgress(45);
+        when(repository.findByBusinessKey(7L, "STRUCTURED_SUMMARY", "m5-langchain4j-structured-v1"))
+            .thenReturn(task);
+        when(progressStore.find(101L)).thenReturn(Optional.of(
+            new AnalysisProgressSnapshot("PROCESSING", "ANALYZING", 55, "正在分析")
+        ));
+
+        Optional<AnalysisTaskResponse> response = service.getCurrentTask(7L, 5L);
+
+        assertThat(response).isPresent();
+        assertThat(response.orElseThrow().progress()).isEqualTo(55);
+        inOrder(ownershipService, repository).verify(ownershipService).requireOwned(7L, 5L);
+        verify(repository).findByBusinessKey(7L, "STRUCTURED_SUMMARY", "m5-langchain4j-structured-v1");
+    }
+
+    @Test
+    void shouldReturnEmptyWhenNoCurrentConfiguredTaskExists() {
+        when(repository.findByBusinessKey(7L, "STRUCTURED_SUMMARY", "m5-langchain4j-structured-v1"))
+            .thenReturn(null);
+
+        assertThat(service.getCurrentTask(7L, 5L)).isEmpty();
+        verify(repository).findByBusinessKey(7L, "STRUCTURED_SUMMARY", "m5-langchain4j-structured-v1");
+        verifyNoInteractions(progressStore);
+    }
+
+    @Test
+    void shouldKeepMysqlCurrentTaskWhenRedisSnapshotHasDifferentStatus() {
+        AnalysisTaskEntity task = successfulTask();
+        task.setStatus("RETRY_WAITING");
+        task.setStage("RETRY_WAITING");
+        task.setProgress(0);
+        task.setFinishedAt(null);
+        when(repository.findByBusinessKey(7L, "STRUCTURED_SUMMARY", "m5-langchain4j-structured-v1"))
+            .thenReturn(task);
+        when(progressStore.find(101L)).thenReturn(Optional.of(
+            new AnalysisProgressSnapshot("FAILED", "FAILED", 80, "stale failure")
+        ));
+
+        AnalysisTaskResponse response = service.getCurrentTask(7L, 5L).orElseThrow();
+
+        assertThat(response.status()).isEqualTo("RETRY_WAITING");
+        assertThat(response.stage()).isEqualTo("RETRY_WAITING");
+        assertThat(response.progress()).isZero();
+    }
+
+    @Test
+    void shouldNotQueryCurrentTaskWhenOwnershipIsRejected() {
+        when(ownershipService.requireOwned(7L, 6L)).thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
+
+        assertThatThrownBy(() -> service.getCurrentTask(7L, 6L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_NOT_FOUND)
+            );
+        verifyNoInteractions(repository, progressStore);
     }
 
     private AnalysisTaskEntity successfulTask() {

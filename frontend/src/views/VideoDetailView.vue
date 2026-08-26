@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import { useAnalysisEvents } from '@/composables/useAnalysisEvents'
-import { getAnalysisTask, startAnalysis } from '@/services/analysis'
+import { getAnalysisTask, getCurrentAnalysisTask, startAnalysis } from '@/services/analysis'
 import { agenticStrategyLabel, askAgenticQa, buildRagIndex, getRagStatus } from '@/services/rag'
 import type { AgenticQaResponse, RagIndexStatusResponse } from '@/services/rag'
 import { getVideoChapters, getVideoKeyPoints, getVideoSummary } from '@/services/summary'
 import { getVideoTranscript } from '@/services/transcript'
 import { apiErrorMessage, getVideo } from '@/services/video'
 import type { AnalysisProgressEvent, AnalysisTask, AnalysisStatus } from '@/types/analysis'
+import { resolveAnalysisRecovery } from '@/utils/analysisRecovery'
 import type { VideoChapter, VideoKeyPoint, VideoSummary } from '@/types/summary'
 import type { TranscriptSegment } from '@/types/transcript'
 import type { Video } from '@/types/video'
@@ -27,6 +28,7 @@ const pollingAnalysis = ref(false)
 const analysisTransport = ref<'idle' | 'sse' | 'polling'>('idle')
 const analysisTask = ref<AnalysisTask | null>(null)
 const analysisError = ref('')
+const analysisTaskResolved = ref(false)
 const transcript = ref<TranscriptSegment[]>([])
 const transcriptLoading = ref(false)
 const transcriptError = ref('')
@@ -45,6 +47,7 @@ const qaResult = ref<AgenticQaResponse | null>(null)
 const buildingIndex = ref(false)
 let pollTimer: number | undefined
 let fallbackPollCount = 0
+let pageLoadVersion = 0
 
 const { connect: connectAnalysisEvents, close: closeAnalysisEvents } = useAnalysisEvents({
   onOpen: () => {
@@ -81,9 +84,7 @@ const analysisActive = computed(
     || analysisTask.value?.status === 'RETRY_WAITING',
 )
 const analysisComplete = computed(
-  () => analysisTask.value
-    ? analysisTask.value.status === 'SUCCESS'
-    : summary.value !== null,
+  () => analysisTask.value?.status === 'SUCCESS',
 )
 
 function formatBytes(bytes: number) {
@@ -196,23 +197,32 @@ async function loadVideo() {
   }
 }
 
-function taskStorageKey() {
-  return `videoagent:analysis-task:${Number(route.params.id)}`
+function taskStorageKey(videoId = Number(route.params.id)) {
+  return `videoagent:analysis-task:${videoId}`
 }
 
-function rememberTask(taskId: number) {
+function rememberTask(taskId: number, videoId = Number(route.params.id)) {
   try {
-    window.sessionStorage.setItem(taskStorageKey(), String(taskId))
+    window.sessionStorage.setItem(taskStorageKey(videoId), String(taskId))
   } catch {
     // Session storage is optional; the active SSE connection still works without refresh recovery.
   }
 }
 
-function forgetTask() {
+function forgetTask(videoId = Number(route.params.id)) {
   try {
-    window.sessionStorage.removeItem(taskStorageKey())
+    window.sessionStorage.removeItem(taskStorageKey(videoId))
   } catch {
     // Ignore storage restrictions in privacy-focused browser contexts.
+  }
+}
+
+function storedTaskId(videoId: number): number | null {
+  try {
+    const taskId = Number(window.sessionStorage.getItem(taskStorageKey(videoId)))
+    return Number.isSafeInteger(taskId) && taskId > 0 ? taskId : null
+  } catch {
+    return null
   }
 }
 
@@ -235,10 +245,14 @@ function startPollingFallback(taskId: number) {
   schedulePoll(taskId)
 }
 
-async function handleTerminalTask(task: AnalysisTask) {
+function stopAnalysisTransport() {
   clearPollTimer()
   closeAnalysisEvents()
   analysisTransport.value = 'idle'
+}
+
+async function handleTerminalTask(task: AnalysisTask) {
+  stopAnalysisTransport()
   if (task.status === 'SUCCESS') {
     forgetTask()
     await Promise.all([loadTranscript(), loadSummary()])
@@ -248,6 +262,7 @@ async function handleTerminalTask(task: AnalysisTask) {
 }
 
 async function handleProgressEvent(event: AnalysisProgressEvent) {
+  if (analysisTask.value?.taskId !== event.taskId) return
   const previous = analysisTask.value
   analysisTask.value = {
     ...event,
@@ -257,6 +272,7 @@ async function handleProgressEvent(event: AnalysisProgressEvent) {
       ? previous?.finishedAt ?? new Date().toISOString()
       : null,
   }
+  analysisTaskResolved.value = true
   analysisError.value = ''
   if (event.status === 'SUCCESS' || event.status === 'FAILED') {
     await handleTerminalTask(analysisTask.value)
@@ -268,6 +284,7 @@ async function pollAnalysis(taskId: number) {
   fallbackPollCount += 1
   try {
     const current = await getAnalysisTask(taskId)
+    if (analysisTask.value?.taskId !== taskId) return
     analysisTask.value = current
     analysisError.value = ''
     if (current.status === 'SUCCESS' || current.status === 'FAILED') {
@@ -281,6 +298,7 @@ async function pollAnalysis(taskId: number) {
       }
     }
   } catch (error) {
+    if (analysisTask.value?.taskId !== taskId) return
     analysisError.value = apiErrorMessage(error, '分析状态加载失败，请稍后重试。')
     if (fallbackPollCount < MAX_FALLBACK_POLLS) schedulePoll(taskId)
   } finally {
@@ -289,7 +307,7 @@ async function pollAnalysis(taskId: number) {
 }
 
 async function handleStartAnalysis() {
-  if (!video.value || startingAnalysis.value || analysisActive.value || analysisComplete.value) return
+  if (!video.value || !analysisTaskResolved.value || startingAnalysis.value || analysisActive.value || analysisComplete.value) return
 
   startingAnalysis.value = true
   analysisError.value = ''
@@ -307,6 +325,7 @@ async function handleStartAnalysis() {
       startedAt: null,
       finishedAt: null,
     }
+    analysisTaskResolved.value = true
     rememberTask(started.taskId)
     analysisTransport.value = 'sse'
     connectAnalysisEvents(started.taskId)
@@ -317,39 +336,56 @@ async function handleStartAnalysis() {
   }
 }
 
-async function recoverAnalysisTask() {
-  let storedTaskId = 0
+async function recoverCurrentAnalysisTask(videoId: number, loadVersion: number) {
+  const savedTaskId = storedTaskId(videoId)
   try {
-    storedTaskId = Number(window.sessionStorage.getItem(taskStorageKey()))
-  } catch {
-    return
-  }
-  if (!Number.isSafeInteger(storedTaskId) || storedTaskId <= 0) return
+    const current = await getCurrentAnalysisTask(videoId)
+    if (loadVersion !== pageLoadVersion || Number(route.params.id) !== videoId) return
 
-  try {
-    const current = await getAnalysisTask(storedTaskId)
-    analysisTask.value = current
-    if (current.status === 'PENDING' || current.status === 'PROCESSING' || current.status === 'RETRY_WAITING') {
+    const decision = resolveAnalysisRecovery(savedTaskId, current)
+    stopAnalysisTransport()
+    analysisTask.value = decision.task
+    analysisTaskResolved.value = decision.resolved
+    analysisError.value = ''
+    if (decision.storageTaskId === null) {
+      forgetTask(videoId)
+    } else if (savedTaskId !== decision.storageTaskId) {
+      rememberTask(decision.storageTaskId, videoId)
+    }
+    if (decision.shouldConnect && decision.task) {
       analysisTransport.value = 'sse'
-      connectAnalysisEvents(storedTaskId)
-    } else {
-      await handleTerminalTask(current)
+      connectAnalysisEvents(decision.task.taskId)
     }
   } catch (error) {
-    forgetTask()
-    analysisError.value = apiErrorMessage(error, '无法恢复上次分析任务。')
+    if (loadVersion !== pageLoadVersion || Number(route.params.id) !== videoId) return
+    const decision = resolveAnalysisRecovery(savedTaskId, undefined)
+    stopAnalysisTransport()
+    analysisTask.value = decision.task
+    analysisTaskResolved.value = decision.resolved
+    analysisError.value = apiErrorMessage(error, '无法恢复当前分析任务。')
   }
 }
 
 async function loadPage() {
+  const videoId = Number(route.params.id)
+  const loadVersion = ++pageLoadVersion
+  stopAnalysisTransport()
+  analysisTask.value = null
+  analysisTaskResolved.value = false
+  analysisError.value = ''
   await loadVideo()
-  if (video.value) await recoverAnalysisTask()
+  if (loadVersion === pageLoadVersion && video.value?.id === videoId) {
+    await recoverCurrentAnalysisTask(videoId, loadVersion)
+  }
 }
 
 onMounted(loadPage)
+watch(() => route.params.id, () => {
+  void loadPage()
+})
 onBeforeUnmount(() => {
-  clearPollTimer()
-  closeAnalysisEvents()
+  pageLoadVersion += 1
+  stopAnalysisTransport()
 })
 </script>
 
@@ -402,11 +438,11 @@ onBeforeUnmount(() => {
           </div>
           <el-button
             class="analysis-start-button"
-            :disabled="analysisActive || analysisComplete"
+            :disabled="!analysisTaskResolved || analysisActive || analysisComplete"
             :loading="startingAnalysis"
             @click="handleStartAnalysis"
           >
-            {{ analysisActive ? '分析进行中' : analysisComplete ? '分析已完成' : analysisTask?.status === 'FAILED' ? '重试分析' : '开始 AI 分析' }}
+            {{ !analysisTaskResolved ? '正在恢复分析状态' : analysisActive ? '分析进行中' : analysisComplete ? '分析已完成' : analysisTask?.status === 'FAILED' ? '重试分析' : '开始 AI 分析' }}
           </el-button>
         </div>
 
@@ -441,8 +477,8 @@ onBeforeUnmount(() => {
 
         <div v-else class="analysis-empty">
           {{
-            analysisComplete
-              ? '该视频已完成结构化分析，结果已从持久化数据加载。'
+            !analysisTaskResolved
+              ? '正在从服务端恢复当前分析任务。'
               : '尚未创建分析任务。点击按钮后，接口会立即返回任务编号并建立 SSE 实时连接。'
           }}
         </div>

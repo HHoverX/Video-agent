@@ -13,21 +13,26 @@ import com.videoagent.video.service.VideoOwnershipService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Optional;
+
 @Service
 public class AnalysisQueryService {
 
     private final AnalysisTaskRepository analysisTaskRepository;
     private final AnalysisProgressStore progressStore;
     private final VideoOwnershipService ownershipService;
+    private final AnalysisProperties properties;
 
     public AnalysisQueryService(
         AnalysisTaskRepository analysisTaskRepository,
         AnalysisProgressStore progressStore,
-        VideoOwnershipService ownershipService
+        VideoOwnershipService ownershipService,
+        AnalysisProperties properties
     ) {
         this.analysisTaskRepository = analysisTaskRepository;
         this.progressStore = progressStore;
         this.ownershipService = ownershipService;
+        this.properties = properties;
     }
 
     @Transactional(readOnly = true)
@@ -37,8 +42,22 @@ public class AnalysisQueryService {
             throw new VideoAgentException(ErrorCode.ANALYSIS_NOT_FOUND);
         }
 
+        return toResponse(task);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<AnalysisTaskResponse> getCurrentTask(long videoId, long userId) {
+        ownershipService.requireOwned(videoId, userId);
+        return Optional.ofNullable(analysisTaskRepository.findByBusinessKey(
+            videoId,
+            properties.analysisType(),
+            properties.modelVersion()
+        )).map(this::toResponse);
+    }
+
+    private AnalysisTaskResponse toResponse(AnalysisTaskEntity task) {
         AnalysisProgressSnapshot persisted = mysqlSnapshot(task);
-        AnalysisProgressSnapshot progress = progressStore.find(taskId)
+        AnalysisProgressSnapshot progress = progressStore.find(task.getId())
             .filter(snapshot -> task.getStatus().equals(snapshot.status()))
             .orElse(persisted);
 

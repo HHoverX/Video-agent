@@ -1,6 +1,7 @@
 package com.videoagent.analysis.controller;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -22,6 +23,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.time.LocalDateTime;
+import java.util.Optional;
 
 class AnalysisControllerTest {
 
@@ -34,7 +36,7 @@ class AnalysisControllerTest {
     void setUp() {
         when(currentUser.userId()).thenReturn(5L);
         mockMvc = MockMvcBuilders.standaloneSetup(
-                new AnalysisCommandController(commandService, currentUser),
+                new AnalysisCommandController(commandService, queryService, currentUser),
                 new AnalysisQueryController(queryService, currentUser)
             )
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -68,10 +70,29 @@ class AnalysisControllerTest {
     }
 
     @Test
+    void shouldReturnCurrentTaskOrNoContentWithoutStartingAnalysis() throws Exception {
+        LocalDateTime now = LocalDateTime.of(2026, 8, 8, 20, 0);
+        when(queryService.getCurrentTask(7L, 5L)).thenReturn(Optional.of(new AnalysisTaskResponse(
+            101L, 7L, "PROCESSING", "ANALYZING", 40, "正在模拟分析",
+            null, null, now, now, null
+        )));
+        when(queryService.getCurrentTask(8L, 5L)).thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/api/videos/7/analysis"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.taskId").value(101));
+        mockMvc.perform(get("/api/videos/8/analysis"))
+            .andExpect(status().isNoContent());
+
+        verifyNoInteractions(commandService);
+    }
+
+    @Test
     void shouldReturnRequiredBusinessErrors() throws Exception {
         when(commandService.start(999L, 5L)).thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
         when(commandService.start(7L, 5L)).thenThrow(new VideoAgentException(ErrorCode.ANALYSIS_ALREADY_RUNNING));
         when(queryService.getTask(999L, 5L)).thenThrow(new VideoAgentException(ErrorCode.ANALYSIS_NOT_FOUND));
+        when(queryService.getCurrentTask(999L, 5L)).thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
 
         mockMvc.perform(post("/api/videos/999/analysis"))
             .andExpect(status().isNotFound())
@@ -82,5 +103,8 @@ class AnalysisControllerTest {
         mockMvc.perform(get("/api/analysis/999"))
             .andExpect(status().isNotFound())
             .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+        mockMvc.perform(get("/api/videos/999/analysis"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("VIDEO_NOT_FOUND"));
     }
 }

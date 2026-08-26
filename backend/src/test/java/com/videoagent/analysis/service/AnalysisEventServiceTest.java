@@ -34,7 +34,12 @@ class AnalysisEventServiceTest {
         when(ownershipService.isOwned(7L, 5L)).thenReturn(true);
 
         AnalysisEventService service = new AnalysisEventService(
-            new AnalysisQueryService(repository, progressStore, ownershipService),
+            new AnalysisQueryService(
+                repository,
+                progressStore,
+                ownershipService,
+                new AnalysisProperties(null, null, null, null, Duration.ofHours(24))
+            ),
             broadcaster,
             new AnalysisEventProperties(Duration.ofSeconds(10))
         );
