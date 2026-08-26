@@ -2,6 +2,7 @@ package com.videoagent.video.controller;
 
 import com.videoagent.security.CurrentUserAccessor;
 import com.videoagent.video.dto.VideoPageResponse;
+import com.videoagent.video.dto.VideoPlaybackUrlResponse;
 import com.videoagent.video.dto.VideoResponse;
 import com.videoagent.video.dto.VideoTitleUpdateRequest;
 import com.videoagent.video.dto.VideoUploadResponse;
@@ -12,6 +13,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 
 import org.springframework.http.MediaType;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -66,6 +68,13 @@ public class VideoController {
     @GetMapping("/{videoId}")
     public VideoResponse detail(@PathVariable long videoId) {
         return videoService.getVideo(videoId, currentUser.userId());
+    }
+
+    @GetMapping("/{videoId}/playback-url")
+    public ResponseEntity<VideoPlaybackUrlResponse> playbackUrl(@PathVariable long videoId) {
+        return ResponseEntity.ok()
+            .cacheControl(CacheControl.noStore())
+            .body(videoService.getPlaybackUrl(videoId, currentUser.userId()));
     }
 
     @PatchMapping("/{videoId}")

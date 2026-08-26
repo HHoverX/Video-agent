@@ -8,6 +8,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +23,7 @@ import com.videoagent.rag.service.RagCleanupService;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.dto.VideoPageResponse;
+import com.videoagent.video.dto.VideoPlaybackUrlResponse;
 import com.videoagent.video.dto.VideoResponse;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
@@ -28,10 +31,13 @@ import com.videoagent.video.repository.VideoRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.mock.web.MockMultipartFile;
 
 import java.io.InputStream;
 import java.time.LocalDateTime;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 class VideoServiceTest {
@@ -44,6 +50,7 @@ class VideoServiceTest {
     private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private final VideoDeletionService deletionService = mock(VideoDeletionService.class);
     private final RagCleanupService ragCleanupService = mock(RagCleanupService.class);
+    private static final Duration PLAYBACK_TTL = Duration.ofMinutes(60);
     private VideoService videoService;
 
     @BeforeEach
@@ -58,7 +65,8 @@ class VideoServiceTest {
             storageService,
             ownershipService,
             deletionService,
-            ragCleanupService
+            ragCleanupService,
+            new VideoPlaybackProperties(PLAYBACK_TTL)
         );
         doAnswer(invocation -> {
             InputStream stream = invocation.getArgument(1);
@@ -162,6 +170,65 @@ class VideoServiceTest {
         doThrow(new RuntimeException("minio unavailable"))
             .when(storageService).removeObject("videos/orphan.mp4");
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> videoService.deleteVideo(43L, 5L));
+    }
+
+    @Test
+    void shouldCreatePlaybackUrlAfterOwnershipCheck() {
+        VideoEntity owned = video(42L, 5L, "Owned video");
+        owned.setObjectKey("videos/owned.mp4");
+        when(ownershipService.requireOwned(42L, 5L)).thenReturn(owned);
+        when(storageService.presignGetObject("videos/owned.mp4", PLAYBACK_TTL))
+            .thenReturn("https://media.example.com/signed-get");
+        Instant before = Instant.now();
+
+        VideoPlaybackUrlResponse response = videoService.getPlaybackUrl(42L, 5L);
+
+        Instant after = Instant.now();
+        assertThat(response.url()).isEqualTo("https://media.example.com/signed-get");
+        assertThat(response.expiresAt()).isBetween(before.plus(PLAYBACK_TTL), after.plus(PLAYBACK_TTL));
+        assertThat(response.getClass().getRecordComponents()).extracting(component -> component.getName())
+            .containsExactly("url", "expiresAt");
+        InOrder order = inOrder(ownershipService, storageService);
+        order.verify(ownershipService).requireOwned(42L, 5L);
+        order.verify(storageService).presignGetObject("videos/owned.mp4", PLAYBACK_TTL);
+    }
+
+    @Test
+    void shouldPropagateNotFoundForUnownedOrMissingVideo() {
+        when(ownershipService.requireOwned(42L, 5L)).thenThrow(new VideoAgentException(ErrorCode.VIDEO_NOT_FOUND));
+
+        assertThatThrownBy(() -> videoService.getPlaybackUrl(42L, 5L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.VIDEO_NOT_FOUND)
+            );
+        verifyNoInteractions(storageService);
+    }
+
+    @Test
+    void shouldRejectMissingObjectKeyBeforeStorageCall() {
+        VideoEntity owned = video(42L, 5L, "Owned video");
+        owned.setObjectKey("  ");
+        when(ownershipService.requireOwned(42L, 5L)).thenReturn(owned);
+
+        assertThatThrownBy(() -> videoService.getPlaybackUrl(42L, 5L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.INTERNAL_ERROR)
+            );
+        verifyNoInteractions(storageService);
+    }
+
+    @Test
+    void shouldPropagateStorageError() {
+        VideoEntity owned = video(42L, 5L, "Owned video");
+        owned.setObjectKey("videos/owned.mp4");
+        when(ownershipService.requireOwned(42L, 5L)).thenReturn(owned);
+        when(storageService.presignGetObject("videos/owned.mp4", PLAYBACK_TTL))
+            .thenThrow(new VideoAgentException(ErrorCode.STORAGE_ERROR));
+
+        assertThatThrownBy(() -> videoService.getPlaybackUrl(42L, 5L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.STORAGE_ERROR)
+            );
     }
 
     private VideoEntity video(long id, long userId, String title) {

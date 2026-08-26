@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -27,7 +28,9 @@ import com.videoagent.rag.repository.VideoRagIndexRepository;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
+import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
+import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 import com.videoagent.upload.repository.VideoUploadSessionRepository;
 import com.videoagent.upload.repository.VideoUploadPartRepository;
@@ -107,6 +110,9 @@ class SecurityEndpointIntegrationTest {
 
     @MockitoBean
     private AnalysisQueryService queryService;
+
+    @MockitoBean
+    private ObjectStorageService storageService;
 
     @Autowired
     private MockMvc mockMvc;
@@ -242,6 +248,43 @@ class SecurityEndpointIntegrationTest {
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isNotFound())
             .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+    }
+
+    @Test
+    void shouldSecurePlaybackUrlAndReturnOnlyPlaybackFields() throws Exception {
+        mockMvc.perform(get("/api/videos/42/playback-url"))
+            .andExpect(status().isUnauthorized())
+            .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+
+        String token = loginToken();
+        VideoEntity owned = new VideoEntity();
+        owned.setId(42L);
+        owned.setUserId(7L);
+        owned.setObjectKey("videos/owned.mp4");
+        when(videoRepository.selectOne(any())).thenReturn(owned);
+        when(storageService.presignGetObject(anyString(), any()))
+            .thenReturn("https://media.example.com/signed-get");
+
+        mockMvc.perform(get("/api/videos/42/playback-url")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(jsonPath("$.url").value("https://media.example.com/signed-get"))
+            .andExpect(jsonPath("$.expiresAt").isNotEmpty())
+            .andExpect(jsonPath("$.objectKey").doesNotExist())
+            .andExpect(jsonPath("$.bucket").doesNotExist())
+            .andExpect(jsonPath("$.accessKey").doesNotExist())
+            .andExpect(jsonPath("$.secretKey").doesNotExist());
+
+        when(videoRepository.selectOne(any())).thenReturn(null);
+        mockMvc.perform(get("/api/videos/43/playback-url")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("VIDEO_NOT_FOUND"));
+        mockMvc.perform(get("/api/videos/44/playback-url")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.code").value("VIDEO_NOT_FOUND"));
     }
 
     private String loginToken() throws Exception {

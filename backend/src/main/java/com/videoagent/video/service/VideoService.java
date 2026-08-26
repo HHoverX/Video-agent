@@ -6,6 +6,7 @@ import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.video.dto.VideoPageResponse;
+import com.videoagent.video.dto.VideoPlaybackUrlResponse;
 import com.videoagent.video.dto.VideoResponse;
 import com.videoagent.video.dto.VideoUploadResponse;
 import com.videoagent.video.entity.VideoEntity;
@@ -26,6 +27,8 @@ import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
@@ -42,6 +45,7 @@ public class VideoService {
     private final VideoOwnershipService ownershipService;
     private final VideoDeletionService deletionService;
     private final RagCleanupService ragCleanupService;
+    private final VideoPlaybackProperties playbackProperties;
 
     public VideoService(
         VideoRepository videoRepository,
@@ -49,7 +53,8 @@ public class VideoService {
         ObjectStorageService storageService,
         VideoOwnershipService ownershipService,
         VideoDeletionService deletionService,
-        RagCleanupService ragCleanupService
+        RagCleanupService ragCleanupService,
+        VideoPlaybackProperties playbackProperties
     ) {
         this.videoRepository = videoRepository;
         this.fileValidator = fileValidator;
@@ -57,6 +62,7 @@ public class VideoService {
         this.ownershipService = ownershipService;
         this.deletionService = deletionService;
         this.ragCleanupService = ragCleanupService;
+        this.playbackProperties = playbackProperties;
     }
 
     @Transactional
@@ -119,6 +125,19 @@ public class VideoService {
     @Transactional(readOnly = true)
     public VideoResponse getVideo(long videoId, long userId) {
         return VideoResponse.from(ownershipService.requireOwned(videoId, userId));
+    }
+
+    @Transactional(readOnly = true)
+    public VideoPlaybackUrlResponse getPlaybackUrl(long videoId, long userId) {
+        VideoEntity video = ownershipService.requireOwned(videoId, userId);
+        String objectKey = video.getObjectKey();
+        if (objectKey == null || objectKey.isBlank()) {
+            throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "视频存储元数据不完整");
+        }
+
+        Duration expiry = playbackProperties.presignTtl();
+        String url = storageService.presignGetObject(objectKey, expiry);
+        return new VideoPlaybackUrlResponse(url, Instant.now().plus(expiry));
     }
 
     @Transactional

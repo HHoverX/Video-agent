@@ -16,6 +16,7 @@ import io.minio.StatObjectResponse;
 import io.minio.http.Method;
 
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
@@ -33,21 +34,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Service
 public class MinioStorageService implements ObjectStorageService {
 
-    private final ObjectProvider<MinioClient> clientProvider;
+    private final ObjectProvider<MinioClient> internalClientProvider;
+    private final ObjectProvider<MinioClient> publicPresignClientProvider;
     private final StorageProperties properties;
     private final AtomicBoolean bucketReady = new AtomicBoolean(false);
 
     public MinioStorageService(
-        ObjectProvider<MinioClient> clientProvider,
+        @Qualifier("minioClient") ObjectProvider<MinioClient> internalClientProvider,
+        @Qualifier("publicPresignMinioClient") ObjectProvider<MinioClient> publicPresignClientProvider,
         StorageProperties properties
     ) {
-        this.clientProvider = clientProvider;
+        this.internalClientProvider = internalClientProvider;
+        this.publicPresignClientProvider = publicPresignClientProvider;
         this.properties = properties;
     }
 
     @Override
     public void downloadObject(String objectKey, Path destination) {
-        try (InputStream inputStream = clientProvider.getObject().getObject(GetObjectArgs.builder()
+        try (InputStream inputStream = internalClientProvider.getObject().getObject(GetObjectArgs.builder()
             .bucket(properties.bucket())
             .object(objectKey)
             .build())) {
@@ -64,7 +68,7 @@ public class MinioStorageService implements ObjectStorageService {
     @Override
     public void putObject(String objectKey, InputStream inputStream, long size, String contentType) {
         try {
-            MinioClient client = clientProvider.getObject();
+            MinioClient client = internalClientProvider.getObject();
             ensureBucket(client);
             client.putObject(PutObjectArgs.builder()
                 .bucket(properties.bucket())
@@ -84,7 +88,7 @@ public class MinioStorageService implements ObjectStorageService {
     @Override
     public void removeObject(String objectKey) {
         try {
-            clientProvider.getObject().removeObject(RemoveObjectArgs.builder()
+            internalClientProvider.getObject().removeObject(RemoveObjectArgs.builder()
                 .bucket(properties.bucket())
                 .object(objectKey)
                 .build());
@@ -100,9 +104,8 @@ public class MinioStorageService implements ObjectStorageService {
     @Override
     public String presignPutObject(String objectKey, Duration expiry) {
         try {
-            MinioClient client = clientProvider.getObject();
-            ensureBucket(client);
-            return client.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
+            ensureBucket(internalClientProvider.getObject());
+            return publicPresignClientProvider.getObject().getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                 .method(Method.PUT)
                 .bucket(properties.bucket())
                 .object(objectKey)
@@ -114,9 +117,23 @@ public class MinioStorageService implements ObjectStorageService {
     }
 
     @Override
+    public String presignGetObject(String objectKey, Duration expiry) {
+        try {
+            return publicPresignClientProvider.getObject().getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
+                .method(Method.GET)
+                .bucket(properties.bucket())
+                .object(objectKey)
+                .expiry(Math.toIntExact(expiry.toSeconds()))
+                .build());
+        } catch (Exception exception) {
+            throw storageFailure("无法生成视频播放地址", exception);
+        }
+    }
+
+    @Override
     public StoredObject statObject(String objectKey) {
         try {
-            StatObjectResponse response = clientProvider.getObject().statObject(StatObjectArgs.builder()
+            StatObjectResponse response = internalClientProvider.getObject().statObject(StatObjectArgs.builder()
                 .bucket(properties.bucket())
                 .object(objectKey)
                 .build());
@@ -128,7 +145,7 @@ public class MinioStorageService implements ObjectStorageService {
 
     @Override
     public byte[] readObjectRange(String objectKey, long offset, int length) {
-        try (InputStream inputStream = clientProvider.getObject().getObject(GetObjectArgs.builder()
+        try (InputStream inputStream = internalClientProvider.getObject().getObject(GetObjectArgs.builder()
             .bucket(properties.bucket())
             .object(objectKey)
             .offset(offset)
@@ -146,7 +163,7 @@ public class MinioStorageService implements ObjectStorageService {
             throw new VideoAgentException(ErrorCode.STORAGE_ERROR, "没有可合并的分片对象");
         }
         try {
-            MinioClient client = clientProvider.getObject();
+            MinioClient client = internalClientProvider.getObject();
             ensureBucket(client);
             List<ComposeSource> sources = sourceObjects.stream()
                 .map(source -> ComposeSource.builder()
@@ -168,7 +185,7 @@ public class MinioStorageService implements ObjectStorageService {
 
     @Override
     public String sha256Object(String objectKey) {
-        try (InputStream inputStream = clientProvider.getObject().getObject(GetObjectArgs.builder()
+        try (InputStream inputStream = internalClientProvider.getObject().getObject(GetObjectArgs.builder()
             .bucket(properties.bucket())
             .object(objectKey)
             .build())) {

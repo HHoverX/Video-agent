@@ -109,8 +109,11 @@ videoagent:
     presign-ttl: ${VIDEO_UPLOAD_PRESIGN_TTL:15m}
     max-client-concurrency: ${VIDEO_UPLOAD_MAX_CONCURRENCY:3}
     cleanup-interval-ms: ${VIDEO_UPLOAD_CLEANUP_INTERVAL_MS:300000}
+  playback:
+    presign-ttl: ${VIDEO_PLAYBACK_PRESIGN_TTL:60m}
   storage:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    public-endpoint: ${MINIO_PUBLIC_ENDPOINT:${MINIO_ENDPOINT:http://localhost:9000}}
     access-key: ${MINIO_ACCESS_KEY:}
     secret-key: ${MINIO_SECRET_KEY:}
     bucket: ${MINIO_BUCKET:videoagent}

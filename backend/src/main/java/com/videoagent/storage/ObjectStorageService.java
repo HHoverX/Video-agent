@@ -15,6 +15,8 @@ public interface ObjectStorageService {
 
     String presignPutObject(String objectKey, Duration expiry);
 
+    String presignGetObject(String objectKey, Duration expiry);
+
     StoredObject statObject(String objectKey);
 
     byte[] readObjectRange(String objectKey, long offset, int length);
