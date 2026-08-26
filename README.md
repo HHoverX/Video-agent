@@ -333,4 +333,4 @@ docker-compose.yml
 - 前端尚未提供视频播放器与点击 Citation 跳转播放功能；后端已返回真实时间范围。
 - 已完成正确性测试，但未进行大文件并发压测、故障注入压测或性能基准测试。
 
-历史分期计划见 [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)，当前能力以代码、Flyway 迁移和测试结果为准。
+当前能力以代码、Flyway 迁移和测试结果为准。

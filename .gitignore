@@ -22,3 +22,9 @@ Thumbs.db
 # Runtime files
 logs/
 tmp/
+
+# Local Codex review artifacts and personal helper files
+.codex_tmp/
+.codex_resume_review/
+/周天赐_Java后端_AI应用开发_简历.docx
+/start-backend.ps1
