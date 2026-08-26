@@ -49,14 +49,6 @@ function storageKey(file: File): string {
   return `videoagent:upload:${file.name}:${file.size}:${file.lastModified}`
 }
 
-function rememberAnalysisTask(videoId: number, taskId: number) {
-  try {
-    window.sessionStorage.setItem(`videoagent:analysis-task:${videoId}`, String(taskId))
-  } catch {
-    // Detail recovery is auxiliary; upload completion remains successful without session storage.
-  }
-}
-
 async function handleFileChange(uploadFile: UploadFile, uploadFiles: UploadFiles) {
   const rawFile = uploadFile.raw
   validationMessage.value = ''
@@ -133,9 +125,6 @@ async function submitUpload() {
     return
   }
   if (session.value?.status === 'COMPLETED' && session.value.videoId) {
-    if (session.value.analysisTaskId) {
-      rememberAnalysisTask(session.value.videoId, session.value.analysisTaskId)
-    }
     await router.push(`/videos/${session.value.videoId}`)
     return
   }
@@ -161,12 +150,11 @@ async function submitUpload() {
     await uploadMissingParts(file, session.value)
     if (paused.value) return
 
-    statusMessage.value = '全部分片已上传，正在服务端合并并创建分析任务…'
+    statusMessage.value = '全部分片已上传，正在服务端合并视频…'
     const completed = await completeUpload(session.value.uploadId)
     localStorage.removeItem(storageKey(file))
     progress.value = 100
-    rememberAnalysisTask(completed.videoId, completed.analysisTaskId)
-    ElMessage.success('视频上传完成，分析任务已进入队列')
+    ElMessage.success('视频上传完成，视频已就绪')
     await router.push(`/videos/${completed.videoId}`)
   } catch (error) {
     if (paused.value) {
@@ -362,7 +350,7 @@ function updateProgress() {
           <li><span>01</span> MySQL 持久化上传会话</li>
           <li><span>02</span> 浏览器限并发直传临时分片</li>
           <li><span>03</span> 查询会话后只补缺失分片</li>
-          <li><span>04</span> MinIO 服务端合并并异步分析</li>
+          <li><span>04</span> MinIO 服务端合并为可播放视频</li>
         </ol>
       </aside>
     </div>

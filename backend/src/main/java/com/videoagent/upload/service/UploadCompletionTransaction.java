@@ -1,7 +1,5 @@
 package com.videoagent.upload.service;
 
-import com.videoagent.analysis.dto.StartAnalysisResponse;
-import com.videoagent.analysis.service.AnalysisCommandService;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.storage.ComposeObjectSource;
@@ -34,7 +32,6 @@ public class UploadCompletionTransaction {
     private final VideoUploadPartRepository partRepository;
     private final VideoRepository videoRepository;
     private final ObjectStorageService storageService;
-    private final AnalysisCommandService analysisCommandService;
     private final UploadTemporaryObjectCleaner temporaryObjectCleaner;
 
     public UploadCompletionTransaction(
@@ -42,14 +39,12 @@ public class UploadCompletionTransaction {
         VideoUploadPartRepository partRepository,
         VideoRepository videoRepository,
         ObjectStorageService storageService,
-        AnalysisCommandService analysisCommandService,
         UploadTemporaryObjectCleaner temporaryObjectCleaner
     ) {
         this.sessionRepository = sessionRepository;
         this.partRepository = partRepository;
         this.videoRepository = videoRepository;
         this.storageService = storageService;
-        this.analysisCommandService = analysisCommandService;
         this.temporaryObjectCleaner = temporaryObjectCleaner;
     }
 
@@ -108,12 +103,7 @@ public class UploadCompletionTransaction {
             throw new VideoAgentException(ErrorCode.VIDEO_UPLOAD_FAILED, "视频记录创建失败");
         }
 
-        // This call joins the current transaction: video, task and outbox event
-        // either commit together or all roll back. The HTTP request performs no
-        // FFmpeg/ASR/LLM work.
-        StartAnalysisResponse analysis = analysisCommandService.start(video.getId(), userId);
         session.setVideoId(video.getId());
-        session.setAnalysisTaskId(analysis.taskId());
         session.setStatus(UploadSessionStatus.COMPLETED.name());
         session.setCompletedAt(now);
         session.setUpdatedAt(now);
@@ -160,11 +150,11 @@ public class UploadCompletionTransaction {
     }
 
     private CompleteUploadResponse completedResponse(VideoUploadSessionEntity session) {
-        if (session.getVideoId() == null || session.getAnalysisTaskId() == null) {
-            throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "已完成上传缺少视频或分析任务标识");
+        if (session.getVideoId() == null) {
+            throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "已完成上传缺少视频标识");
         }
         return new CompleteUploadResponse(
-            session.getId(), session.getVideoId(), session.getAnalysisTaskId(), session.getStatus()
+            session.getId(), session.getVideoId(), session.getStatus()
         );
     }
 }

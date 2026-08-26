@@ -2,7 +2,6 @@ package com.videoagent.upload;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.storage.StorageProperties;
@@ -98,7 +97,6 @@ class ResumableUploadInfrastructureIntegrationTest {
     private String uploadId;
     private String objectKey;
     private Long videoId;
-    private Long analysisTaskId;
 
     @AfterEach
     void cleanUp() throws Exception {
@@ -110,9 +108,6 @@ class ResumableUploadInfrastructureIntegrationTest {
         }
         if (uploadId != null) {
             sessionRepository.deleteById(uploadId);
-        }
-        if (analysisTaskId != null) {
-            taskRepository.deleteById(analysisTaskId);
         }
         if (videoId != null) {
             videoRepository.deleteById(videoId);
@@ -205,11 +200,7 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(concurrent).extracting(CompleteUploadResponse::videoId).doesNotContainNull().containsOnly(
             concurrent.getFirst().videoId()
         );
-        assertThat(concurrent).extracting(CompleteUploadResponse::analysisTaskId).doesNotContainNull().containsOnly(
-            concurrent.getFirst().analysisTaskId()
-        );
         videoId = concurrent.getFirst().videoId();
-        analysisTaskId = concurrent.getFirst().analysisTaskId();
 
         ResponseEntity<CompleteUploadResponse> repeated = restTemplate.exchange(
             baseUrl("/api/uploads/" + uploadId + "/complete"),
@@ -220,14 +211,14 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(repeated.getBody()).isEqualTo(concurrent.getFirst());
 
         VideoEntity video = videoRepository.selectById(videoId);
-        AnalysisTaskEntity task = taskRepository.selectById(analysisTaskId);
         VideoUploadSessionEntity completed = sessionRepository.selectById(uploadId);
         assertThat(video.getObjectKey()).isEqualTo(objectKey);
         assertThat(video.getFileHash()).isEqualTo(sha256);
-        assertThat(task.getVideoId()).isEqualTo(videoId);
+        assertThat(taskRepository.selectList(null))
+            .noneMatch(task -> task.getVideoId().equals(videoId));
         assertThat(completed.getStatus()).isEqualTo("COMPLETED");
         assertThat(completed.getVideoId()).isEqualTo(videoId);
-        assertThat(completed.getAnalysisTaskId()).isEqualTo(analysisTaskId);
+        assertThat(completed.getAnalysisTaskId()).isNull();
         assertThat(minioClient.statObject(StatObjectArgs.builder()
             .bucket(storageProperties.bucket())
             .object(objectKey)

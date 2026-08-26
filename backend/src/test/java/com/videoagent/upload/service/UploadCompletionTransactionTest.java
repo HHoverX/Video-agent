@@ -3,15 +3,12 @@ package com.videoagent.upload.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.videoagent.analysis.dto.StartAnalysisResponse;
-import com.videoagent.analysis.service.AnalysisCommandService;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.storage.ObjectStorageService;
@@ -36,17 +33,16 @@ class UploadCompletionTransactionTest {
     private final VideoUploadPartRepository parts = mock(VideoUploadPartRepository.class);
     private final VideoRepository videos = mock(VideoRepository.class);
     private final ObjectStorageService storage = mock(ObjectStorageService.class);
-    private final AnalysisCommandService analysis = mock(AnalysisCommandService.class);
     private final UploadTemporaryObjectCleaner cleaner = mock(UploadTemporaryObjectCleaner.class);
     private UploadCompletionTransaction transaction;
 
     @BeforeEach
     void setUp() {
-        transaction = new UploadCompletionTransaction(sessions, parts, videos, storage, analysis, cleaner);
+        transaction = new UploadCompletionTransaction(sessions, parts, videos, storage, cleaner);
     }
 
     @Test
-    void shouldComposeCreateExactlyOneVideoAndAnalysisTask() {
+    void shouldComposeCreateExactlyOneVideoWithoutStartingAnalysis() {
         VideoUploadSessionEntity session = session("UPLOADING");
         when(sessions.lockById("u1")).thenReturn(session);
         when(parts.findByUploadId("u1")).thenReturn(List.of(part(1, 16, "e1"), part(2, 8, "e2")));
@@ -62,16 +58,14 @@ class UploadCompletionTransactionTest {
             video.setId(42L);
             return 1;
         });
-        when(analysis.start(42L, 7L)).thenReturn(new StartAnalysisResponse(91L, 42L, "PENDING"));
-
         CompleteUploadResponse response = transaction.complete(7L, "u1");
 
         assertThat(response.videoId()).isEqualTo(42L);
-        assertThat(response.analysisTaskId()).isEqualTo(91L);
         verify(storage).composeObject(eq("videos/final.mp4"), any(), eq("video/mp4"));
         verify(videos).insert(any(VideoEntity.class));
-        verify(analysis).start(42L, 7L);
         assertThat(session.getStatus()).isEqualTo("COMPLETED");
+        assertThat(session.getVideoId()).isEqualTo(42L);
+        assertThat(session.getAnalysisTaskId()).isNull();
         verify(cleaner).cleanupAfterCommit(session);
     }
 
@@ -79,7 +73,6 @@ class UploadCompletionTransactionTest {
     void shouldReturnExistingResultForRepeatedOrConcurrentComplete() {
         VideoUploadSessionEntity session = session("COMPLETED");
         session.setVideoId(42L);
-        session.setAnalysisTaskId(91L);
         when(sessions.lockById("u1")).thenReturn(session);
 
         CompleteUploadResponse first = transaction.complete(7L, "u1");
@@ -88,7 +81,6 @@ class UploadCompletionTransactionTest {
         assertThat(first).isEqualTo(second);
         verify(storage, never()).composeObject(any(), any(), any());
         verify(videos, never()).insert(any(VideoEntity.class));
-        verify(analysis, never()).start(anyLong(), anyLong());
     }
 
     @Test

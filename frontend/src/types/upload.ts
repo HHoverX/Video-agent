@@ -34,6 +34,5 @@ export interface UploadPartUrl {
 export interface CompleteUploadResult {
   uploadId: string
   videoId: number
-  analysisTaskId: number
   status: string
 }
