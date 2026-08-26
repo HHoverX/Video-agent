@@ -1,7 +1,13 @@
 import axios from 'axios'
 
 import { api } from './api'
-import type { ApiErrorResponse, Video, VideoPage, VideoUploadResponse } from '@/types/video'
+import type {
+  ApiErrorResponse,
+  Video,
+  VideoPage,
+  VideoPlaybackUrlResponse,
+  VideoUploadResponse,
+} from '@/types/video'
 
 export async function listVideos(page = 1, size = 10, keyword = ''): Promise<VideoPage> {
   const { data } = await api.get<VideoPage>('/videos', {
@@ -12,6 +18,11 @@ export async function listVideos(page = 1, size = 10, keyword = ''): Promise<Vid
 
 export async function getVideo(videoId: number): Promise<Video> {
   const { data } = await api.get<Video>(`/videos/${videoId}`)
+  return data
+}
+
+export async function getVideoPlaybackUrl(videoId: number): Promise<VideoPlaybackUrlResponse> {
+  const { data } = await api.get<VideoPlaybackUrlResponse>(`/videos/${videoId}/playback-url`)
   return data
 }
 

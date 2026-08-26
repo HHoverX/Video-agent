@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
+import VideoPlayer from '@/components/VideoPlayer.vue'
 import { useAnalysisEvents } from '@/composables/useAnalysisEvents'
 import { getAnalysisTask, startAnalysis } from '@/services/analysis'
 import { agenticStrategyLabel, askAgenticQa, buildRagIndex, getRagStatus } from '@/services/rag'
@@ -359,7 +360,7 @@ onBeforeUnmount(() => {
 
     <template v-else-if="video">
       <div class="detail-hero">
-        <div class="detail-visual"><span>▶</span></div>
+        <VideoPlayer class="detail-visual" :video-id="video.id" />
         <div class="detail-copy">
           <p class="eyebrow">VIDEO #{{ video.id }}</p>
           <h1>{{ video.title }}</h1>

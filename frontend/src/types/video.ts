@@ -14,6 +14,11 @@ export interface VideoUploadResponse {
   videoId: number
 }
 
+export interface VideoPlaybackUrlResponse {
+  url: string
+  expiresAt: string
+}
+
 export interface VideoPage {
   items: Video[]
   page: number
