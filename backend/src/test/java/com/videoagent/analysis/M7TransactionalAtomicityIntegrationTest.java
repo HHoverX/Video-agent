@@ -185,6 +185,51 @@ class M7TransactionalAtomicityIntegrationTest {
         )).isZero();
     }
 
+    @Test
+    void shouldRollBackUserRetryWhenRetryOutboxInsertFails() {
+        LocalDateTime now = LocalDateTime.now();
+        AnalysisTaskEntity task = new AnalysisTaskEntity();
+        task.setVideoId(videoId);
+        task.setAnalysisType("STRUCTURED_SUMMARY");
+        task.setModelVersion("m5-langchain4j-structured-v1");
+        task.setStatus("FAILED");
+        task.setStage("FAILED");
+        task.setProgress(85);
+        task.setRetryCount(3);
+        task.setProcessingGeneration(4);
+        task.setErrorCode("LLM_SUMMARY_FAILED");
+        task.setErrorMessage("provider unavailable");
+        task.setLastErrorCode("LLM_SUMMARY_FAILED");
+        task.setLastErrorMessage("provider unavailable");
+        task.setLastFailureStage("SUMMARIZING");
+        task.setStartedAt(now.minusMinutes(2));
+        task.setFinishedAt(now.minusMinutes(1));
+        task.setCreatedAt(now.minusMinutes(3));
+        task.setUpdatedAt(now.minusMinutes(1));
+        assertThat(taskRepository.insert(task)).isEqualTo(1);
+        insertedTaskId = task.getId();
+
+        doThrow(new IllegalStateException("simulated user retry outbox insert failure"))
+            .when(outboxEventRepository).insertPendingIfAbsent(anyString(), anyString(), anyLong(), anyLong(), anyString(), any(), any());
+
+        assertThatThrownBy(() -> commandService.start(videoId, authSession.userId()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("simulated user retry outbox insert failure");
+
+        AnalysisTaskEntity after = taskRepository.selectById(task.getId());
+        assertThat(after.getStatus()).isEqualTo("FAILED");
+        assertThat(after.getStage()).isEqualTo("FAILED");
+        assertThat(after.getProcessingGeneration()).isEqualTo(4);
+        assertThat(after.getRetryCount()).isEqualTo(3);
+        assertThat(after.getErrorCode()).isEqualTo("LLM_SUMMARY_FAILED");
+        assertThat(after.getFinishedAt()).isNotNull();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM analysis_outbox_event WHERE task_id = ?",
+            Long.class,
+            task.getId()
+        )).isZero();
+    }
+
     private String baseUrl(String path) {
         return "http://127.0.0.1:" + port + path;
     }

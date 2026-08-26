@@ -10,6 +10,7 @@ export type AnalysisStage =
   | 'ANALYZING'
   | 'PROCESSING'
   | 'SAVING'
+  | 'RETRY_WAITING'
   | 'DONE'
   | 'FAILED'
 

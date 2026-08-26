@@ -3,7 +3,6 @@ package com.videoagent.analysis.service;
 import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.entity.AnalysisStage;
-import com.videoagent.analysis.entity.AnalysisStatus;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.progress.AnalysisProgressStore;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
@@ -39,9 +38,9 @@ public class AnalysisQueryService {
         }
 
         AnalysisProgressSnapshot persisted = mysqlSnapshot(task);
-        AnalysisProgressSnapshot progress = isTerminal(task.getStatus())
-            ? persisted
-            : progressStore.find(taskId).orElse(persisted);
+        AnalysisProgressSnapshot progress = progressStore.find(taskId)
+            .filter(snapshot -> task.getStatus().equals(snapshot.status()))
+            .orElse(persisted);
 
         return new AnalysisTaskResponse(
             task.getId(),
@@ -65,11 +64,6 @@ public class AnalysisQueryService {
             task.getProgress(),
             mysqlFallbackMessage(task)
         );
-    }
-
-    private boolean isTerminal(String status) {
-        return AnalysisStatus.SUCCESS.name().equals(status)
-            || AnalysisStatus.FAILED.name().equals(status);
     }
 
     private String mysqlFallbackMessage(AnalysisTaskEntity task) {

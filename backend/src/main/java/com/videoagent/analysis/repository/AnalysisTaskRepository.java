@@ -31,6 +31,45 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
     @Select("""
         SELECT *
         FROM analysis_task
+        WHERE video_id = #{videoId}
+          AND analysis_type = #{analysisType}
+          AND model_version = #{modelVersion}
+        LIMIT 1
+        FOR UPDATE
+        """)
+    AnalysisTaskEntity findByBusinessKeyForUpdate(
+        @Param("videoId") long videoId,
+        @Param("analysisType") String analysisType,
+        @Param("modelVersion") String modelVersion
+    );
+
+    @Update("""
+        UPDATE analysis_task
+        SET status = 'RETRY_WAITING',
+            stage = 'RETRY_WAITING',
+            progress = 0,
+            retry_count = 0,
+            retry_not_before = #{now},
+            processing_generation = processing_generation + 1,
+            processing_at = NULL,
+            error_code = NULL,
+            error_message = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = #{now}
+        WHERE id = #{taskId}
+          AND status = 'FAILED'
+          AND processing_generation = #{expectedGeneration}
+        """)
+    int restartFailedForGeneration(
+        @Param("taskId") long taskId,
+        @Param("expectedGeneration") int expectedGeneration,
+        @Param("now") LocalDateTime now
+    );
+
+    @Select("""
+        SELECT *
+        FROM analysis_task
         WHERE status = 'PROCESSING'
           AND processing_at <= #{staleBefore}
         ORDER BY id ASC

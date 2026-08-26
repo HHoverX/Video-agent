@@ -49,6 +49,14 @@ function storageKey(file: File): string {
   return `videoagent:upload:${file.name}:${file.size}:${file.lastModified}`
 }
 
+function rememberAnalysisTask(videoId: number, taskId: number) {
+  try {
+    window.sessionStorage.setItem(`videoagent:analysis-task:${videoId}`, String(taskId))
+  } catch {
+    // Detail recovery is auxiliary; upload completion remains successful without session storage.
+  }
+}
+
 async function handleFileChange(uploadFile: UploadFile, uploadFiles: UploadFiles) {
   const rawFile = uploadFile.raw
   validationMessage.value = ''
@@ -125,6 +133,9 @@ async function submitUpload() {
     return
   }
   if (session.value?.status === 'COMPLETED' && session.value.videoId) {
+    if (session.value.analysisTaskId) {
+      rememberAnalysisTask(session.value.videoId, session.value.analysisTaskId)
+    }
     await router.push(`/videos/${session.value.videoId}`)
     return
   }
@@ -154,6 +165,7 @@ async function submitUpload() {
     const completed = await completeUpload(session.value.uploadId)
     localStorage.removeItem(storageKey(file))
     progress.value = 100
+    rememberAnalysisTask(completed.videoId, completed.analysisTaskId)
     ElMessage.success('视频上传完成，分析任务已进入队列')
     await router.push(`/videos/${completed.videoId}`)
   } catch (error) {

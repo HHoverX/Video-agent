@@ -81,7 +81,9 @@ const analysisActive = computed(
     || analysisTask.value?.status === 'RETRY_WAITING',
 )
 const analysisComplete = computed(
-  () => analysisTask.value?.status === 'SUCCESS' || summary.value !== null,
+  () => analysisTask.value
+    ? analysisTask.value.status === 'SUCCESS'
+    : summary.value !== null,
 )
 
 function formatBytes(bytes: number) {
@@ -237,9 +239,11 @@ async function handleTerminalTask(task: AnalysisTask) {
   clearPollTimer()
   closeAnalysisEvents()
   analysisTransport.value = 'idle'
-  forgetTask()
   if (task.status === 'SUCCESS') {
+    forgetTask()
     await Promise.all([loadTranscript(), loadSummary()])
+  } else {
+    rememberTask(task.taskId)
   }
 }
 
@@ -291,11 +295,12 @@ async function handleStartAnalysis() {
   analysisError.value = ''
   try {
     const started = await startAnalysis(video.value.id)
+    const retryWaiting = started.status === 'RETRY_WAITING'
     analysisTask.value = {
       ...started,
-      stage: 'QUEUED',
+      stage: retryWaiting ? 'RETRY_WAITING' : 'QUEUED',
       progress: 0,
-      message: '任务已进入队列',
+      message: retryWaiting ? '分析暂时失败，正在重试' : '任务已进入队列',
       errorCode: null,
       errorMessage: null,
       createdAt: new Date().toISOString(),
@@ -401,7 +406,7 @@ onBeforeUnmount(() => {
             :loading="startingAnalysis"
             @click="handleStartAnalysis"
           >
-            {{ analysisActive ? '分析进行中' : analysisComplete ? '分析已完成' : '开始 AI 分析' }}
+            {{ analysisActive ? '分析进行中' : analysisComplete ? '分析已完成' : analysisTask?.status === 'FAILED' ? '重试分析' : '开始 AI 分析' }}
           </el-button>
         </div>
 

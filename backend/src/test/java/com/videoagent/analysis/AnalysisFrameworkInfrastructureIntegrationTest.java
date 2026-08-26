@@ -15,6 +15,9 @@ import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.asr.TranscriptionResult;
 import com.videoagent.media.AudioExtractResult;
 import com.videoagent.media.MediaProcessor;
+import com.videoagent.outbox.OutboxService;
+import com.videoagent.outbox.entity.AnalysisOutboxEventEntity;
+import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.testsupport.TestAuthClient;
@@ -35,6 +38,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.nio.file.Files;
@@ -78,6 +82,12 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
     @Autowired
     private AnalysisTaskRepository taskRepository;
+
+    @Autowired
+    private AnalysisOutboxEventRepository outboxEventRepository;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @Autowired
     private AnalysisTaskProcessor processor;
@@ -190,14 +200,16 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
         assertThat(pending.getStatus()).isIn("PENDING", "PROCESSING");
         assertThat(pending.getProgress()).isBetween(0, 90);
 
-        ResponseEntity<String> duplicateResponse = restTemplate.exchange(
+        ResponseEntity<StartAnalysisResponse> duplicateResponse = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/analysis"),
             HttpMethod.POST,
             new HttpEntity<>(authSession.headers()),
-            String.class
+            StartAnalysisResponse.class
         );
-        assertThat(duplicateResponse.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
-        assertThat(duplicateResponse.getBody()).contains("ANALYSIS_ALREADY_RUNNING");
+        assertThat(duplicateResponse.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(duplicateResponse.getBody()).isNotNull();
+        assertThat(duplicateResponse.getBody().taskId()).isEqualTo(taskId);
+        assertThat(duplicateResponse.getBody().status()).isIn("PENDING", "PROCESSING", "RETRY_WAITING");
 
         Set<Integer> observedProgress = new HashSet<>();
         Set<String> observedRedisSnapshots = new HashSet<>();
@@ -277,6 +289,74 @@ class AnalysisFrameworkInfrastructureIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(response.getBody()).contains("VIDEO_NOT_FOUND");
+    }
+
+    @Test
+    void shouldRestartFailedTaskWithOneRetryEventAndAllowConsumerClaim() {
+        LocalDateTime now = LocalDateTime.now();
+        AnalysisTaskEntity failed = new AnalysisTaskEntity();
+        failed.setVideoId(videoId);
+        failed.setAnalysisType("FRAMEWORK");
+        failed.setModelVersion("m3-simulation-v1");
+        failed.setStatus("FAILED");
+        failed.setStage("FAILED");
+        failed.setProgress(75);
+        failed.setRetryCount(3);
+        failed.setProcessingGeneration(4);
+        failed.setErrorCode("SUMMARY_FAILED");
+        failed.setErrorMessage("provider unavailable");
+        failed.setLastErrorCode("SUMMARY_FAILED");
+        failed.setLastErrorMessage("provider unavailable");
+        failed.setLastFailureStage("SUMMARIZING");
+        failed.setStartedAt(now.minusMinutes(2));
+        failed.setFinishedAt(now.minusMinutes(1));
+        failed.setCreatedAt(now.minusMinutes(3));
+        failed.setUpdatedAt(now.minusMinutes(1));
+        assertThat(taskRepository.insert(failed)).isEqualTo(1);
+        taskId = failed.getId();
+
+        ResponseEntity<StartAnalysisResponse> first = restTemplate.exchange(
+            baseUrl("/api/videos/" + videoId + "/analysis"),
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
+            StartAnalysisResponse.class
+        );
+        ResponseEntity<StartAnalysisResponse> second = restTemplate.exchange(
+            baseUrl("/api/videos/" + videoId + "/analysis"),
+            HttpMethod.POST,
+            new HttpEntity<>(authSession.headers()),
+            StartAnalysisResponse.class
+        );
+
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(first.getBody()).isEqualTo(new StartAnalysisResponse(taskId, videoId, "RETRY_WAITING"));
+        assertThat(second.getBody()).isEqualTo(first.getBody());
+
+        AnalysisTaskEntity restarted = taskRepository.selectById(taskId);
+        assertThat(restarted.getStatus()).isEqualTo("RETRY_WAITING");
+        assertThat(restarted.getProcessingGeneration()).isEqualTo(5);
+        assertThat(restarted.getRetryCount()).isZero();
+        assertThat(restarted.getErrorCode()).isNull();
+        assertThat(restarted.getLastErrorCode()).isEqualTo("SUMMARY_FAILED");
+        assertThat(restarted.getLastFailureStage()).isEqualTo("SUMMARIZING");
+
+        AnalysisOutboxEventEntity retryEvent = outboxEventRepository.findByEventKey(
+            OutboxService.retryKey(taskId, 5)
+        );
+        assertThat(retryEvent).isNotNull();
+        assertThat(retryEvent.getEventType()).isEqualTo("ANALYSIS_RETRY");
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM analysis_outbox_event WHERE task_id = ? AND event_type = 'ANALYSIS_RETRY'",
+            Long.class,
+            taskId
+        )).isOne();
+
+        assertThat(taskRepository.claimPending(taskId, "PREPARING", 10, LocalDateTime.now()))
+            .isEqualTo(1);
+        AnalysisTaskEntity processing = taskRepository.selectById(taskId);
+        assertThat(processing.getStatus()).isEqualTo("PROCESSING");
+        assertThat(processing.getProcessingGeneration()).isEqualTo(6);
+        assertThat(processing.getStartedAt()).isNotNull();
     }
 
     private String baseUrl(String path) {

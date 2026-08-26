@@ -85,6 +85,26 @@ class AnalysisQueryServiceTest {
     }
 
     @Test
+    void shouldIgnoreFailedRedisSnapshotAfterMysqlTaskIsRestarted() {
+        AnalysisTaskEntity task = successfulTask();
+        task.setStatus("RETRY_WAITING");
+        task.setStage("RETRY_WAITING");
+        task.setProgress(0);
+        task.setFinishedAt(null);
+        when(repository.selectById(101L)).thenReturn(task);
+        when(progressStore.find(101L)).thenReturn(Optional.of(
+            new AnalysisProgressSnapshot("FAILED", "FAILED", 80, "old terminal failure")
+        ));
+
+        AnalysisTaskResponse response = service.getTask(101L, 5L);
+
+        assertThat(response.status()).isEqualTo("RETRY_WAITING");
+        assertThat(response.stage()).isEqualTo("RETRY_WAITING");
+        assertThat(response.progress()).isZero();
+        assertThat(response.message()).isEqualTo("分析暂时失败，正在重试");
+    }
+
+    @Test
     void shouldHideAnotherUsersTask() {
         when(repository.selectById(101L)).thenReturn(successfulTask());
         when(ownershipService.isOwned(7L, 6L)).thenReturn(false);
