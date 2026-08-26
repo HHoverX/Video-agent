@@ -9,6 +9,10 @@ defineProps<{
   loading: boolean
   error: string
 }>()
+
+const emit = defineEmits<{
+  seek: [milliseconds: number]
+}>()
 </script>
 
 <template>
@@ -34,9 +38,14 @@ defineProps<{
         </div>
         <ol class="chapter-list">
           <li v-for="chapter in chapters" :key="chapter.chapterIndex">
-            <span class="summary-timestamp">
+            <button
+              class="summary-timestamp timestamp-seek"
+              type="button"
+              :aria-label="`跳转到章节 ${formatTimestamp(chapter.startMs)}`"
+              @click="emit('seek', chapter.startMs)"
+            >
               {{ formatTimestamp(chapter.startMs) }} – {{ formatTimestamp(chapter.endMs) }}
-            </span>
+            </button>
             <div>
               <h4>{{ chapter.title }}</h4>
               <p>{{ chapter.summary }}</p>
@@ -52,9 +61,14 @@ defineProps<{
         </div>
         <ul class="key-point-list">
           <li v-for="point in keyPoints" :key="point.pointIndex">
-            <span class="summary-timestamp">
+            <button
+              class="summary-timestamp timestamp-seek"
+              type="button"
+              :aria-label="`跳转到关键内容 ${formatTimestamp(point.startMs)}`"
+              @click="emit('seek', point.startMs)"
+            >
               {{ formatTimestamp(point.startMs) }} – {{ formatTimestamp(point.endMs) }}
-            </span>
+            </button>
             <p>{{ point.content }}</p>
           </li>
         </ul>

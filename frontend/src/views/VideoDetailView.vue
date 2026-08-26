@@ -24,6 +24,7 @@ const POLL_INTERVAL_MILLIS = 1_000
 const MAX_FALLBACK_POLLS = 180
 
 const route = useRoute()
+const playerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const loading = ref(true)
 const video = ref<Video | null>(null)
 const errorMessage = ref('')
@@ -168,6 +169,10 @@ async function loadVideo() {
 
 function taskStorageKey(videoId = Number(route.params.id)) {
   return `videoagent:analysis-task:${videoId}`
+}
+
+function handleSeek(milliseconds: number): void {
+  playerRef.value?.seekTo(milliseconds)
 }
 
 function rememberTask(taskId: number, videoId = Number(route.params.id)) {
@@ -410,7 +415,11 @@ onBeforeUnmount(() => {
           @start="handleStartAnalysis"
           @retry="handleStartAnalysis"
         />
-        <VideoPlayer class="detail-visual video-workspace__player" :video-id="video.id" />
+        <VideoPlayer
+          ref="playerRef"
+          class="detail-visual video-workspace__player"
+          :video-id="video.id"
+        />
         <AiContentPanel
           class="video-workspace__content"
           :summary="summary"
@@ -418,6 +427,7 @@ onBeforeUnmount(() => {
           :key-points="keyPoints"
           :loading="summaryLoading"
           :error="summaryError"
+          @seek="handleSeek"
         />
         <VideoQaPanel
           :key="video.id"
@@ -429,12 +439,14 @@ onBeforeUnmount(() => {
           :result="qaResult"
           @ask="handleAsk"
           @prepare="handleBuildIndex"
+          @seek="handleSeek"
         />
         <TranscriptPanel
           class="video-workspace__transcript"
           :segments="transcript"
           :loading="transcriptLoading"
           :error="transcriptError"
+          @seek="handleSeek"
         />
       </div>
     </template>

@@ -7,6 +7,10 @@ defineProps<{
   loading: boolean
   error: string
 }>()
+
+const emit = defineEmits<{
+  seek: [milliseconds: number]
+}>()
 </script>
 
 <template>
@@ -25,7 +29,14 @@ defineProps<{
     <div v-else-if="segments.length" class="transcript-reading-area">
       <ol class="transcript-list">
         <li v-for="segment in segments" :key="`${segment.startMs}-${segment.endMs}`">
-          <span class="transcript-timestamp">{{ formatTimestamp(segment.startMs) }}</span>
+          <button
+            class="transcript-timestamp timestamp-seek"
+            type="button"
+            :aria-label="`跳转到转录 ${formatTimestamp(segment.startMs)}`"
+            @click="emit('seek', segment.startMs)"
+          >
+            {{ formatTimestamp(segment.startMs) }}
+          </button>
           <p>{{ segment.text }}</p>
         </li>
       </ol>

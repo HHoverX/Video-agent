@@ -15,6 +15,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   ask: [question: string]
   prepare: []
+  seek: [milliseconds: number]
 }>()
 
 const question = ref('')
@@ -71,9 +72,15 @@ function ask() {
         <p class="qa-citations-title">相关片段</p>
         <ul class="qa-citation-list">
           <li v-for="(citation, index) in result.citations" :key="index">
-            <span v-if="citation.startMs !== null && citation.endMs !== null" class="qa-citation-time">
+            <button
+              v-if="citation.startMs !== null && citation.endMs !== null"
+              class="qa-citation-time timestamp-seek"
+              type="button"
+              :aria-label="`跳转到相关片段 ${formatTimestamp(citation.startMs)}`"
+              @click="emit('seek', citation.startMs)"
+            >
               [{{ formatTimestamp(citation.startMs) }} – {{ formatTimestamp(citation.endMs) }}]
-            </span>
+            </button>
             <p>{{ citation.text }}</p>
           </li>
         </ul>

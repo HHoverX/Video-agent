@@ -624,6 +624,28 @@ p {
   color: #7e8699;
 }
 
+.timestamp-seek {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.timestamp-seek:hover {
+  color: #b3ffe9;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.timestamp-seek:focus-visible {
+  outline: 2px solid #8cf0d4;
+  outline-offset: 3px;
+}
+
 .video-workspace {
   margin-top: 26px;
   display: grid;
