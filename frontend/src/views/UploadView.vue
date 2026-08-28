@@ -154,7 +154,11 @@ async function submitUpload() {
     const completed = await completeUpload(session.value.uploadId)
     localStorage.removeItem(storageKey(file))
     progress.value = 100
-    ElMessage.success('视频上传完成，视频已就绪')
+    ElMessage.success(
+      completed.reusedExistingVideo
+        ? '已存在相同视频，已为你打开现有视频。'
+        : '视频上传完成，视频已就绪',
+    )
     await router.push(`/videos/${completed.videoId}`)
   } catch (error) {
     if (paused.value) {

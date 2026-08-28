@@ -35,4 +35,5 @@ export interface CompleteUploadResult {
   uploadId: string
   videoId: number
   status: string
+  reusedExistingVideo: boolean
 }

@@ -3,6 +3,8 @@ package com.videoagent.upload.service;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.upload.entity.VideoUploadSessionEntity;
 import com.videoagent.upload.repository.VideoUploadSessionRepository;
+import com.videoagent.video.entity.VideoEntity;
+import com.videoagent.video.repository.VideoRepository;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,13 +23,16 @@ public class UploadTemporaryObjectCleaner {
 
     private final VideoUploadSessionRepository sessionRepository;
     private final ObjectStorageService storageService;
+    private final VideoRepository videoRepository;
 
     public UploadTemporaryObjectCleaner(
         VideoUploadSessionRepository sessionRepository,
-        ObjectStorageService storageService
+        ObjectStorageService storageService,
+        VideoRepository videoRepository
     ) {
         this.sessionRepository = sessionRepository;
         this.storageService = storageService;
+        this.videoRepository = videoRepository;
     }
 
     @Scheduled(fixedDelayString = "${videoagent.upload.cleanup-interval-ms:300000}")
@@ -59,15 +64,20 @@ public class UploadTemporaryObjectCleaner {
             for (int partNumber = 1; partNumber <= session.getTotalParts(); partNumber++) {
                 storageService.removeObject(UploadKeyPolicy.partObjectKey(session.getTempPrefix(), partNumber));
             }
-            // A failed completion may have composed the destination before its
-            // database transaction rolled back. Only an uncommitted destination
-            // is removed; a completed video's formal object is never touched.
-            if (session.getVideoId() == null && !"COMPLETED".equals(session.getStatus())) {
+            if (shouldRemoveFinalObject(session)) {
                 storageService.removeObject(session.getObjectKey());
             }
             sessionRepository.markTemporaryObjectsCleaned(session.getId(), LocalDateTime.now());
         } catch (RuntimeException exception) {
             log.warn("[uploadId={}][stage=CLEANUP] temporary object cleanup will be retried", session.getId(), exception);
         }
+    }
+
+    private boolean shouldRemoveFinalObject(VideoUploadSessionEntity session) {
+        if (session.getVideoId() == null) {
+            return true;
+        }
+        VideoEntity canonicalVideo = videoRepository.selectById(session.getVideoId());
+        return canonicalVideo == null || !session.getObjectKey().equals(canonicalVideo.getObjectKey());
     }
 }

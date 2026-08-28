@@ -21,7 +21,7 @@ class UploadCompletionServiceTest {
     @Test
     void shouldRecordFailureAndAllowSafeRetry() {
         VideoAgentException storageFailure = new VideoAgentException(ErrorCode.STORAGE_ERROR, "compose unavailable");
-        CompleteUploadResponse completed = new CompleteUploadResponse("u1", 42L, "COMPLETED");
+        CompleteUploadResponse completed = new CompleteUploadResponse("u1", 42L, "COMPLETED", false);
         when(transaction.complete(7L, "u1")).thenThrow(storageFailure).thenReturn(completed);
 
         assertThatThrownBy(() -> service.complete(7L, "u1")).isSameAs(storageFailure);

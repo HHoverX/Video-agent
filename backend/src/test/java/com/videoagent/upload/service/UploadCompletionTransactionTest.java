@@ -53,16 +53,15 @@ class UploadCompletionTransactionTest {
         when(storage.statObject("videos/final.mp4"))
             .thenReturn(new StoredObject("videos/final.mp4", 24, "final", "video/mp4"));
         when(storage.readObjectRange("videos/final.mp4", 0, 12)).thenReturn(mp4Header());
-        when(videos.insert(any(VideoEntity.class))).thenAnswer(invocation -> {
-            VideoEntity video = invocation.getArgument(0);
-            video.setId(42L);
-            return 1;
-        });
+        when(storage.sha256Object("videos/final.mp4")).thenReturn(hash());
+        when(videos.findByUserIdAndFileHash(7L, hash())).thenReturn(video(42L, "videos/final.mp4"));
         CompleteUploadResponse response = transaction.complete(7L, "u1");
 
         assertThat(response.videoId()).isEqualTo(42L);
+        assertThat(response.reusedExistingVideo()).isFalse();
         verify(storage).composeObject(eq("videos/final.mp4"), any(), eq("video/mp4"));
-        verify(videos).insert(any(VideoEntity.class));
+        verify(storage).sha256Object("videos/final.mp4");
+        verify(videos).insertOrReuseByUserAndFileHash(any(VideoEntity.class));
         assertThat(session.getStatus()).isEqualTo("COMPLETED");
         assertThat(session.getVideoId()).isEqualTo(42L);
         assertThat(session.getAnalysisTaskId()).isNull();
@@ -74,13 +73,39 @@ class UploadCompletionTransactionTest {
         VideoUploadSessionEntity session = session("COMPLETED");
         session.setVideoId(42L);
         when(sessions.lockById("u1")).thenReturn(session);
+        when(videos.selectById(42L)).thenReturn(video(42L, "videos/final.mp4"));
 
         CompleteUploadResponse first = transaction.complete(7L, "u1");
         CompleteUploadResponse second = transaction.complete(7L, "u1");
 
         assertThat(first).isEqualTo(second);
         verify(storage, never()).composeObject(any(), any(), any());
-        verify(videos, never()).insert(any(VideoEntity.class));
+        verify(videos, never()).insertOrReuseByUserAndFileHash(any(VideoEntity.class));
+    }
+
+    @Test
+    void shouldReuseCanonicalVideoWhenSameUserAlreadyOwnsHash() {
+        VideoUploadSessionEntity session = session("UPLOADING");
+        when(sessions.lockById("u1")).thenReturn(session);
+        when(parts.findByUploadId("u1")).thenReturn(List.of(part(1, 16, "e1"), part(2, 8, "e2")));
+        when(storage.statObject("upload-parts/u1/part-00001"))
+            .thenReturn(new StoredObject("p1", 16, "e1", "application/octet-stream"));
+        when(storage.statObject("upload-parts/u1/part-00002"))
+            .thenReturn(new StoredObject("p2", 8, "e2", "application/octet-stream"));
+        when(storage.statObject("videos/final.mp4"))
+            .thenReturn(new StoredObject("videos/final.mp4", 24, "final", "video/mp4"));
+        when(storage.readObjectRange("videos/final.mp4", 0, 12)).thenReturn(mp4Header());
+        when(storage.sha256Object("videos/final.mp4")).thenReturn(hash());
+        when(videos.findByUserIdAndFileHash(7L, hash())).thenReturn(video(41L, "videos/canonical.mp4"));
+
+        CompleteUploadResponse response = transaction.complete(7L, "u1");
+
+        assertThat(response.videoId()).isEqualTo(41L);
+        assertThat(response.reusedExistingVideo()).isTrue();
+        assertThat(session.getStatus()).isEqualTo("COMPLETED");
+        assertThat(session.getVideoId()).isEqualTo(41L);
+        verify(videos).insertOrReuseByUserAndFileHash(any(VideoEntity.class));
+        verify(cleaner).cleanupAfterCommit(session);
     }
 
     @Test
@@ -137,5 +162,16 @@ class UploadCompletionTransactionTest {
 
     private byte[] mp4Header() {
         return new byte[] {0, 0, 0, 0, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'};
+    }
+
+    private String hash() {
+        return "a".repeat(64);
+    }
+
+    private VideoEntity video(long id, String objectKey) {
+        VideoEntity video = new VideoEntity();
+        video.setId(id);
+        video.setObjectKey(objectKey);
+        return video;
     }
 }

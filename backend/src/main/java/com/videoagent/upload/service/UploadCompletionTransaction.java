@@ -80,9 +80,8 @@ public class UploadCompletionTransaction {
             );
         }
         validateMp4Signature(session.getObjectKey());
-        String fileHash = null;
+        String fileHash = storageService.sha256Object(session.getObjectKey());
         if (session.getExpectedSha256() != null) {
-            fileHash = storageService.sha256Object(session.getObjectKey());
             if (!session.getExpectedSha256().equalsIgnoreCase(fileHash)) {
                 throw new VideoAgentException(ErrorCode.UPLOAD_PART_INVALID, "合并后文件 SHA-256 校验失败");
             }
@@ -99,17 +98,19 @@ public class UploadCompletionTransaction {
         video.setStatus(UPLOADED_STATUS);
         video.setCreatedAt(now);
         video.setUpdatedAt(now);
-        if (videoRepository.insert(video) != 1 || video.getId() == null) {
-            throw new VideoAgentException(ErrorCode.VIDEO_UPLOAD_FAILED, "视频记录创建失败");
+        videoRepository.insertOrReuseByUserAndFileHash(video);
+        VideoEntity canonicalVideo = videoRepository.findByUserIdAndFileHash(userId, fileHash);
+        if (canonicalVideo == null || canonicalVideo.getId() == null) {
+            throw new VideoAgentException(ErrorCode.VIDEO_UPLOAD_FAILED, "视频记录创建或复用失败");
         }
 
-        session.setVideoId(video.getId());
+        session.setVideoId(canonicalVideo.getId());
         session.setStatus(UploadSessionStatus.COMPLETED.name());
         session.setCompletedAt(now);
         session.setUpdatedAt(now);
         sessionRepository.updateById(session);
         temporaryObjectCleaner.cleanupAfterCommit(session);
-        return completedResponse(session);
+        return completedResponse(session, canonicalVideo);
     }
 
     private List<ComposeObjectSource> validateParts(VideoUploadSessionEntity session) {
@@ -153,8 +154,20 @@ public class UploadCompletionTransaction {
         if (session.getVideoId() == null) {
             throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "已完成上传缺少视频标识");
         }
+        VideoEntity canonicalVideo = videoRepository.selectById(session.getVideoId());
+        if (canonicalVideo == null) {
+            throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "已完成上传缺少正式视频记录");
+        }
+        return completedResponse(session, canonicalVideo);
+    }
+
+    private CompleteUploadResponse completedResponse(
+        VideoUploadSessionEntity session,
+        VideoEntity canonicalVideo
+    ) {
         return new CompleteUploadResponse(
-            session.getId(), session.getVideoId(), session.getStatus()
+            session.getId(), session.getVideoId(), session.getStatus(),
+            !session.getObjectKey().equals(canonicalVideo.getObjectKey())
         );
     }
 }

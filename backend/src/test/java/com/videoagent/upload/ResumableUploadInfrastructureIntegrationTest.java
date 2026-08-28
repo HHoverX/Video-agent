@@ -1,6 +1,7 @@
 package com.videoagent.upload;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.auth.repository.AppUserRepository;
@@ -101,7 +102,9 @@ class ResumableUploadInfrastructureIntegrationTest {
     private String uploadId;
     private String secondaryUploadId;
     private String objectKey;
+    private String secondaryObjectKey;
     private Long videoId;
+    private Long secondaryVideoId;
 
     @AfterEach
     void cleanUp() throws Exception {
@@ -109,6 +112,12 @@ class ResumableUploadInfrastructureIntegrationTest {
             minioClient.removeObject(RemoveObjectArgs.builder()
                 .bucket(storageProperties.bucket())
                 .object(objectKey)
+                .build());
+        }
+        if (secondaryObjectKey != null) {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                .bucket(storageProperties.bucket())
+                .object(secondaryObjectKey)
                 .build());
         }
         if (uploadId != null) {
@@ -119,6 +128,9 @@ class ResumableUploadInfrastructureIntegrationTest {
         }
         if (videoId != null) {
             videoRepository.deleteById(videoId);
+        }
+        if (secondaryVideoId != null) {
+            videoRepository.deleteById(secondaryVideoId);
         }
         if (stranger != null) {
             userRepository.deleteById(stranger.userId());
@@ -291,6 +303,141 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(sessionRepository.selectById(secondaryUploadId).getStatus()).isEqualTo("UPLOADING");
     }
 
+    @Test
+    void shouldReuseOneCanonicalVideoForConcurrentSameUserCompletionsWithoutClientHash() throws Exception {
+        owner = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-dedup-owner-" + System.nanoTime()
+        );
+        byte[] content = mp4Part();
+        String sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        uploadId = createSession(owner, "same-content-a.mp4", content.length);
+        secondaryUploadId = createSession(owner, "same-content-b.mp4", content.length);
+        objectKey = sessionRepository.selectById(uploadId).getObjectKey();
+        secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
+        uploadAndConfirm(owner, uploadId, 1, content);
+        uploadAndConfirm(owner, secondaryUploadId, 1, content);
+
+        List<CompleteUploadResponse> responses = completeSessionsConcurrently(owner, uploadId, secondaryUploadId);
+
+        assertThat(responses).extracting(CompleteUploadResponse::videoId).containsOnly(responses.getFirst().videoId());
+        assertThat(responses).extracting(CompleteUploadResponse::reusedExistingVideo)
+            .containsExactlyInAnyOrder(false, true);
+        videoId = responses.getFirst().videoId();
+        List<VideoEntity> canonicalVideos = videoRepository.selectList(null).stream()
+            .filter(video -> Long.valueOf(owner.userId()).equals(video.getUserId()))
+            .filter(video -> sha256.equals(video.getFileHash()))
+            .toList();
+        assertThat(canonicalVideos).hasSize(1);
+        assertThat(canonicalVideos.getFirst().getId()).isEqualTo(videoId);
+        assertThat(canonicalVideos.getFirst().getFileHash()).hasSize(64).isEqualTo(sha256);
+        assertThat(sessionRepository.selectById(uploadId).getVideoId()).isEqualTo(videoId);
+        assertThat(sessionRepository.selectById(secondaryUploadId).getVideoId()).isEqualTo(videoId);
+        assertThat(taskRepository.selectList(null)).noneMatch(task -> task.getVideoId().equals(videoId));
+        assertThat(minioClient.statObject(StatObjectArgs.builder()
+            .bucket(storageProperties.bucket())
+            .object(canonicalVideos.getFirst().getObjectKey())
+            .build()).size()).isEqualTo(content.length);
+        String loserObjectKey = canonicalVideos.getFirst().getObjectKey().equals(objectKey)
+            ? secondaryObjectKey
+            : objectKey;
+        String loserUploadId = canonicalVideos.getFirst().getObjectKey().equals(objectKey)
+            ? secondaryUploadId
+            : uploadId;
+        assertThatThrownBy(() -> minioClient.statObject(StatObjectArgs.builder()
+            .bucket(storageProperties.bucket())
+            .object(loserObjectKey)
+            .build())).isInstanceOf(Exception.class);
+
+        ResponseEntity<CompleteUploadResponse> repeated = restTemplate.exchange(
+            baseUrl("/api/uploads/" + loserUploadId + "/complete"),
+            HttpMethod.POST,
+            new HttpEntity<>(owner.headers()),
+            CompleteUploadResponse.class
+        );
+        assertThat(repeated.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(repeated.getBody()).isNotNull();
+        assertThat(repeated.getBody().videoId()).isEqualTo(videoId);
+        assertThat(repeated.getBody().reusedExistingVideo()).isTrue();
+    }
+
+    @Test
+    void shouldReuseCanonicalVideoForSequentialSameUserCompletions() throws Exception {
+        owner = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-dedup-sequential-" + System.nanoTime()
+        );
+        byte[] content = mp4Part();
+        uploadId = createSession(owner, "same-content-first.mp4", content.length);
+        secondaryUploadId = createSession(owner, "same-content-second.mp4", content.length);
+        uploadAndConfirm(owner, uploadId, 1, content);
+        uploadAndConfirm(owner, secondaryUploadId, 1, content);
+
+        CompleteUploadResponse first = complete(owner, uploadId);
+        CompleteUploadResponse second = complete(owner, secondaryUploadId);
+
+        assertThat(first.reusedExistingVideo()).isFalse();
+        assertThat(second.reusedExistingVideo()).isTrue();
+        assertThat(second.videoId()).isEqualTo(first.videoId());
+        assertThat(videoRepository.selectList(null))
+            .filteredOn(video -> Long.valueOf(owner.userId()).equals(video.getUserId()))
+            .hasSize(1);
+    }
+
+    @Test
+    void shouldKeepSameContentIndependentForDifferentUsers() throws Exception {
+        owner = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-dedup-first-" + System.nanoTime()
+        );
+        stranger = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-dedup-second-" + System.nanoTime()
+        );
+        byte[] content = mp4Part();
+        uploadId = createSession(owner, "same-content-owner.mp4", content.length);
+        secondaryUploadId = createSession(stranger, "same-content-stranger.mp4", content.length);
+        objectKey = sessionRepository.selectById(uploadId).getObjectKey();
+        secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
+        uploadAndConfirm(owner, uploadId, 1, content);
+        uploadAndConfirm(stranger, secondaryUploadId, 1, content);
+
+        CompleteUploadResponse first = complete(owner, uploadId);
+        CompleteUploadResponse second = complete(stranger, secondaryUploadId);
+
+        assertThat(first.reusedExistingVideo()).isFalse();
+        assertThat(second.reusedExistingVideo()).isFalse();
+        assertThat(first.videoId()).isNotEqualTo(second.videoId());
+        videoId = first.videoId();
+        secondaryVideoId = second.videoId();
+    }
+
+    @Test
+    void shouldCreateNewCanonicalVideoAfterOriginalIsDeleted() throws Exception {
+        owner = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-dedup-delete-" + System.nanoTime()
+        );
+        byte[] content = mp4Part();
+        uploadId = createSession(owner, "deleted-source.mp4", content.length);
+        objectKey = sessionRepository.selectById(uploadId).getObjectKey();
+        uploadAndConfirm(owner, uploadId, 1, content);
+        CompleteUploadResponse first = complete(owner, uploadId);
+        videoId = first.videoId();
+
+        ResponseEntity<Void> deleted = restTemplate.exchange(
+            baseUrl("/api/videos/" + videoId),
+            HttpMethod.DELETE,
+            new HttpEntity<>(owner.headers()),
+            Void.class
+        );
+        assertThat(deleted.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+
+        secondaryUploadId = createSession(owner, "reuploaded-source.mp4", content.length);
+        secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
+        uploadAndConfirm(owner, secondaryUploadId, 1, content);
+        CompleteUploadResponse reuploaded = complete(owner, secondaryUploadId);
+
+        assertThat(reuploaded.reusedExistingVideo()).isFalse();
+        assertThat(reuploaded.videoId()).isNotEqualTo(videoId);
+        secondaryVideoId = reuploaded.videoId();
+    }
+
     private UploadPartResponse uploadAndConfirm(Session session, String id, int partNumber, byte[] bytes) {
         uploadPartWithoutConfirmation(session, id, partNumber, bytes);
 
@@ -395,6 +542,41 @@ class ResumableUploadInfrastructureIntegrationTest {
         }
     }
 
+    private List<CompleteUploadResponse> completeSessionsConcurrently(
+        Session session,
+        String firstUploadId,
+        String secondUploadId
+    ) throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<CompleteUploadResponse> first = executor.submit(
+                () -> completeAfterBarrier(session, firstUploadId, ready, start)
+            );
+            Future<CompleteUploadResponse> second = executor.submit(
+                () -> completeAfterBarrier(session, secondUploadId, ready, start)
+            );
+            ready.await();
+            start.countDown();
+            return Arrays.asList(first.get(), second.get());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private CompleteUploadResponse complete(Session session, String id) {
+        ResponseEntity<CompleteUploadResponse> response = restTemplate.exchange(
+            baseUrl("/api/uploads/" + id + "/complete"),
+            HttpMethod.POST,
+            new HttpEntity<>(session.headers()),
+            CompleteUploadResponse.class
+        );
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        return response.getBody();
+    }
+
     private CompleteUploadResponse completeAfterBarrier(
         Session session,
         String id,
@@ -422,5 +604,25 @@ class ResumableUploadInfrastructureIntegrationTest {
 
     private String baseUrl(String path) {
         return "http://127.0.0.1:" + port + path;
+    }
+
+    private String createSession(Session session, String fileName, int fileSize) {
+        ResponseEntity<UploadSessionResponse> created = restTemplate.exchange(
+            baseUrl("/api/uploads"),
+            HttpMethod.POST,
+            jsonEntity(session, new CreateUploadSessionRequest(
+                fileName, fileName, (long) fileSize, "video/mp4", (long) CHUNK_SIZE, null
+            )),
+            UploadSessionResponse.class
+        );
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(created.getBody()).isNotNull();
+        return created.getBody().uploadId();
+    }
+
+    private byte[] mp4Part() {
+        byte[] content = new byte[CHUNK_SIZE];
+        System.arraycopy(MP4_HEADER, 0, content, 0, MP4_HEADER.length);
+        return content;
     }
 }
