@@ -13,8 +13,10 @@ public interface LangChain4jSummaryAiService {
         Write all user-facing summary content in Simplified Chinese: overview, every chapter title,
         every chapter summary, and every key point content. Proper nouns, technical terms, product names,
         and code identifiers may remain in their original language. Keep the JSON field names unchanged.
-        Every startMs and endMs must stay within the transcript range supplied by the user.
+        Reference only the supplied evidence IDs. Never invent an evidence ID.
+        Do not output startMs or endMs. Chapters and key points must each use a contiguous
+        evidence range with startEvidenceId and endEvidenceId.
         Return valid JSON matching the requested result structure, without markdown fences.
         """)
-    VideoSummaryResult summarize(@UserMessage String request);
+    VideoSummaryDraft summarize(@UserMessage String request);
 }

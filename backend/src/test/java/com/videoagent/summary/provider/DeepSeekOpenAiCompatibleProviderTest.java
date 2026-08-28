@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.videoagent.asr.TranscriptSegment;
-import com.videoagent.summary.service.SummaryResultValidator;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -36,7 +35,7 @@ class DeepSeekOpenAiCompatibleProviderTest {
         AtomicReference<String> requestBody = new AtomicReference<>();
         AtomicReference<String> authorization = new AtomicReference<>();
         String structuredResult = """
-            {"overview":"真实字幕摘要","chapters":[{"title":"开场","summary":"内容","startMs":0,"endMs":2000}],"keyPoints":[{"content":"重点","startMs":0,"endMs":2000}]}
+            {"overview":"真实字幕摘要","chapters":[{"title":"开场","summary":"内容","startEvidenceId":"E0","endEvidenceId":"E0"}],"keyPoints":[{"content":"重点","startEvidenceId":"E0","endEvidenceId":"E0"}]}
             """.strip();
         String encodedStructuredResult = objectMapper.writeValueAsString(structuredResult);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -72,11 +71,10 @@ class DeepSeekOpenAiCompatibleProviderTest {
                 Duration.ofSeconds(3),
                 0,
                 "json_object"
-            ),
-            new SummaryResultValidator()
+            )
         );
 
-        VideoSummaryResult result = provider.summarize(new VideoSummaryRequest(
+        VideoSummaryDraft result = provider.summarize(new VideoSummaryRequest(
             7L,
             11L,
             List.of(new TranscriptSegment(0, 2_000, "真实语音字幕"))
@@ -93,6 +91,8 @@ class DeepSeekOpenAiCompatibleProviderTest {
                 "chapter title",
                 "chapter summary",
                 "key point content",
+                "startEvidenceId",
+                "endEvidenceId",
                 "Keep the JSON field names unchanged"
             );
         assertThat(request.path("messages").toString()).contains("JSON", "真实语音字幕");

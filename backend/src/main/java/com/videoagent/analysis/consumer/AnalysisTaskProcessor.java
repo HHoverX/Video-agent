@@ -24,7 +24,7 @@ import com.videoagent.media.TemporaryMediaWorkspace;
 import com.videoagent.storage.ObjectStorageService;
 import com.videoagent.summary.provider.VideoSummaryProvider;
 import com.videoagent.summary.provider.VideoSummaryRequest;
-import com.videoagent.summary.provider.VideoSummaryResult;
+import com.videoagent.summary.provider.VideoSummaryDraft;
 import com.videoagent.summary.service.VideoSummaryService;
 import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
@@ -214,7 +214,7 @@ public class AnalysisTaskProcessor {
                     task.getId(),
                     transcription.segments()
                 );
-                VideoSummaryResult summary = summaryProvider.summarize(summaryRequest);
+                VideoSummaryDraft summary = summaryProvider.summarize(summaryRequest);
                 lastProgress = advance(task, generation, AnalysisStage.SAVING, 95);
                 summaryService.replaceTaskResult(task, summaryRequest, summary);
             }

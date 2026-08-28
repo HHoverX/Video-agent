@@ -11,6 +11,7 @@ import com.videoagent.summary.entity.VideoKeyPointEntity;
 import com.videoagent.summary.entity.VideoSummaryEntity;
 import com.videoagent.summary.provider.SummaryChapter;
 import com.videoagent.summary.provider.SummaryKeyPoint;
+import com.videoagent.summary.provider.VideoSummaryDraft;
 import com.videoagent.summary.provider.VideoSummaryRequest;
 import com.videoagent.summary.provider.VideoSummaryResult;
 import com.videoagent.summary.repository.VideoChapterRepository;
@@ -33,28 +34,31 @@ public class VideoSummaryService {
     private final VideoKeyPointRepository keyPointRepository;
     private final VideoOwnershipService ownershipService;
     private final SummaryResultValidator validator;
+    private final SummaryEvidenceResolver evidenceResolver;
 
     public VideoSummaryService(
         VideoSummaryRepository summaryRepository,
         VideoChapterRepository chapterRepository,
         VideoKeyPointRepository keyPointRepository,
         VideoOwnershipService ownershipService,
-        SummaryResultValidator validator
+        SummaryResultValidator validator,
+        SummaryEvidenceResolver evidenceResolver
     ) {
         this.summaryRepository = summaryRepository;
         this.chapterRepository = chapterRepository;
         this.keyPointRepository = keyPointRepository;
         this.ownershipService = ownershipService;
         this.validator = validator;
+        this.evidenceResolver = evidenceResolver;
     }
 
     @Transactional
     public void replaceTaskResult(
         AnalysisTaskEntity task,
         VideoSummaryRequest request,
-        VideoSummaryResult rawResult
+        VideoSummaryDraft draft
     ) {
-        VideoSummaryResult result = validator.validate(request, rawResult);
+        VideoSummaryResult result = validator.validate(request, evidenceResolver.resolve(request, draft));
         keyPointRepository.deleteByTaskId(task.getId());
         chapterRepository.deleteByTaskId(task.getId());
         summaryRepository.deleteByTaskId(task.getId());

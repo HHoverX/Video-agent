@@ -9,7 +9,6 @@ import static org.mockito.Mockito.when;
 import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.summary.service.SummaryResultValidator;
 
 import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.exception.InvalidRequestException;
@@ -21,24 +20,22 @@ import java.util.List;
 class LangChain4jVideoSummaryProviderTest {
 
     private final LangChain4jSummaryAiService aiService = mock(LangChain4jSummaryAiService.class);
-    private final LangChain4jVideoSummaryProvider provider = new LangChain4jVideoSummaryProvider(
-        aiService,
-        new SummaryResultValidator()
-    );
+    private final LangChain4jVideoSummaryProvider provider = new LangChain4jVideoSummaryProvider(aiService);
 
     @Test
-    void shouldValidateStructuredAiServiceResult() {
-        when(aiService.summarize(contains("[0-2000] transcript"))).thenReturn(
-            new VideoSummaryResult(
+    void shouldReturnEvidenceIdDraftAndIncludeAuthoritativeTimesInPrompt() {
+        when(aiService.summarize(contains("[E0] [0-2000ms] transcript"))).thenReturn(
+            new VideoSummaryDraft(
                 "overview",
-                List.of(new SummaryChapter("chapter", "summary", 0, 2_000)),
-                List.of(new SummaryKeyPoint("point", 0, 2_000))
+                List.of(new VideoSummaryDraft.Chapter("chapter", "summary", "E0", "E0")),
+                List.of(new VideoSummaryDraft.KeyPoint("point", "E0", "E0"))
             )
         );
 
-        VideoSummaryResult result = provider.summarize(request());
+        VideoSummaryDraft result = provider.summarize(request());
 
         assertThat(result.overview()).isEqualTo("overview");
+        assertThat(result.chapters().getFirst().startEvidenceId()).isEqualTo("E0");
     }
 
     @Test

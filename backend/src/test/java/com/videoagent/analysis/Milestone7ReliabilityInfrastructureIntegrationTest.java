@@ -22,10 +22,8 @@ import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.media.AudioExtractResult;
 import com.videoagent.media.MediaProcessor;
 import com.videoagent.storage.ObjectStorageService;
-import com.videoagent.summary.provider.SummaryChapter;
-import com.videoagent.summary.provider.SummaryKeyPoint;
+import com.videoagent.summary.provider.VideoSummaryDraft;
 import com.videoagent.summary.provider.VideoSummaryProvider;
-import com.videoagent.summary.provider.VideoSummaryResult;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
@@ -415,11 +413,11 @@ class Milestone7ReliabilityInfrastructureIntegrationTest {
         });
     }
 
-    private VideoSummaryResult summaryResult() {
-        return new VideoSummaryResult(
+    private VideoSummaryDraft summaryResult() {
+        return new VideoSummaryDraft(
             "overview",
-            List.of(new SummaryChapter("chapter", "chapter summary", 0, 4_000)),
-            List.of(new SummaryKeyPoint("point", 0, 2_000))
+            List.of(new VideoSummaryDraft.Chapter("chapter", "chapter summary", "E0", "E1")),
+            List.of(new VideoSummaryDraft.KeyPoint("point", "E0", "E0"))
         );
     }
 

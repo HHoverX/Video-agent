@@ -34,11 +34,9 @@ import com.videoagent.media.MediaProcessor;
 import com.videoagent.media.MediaWorkspace;
 import com.videoagent.media.TemporaryMediaWorkspace;
 import com.videoagent.storage.ObjectStorageService;
-import com.videoagent.summary.provider.SummaryChapter;
-import com.videoagent.summary.provider.SummaryKeyPoint;
 import com.videoagent.summary.provider.VideoSummaryProvider;
 import com.videoagent.summary.provider.VideoSummaryRequest;
-import com.videoagent.summary.provider.VideoSummaryResult;
+import com.videoagent.summary.provider.VideoSummaryDraft;
 import com.videoagent.summary.service.VideoSummaryService;
 import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
@@ -550,11 +548,11 @@ class AnalysisTaskProcessorTest {
         ));
     }
 
-    private VideoSummaryResult summaryResult() {
-        return new VideoSummaryResult(
+    private VideoSummaryDraft summaryResult() {
+        return new VideoSummaryDraft(
             "overview",
-            List.of(new SummaryChapter("chapter", "chapter summary", 0, 4_000)),
-            List.of(new SummaryKeyPoint("key point", 0, 2_000))
+            List.of(new VideoSummaryDraft.Chapter("chapter", "chapter summary", "E0", "E1")),
+            List.of(new VideoSummaryDraft.KeyPoint("key point", "E0", "E0"))
         );
     }
 }

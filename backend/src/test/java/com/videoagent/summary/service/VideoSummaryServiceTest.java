@@ -16,10 +16,8 @@ import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.entity.VideoChapterEntity;
 import com.videoagent.summary.entity.VideoKeyPointEntity;
 import com.videoagent.summary.entity.VideoSummaryEntity;
-import com.videoagent.summary.provider.SummaryChapter;
-import com.videoagent.summary.provider.SummaryKeyPoint;
+import com.videoagent.summary.provider.VideoSummaryDraft;
 import com.videoagent.summary.provider.VideoSummaryRequest;
-import com.videoagent.summary.provider.VideoSummaryResult;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
@@ -43,7 +41,8 @@ class VideoSummaryServiceTest {
         chapterRepository,
         keyPointRepository,
         ownershipService,
-        new SummaryResultValidator()
+        new SummaryResultValidator(),
+        new SummaryEvidenceResolver()
     );
 
     @BeforeEach
@@ -58,15 +57,15 @@ class VideoSummaryServiceTest {
     void shouldPersistNormalizedSummaryChaptersAndKeyPointsInTimestampOrder() {
         AnalysisTaskEntity task = task();
         VideoSummaryRequest request = request();
-        VideoSummaryResult result = new VideoSummaryResult(
+        VideoSummaryDraft result = new VideoSummaryDraft(
             " overview ",
             List.of(
-                new SummaryChapter("later", "later summary", 2_000, 4_000),
-                new SummaryChapter("first", "first summary", 0, 2_000)
+                new VideoSummaryDraft.Chapter("later", "later summary", "E1", "E1"),
+                new VideoSummaryDraft.Chapter("first", "first summary", "E0", "E0")
             ),
             List.of(
-                new SummaryKeyPoint("later point", 2_000, 4_000),
-                new SummaryKeyPoint("first point", 0, 2_000)
+                new VideoSummaryDraft.KeyPoint("later point", "E1", "E1"),
+                new VideoSummaryDraft.KeyPoint("first point", "E0", "E0")
             )
         );
 

@@ -2,8 +2,6 @@ package com.videoagent.summary.provider;
 
 import static dev.langchain4j.model.chat.Capability.RESPONSE_FORMAT_JSON_SCHEMA;
 
-import com.videoagent.summary.service.SummaryResultValidator;
-
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.service.AiServices;
@@ -19,26 +17,20 @@ public class SummaryProviderConfiguration {
     private static final Logger log = LoggerFactory.getLogger(SummaryProviderConfiguration.class);
 
     @Bean
-    public VideoSummaryProvider videoSummaryProvider(
-        SummaryProviderProperties properties,
-        SummaryResultValidator validator
-    ) {
+    public VideoSummaryProvider videoSummaryProvider(SummaryProviderProperties properties) {
         return switch (properties.provider()) {
-            case "mock" -> new MockVideoSummaryProvider(validator);
-            case "openai" -> openAiOrMock(properties, validator);
+            case "mock" -> new MockVideoSummaryProvider();
+            case "openai" -> openAiOrMock(properties);
             default -> throw new IllegalArgumentException(
                 "Unsupported LLM_PROVIDER: " + properties.provider()
             );
         };
     }
 
-    private VideoSummaryProvider openAiOrMock(
-        SummaryProviderProperties properties,
-        SummaryResultValidator validator
-    ) {
+    private VideoSummaryProvider openAiOrMock(SummaryProviderProperties properties) {
         if (!properties.hasRealProviderConfiguration()) {
             log.warn("LLM provider=openai is missing API key or model; using MockVideoSummaryProvider");
-            return new MockVideoSummaryProvider(validator);
+            return new MockVideoSummaryProvider();
         }
 
         var builder = OpenAiChatModel.builder()
@@ -64,6 +56,6 @@ public class SummaryProviderConfiguration {
             LangChain4jSummaryAiService.class,
             chatModel
         );
-        return new LangChain4jVideoSummaryProvider(aiService, validator);
+        return new LangChain4jVideoSummaryProvider(aiService);
     }
 }
