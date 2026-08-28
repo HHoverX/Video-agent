@@ -176,6 +176,7 @@ public class DashScopeAsrProvider implements AsrProvider {
         Integer videoDurationSeconds
     ) throws IOException {
         List<TranscriptSegment> segments = new ArrayList<>();
+        List<FinalSentenceCandidate> candidates = new ArrayList<>();
         SseDiagnostics diagnostics = new SseDiagnostics();
         try {
             try (BufferedReader reader = new BufferedReader(
@@ -186,7 +187,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.isEmpty()) {
-                        acceptEvent(eventName, data, segments, diagnostics, videoDurationSeconds);
+                        acceptEvent(eventName, data, candidates, diagnostics);
                         eventName = null;
                         data.setLength(0);
                     } else if (line.startsWith("event:")) {
@@ -198,13 +199,19 @@ public class DashScopeAsrProvider implements AsrProvider {
                         data.append(line.substring("data:".length()).stripLeading());
                     }
                 }
-                acceptEvent(eventName, data, segments, diagnostics, videoDurationSeconds);
+                acceptEvent(eventName, data, candidates, diagnostics);
             }
-            if (segments.isEmpty()) {
+            if (candidates.isEmpty()) {
                 throw new VideoAgentException(
                     ErrorCode.ASR_RESPONSE_INVALID,
                     "DashScope ASR 未返回最终句子"
                 );
+            }
+            NormalizationResult normalized = normalizeCandidates(candidates);
+            log.debug("DashScope ASR final candidate normalization candidates={} canonical={} duplicates={} superseded={}",
+                candidates.size(), normalized.candidates().size(), normalized.duplicates(), normalized.superseded());
+            for (FinalSentenceCandidate candidate : normalized.candidates()) {
+                refineCandidate(candidate, segments, videoDurationSeconds);
             }
             return segments;
         } finally {
@@ -215,9 +222,8 @@ public class DashScopeAsrProvider implements AsrProvider {
     private void acceptEvent(
         String eventName,
         StringBuilder data,
-        List<TranscriptSegment> segments,
-        SseDiagnostics diagnostics,
-        Integer videoDurationSeconds
+        List<FinalSentenceCandidate> candidates,
+        SseDiagnostics diagnostics
     ) {
         if (eventName == null && data.isEmpty()) {
             return;
@@ -256,28 +262,98 @@ public class DashScopeAsrProvider implements AsrProvider {
                 text.asText()
             );
             TimedWordsParseResult parsedWords = timedWords(sentence);
-            if (parsedWords.reason() != null) {
-                log.debug("DashScope ASR timed-word parsing fallback rawWordCount={} parsedTimedWordCount={} reason={} wordIndex={}",
-                    parsedWords.rawWordCount(), parsedWords.parsedTimedWordCount(), parsedWords.reason(), parsedWords.wordIndex());
-                log.debug("DashScope ASR evidence refinement fallback reason={} inputTimedWords={}",
-                    TranscriptEvidenceSegmenter.FallbackReason.INVALID_WORD_FIELD, parsedWords.words().size());
-                segments.add(finalSentence);
-                return;
-            }
-            TranscriptEvidenceSegmenter.RefinementResult refinement = evidenceSegmenter.refineWithDiagnostics(
-                finalSentence, parsedWords.words(), videoDurationSeconds
-            );
-            if (refinement.refined()) {
-                TranscriptEvidenceSegmenter.DurationPolicy policy = refinement.policy();
-                log.debug("DashScope ASR evidence refinement succeeded policyMinMs={} policyTargetMs={} policyMaxMs={} inputTimedWords={} outputSegments={}",
-                    policy.minMs(), policy.targetMs(), policy.maxMs(), refinement.inputTimedWords(), refinement.segments().size());
-            } else {
-                logRefinementFallback(refinement);
-            }
-            segments.addAll(refinement.segments());
+            candidates.add(new FinalSentenceCandidate(
+                finalSentence,
+                sentence.deepCopy(),
+                parsedWords,
+                sentence.path("sentence_id").isValueNode() ? sentence.path("sentence_id").asText() : null
+            ));
         } catch (JsonProcessingException exception) {
             throw invalidResponse("DashScope ASR SSE 数据无法解析");
         }
+    }
+
+    private void refineCandidate(
+        FinalSentenceCandidate candidate,
+        List<TranscriptSegment> segments,
+        Integer videoDurationSeconds
+    ) {
+        TimedWordsParseResult parsedWords = candidate.parsedWords();
+        TranscriptSegment finalSentence = candidate.finalSentence();
+        if (parsedWords.reason() != null) {
+            log.debug("DashScope ASR timed-word parsing fallback rawWordCount={} parsedTimedWordCount={} reason={} wordIndex={}",
+                parsedWords.rawWordCount(), parsedWords.parsedTimedWordCount(), parsedWords.reason(), parsedWords.wordIndex());
+            log.debug("DashScope ASR evidence refinement fallback reason={} inputTimedWords={}",
+                TranscriptEvidenceSegmenter.FallbackReason.INVALID_WORD_FIELD, parsedWords.words().size());
+            segments.add(finalSentence);
+            return;
+        }
+        TranscriptEvidenceSegmenter.RefinementResult refinement = evidenceSegmenter.refineWithDiagnostics(
+            finalSentence, parsedWords.words(), videoDurationSeconds
+        );
+        if (refinement.refined()) {
+            TranscriptEvidenceSegmenter.DurationPolicy policy = refinement.policy();
+            log.debug("DashScope ASR evidence refinement succeeded policyMinMs={} policyTargetMs={} policyMaxMs={} inputTimedWords={} outputSegments={}",
+                policy.minMs(), policy.targetMs(), policy.maxMs(), refinement.inputTimedWords(), refinement.segments().size());
+        } else {
+            logRefinementFallback(refinement);
+        }
+        segments.addAll(refinement.segments());
+    }
+
+    private NormalizationResult normalizeCandidates(List<FinalSentenceCandidate> candidates) {
+        List<FinalSentenceCandidate> canonical = new ArrayList<>();
+        int duplicates = 0;
+        int superseded = 0;
+        for (FinalSentenceCandidate candidate : candidates) {
+            if (canonical.isEmpty()) {
+                canonical.add(candidate);
+                continue;
+            }
+            FinalSentenceCandidate previous = canonical.getLast();
+            if (isExactDuplicate(previous, candidate)) {
+                duplicates++;
+                continue;
+            }
+            if (isCumulativeSupersession(previous, candidate)) {
+                canonical.set(canonical.size() - 1, candidate);
+                superseded++;
+                continue;
+            }
+            if (candidate.finalSentence().startMs() >= previous.finalSentence().endMs()) {
+                canonical.add(candidate);
+                continue;
+            }
+            throw ambiguousOverlap(previous, candidate);
+        }
+        return new NormalizationResult(canonical, duplicates, superseded);
+    }
+
+    private boolean isExactDuplicate(FinalSentenceCandidate previous, FinalSentenceCandidate candidate) {
+        return previous.finalSentence().equals(candidate.finalSentence())
+            && previous.providerSnapshot().equals(candidate.providerSnapshot());
+    }
+
+    private boolean isCumulativeSupersession(FinalSentenceCandidate previous, FinalSentenceCandidate candidate) {
+        List<TranscriptEvidenceSegmenter.TimedWord> earlierWords = previous.parsedWords().words();
+        List<TranscriptEvidenceSegmenter.TimedWord> laterWords = candidate.parsedWords().words();
+        if (previous.parsedWords().reason() != null || candidate.parsedWords().reason() != null
+            || earlierWords.isEmpty() || laterWords.size() <= earlierWords.size()
+            || candidate.finalSentence().startMs() != previous.finalSentence().startMs()
+            || candidate.finalSentence().endMs() <= previous.finalSentence().endMs()) {
+            return false;
+        }
+        return laterWords.subList(0, earlierWords.size()).equals(earlierWords);
+    }
+
+    private VideoAgentException ambiguousOverlap(
+        FinalSentenceCandidate previous,
+        FinalSentenceCandidate candidate
+    ) {
+        log.debug("DashScope ASR final candidate normalization ambiguous overlap previousBeginTime={} previousEndTime={} previousWordCount={} candidateBeginTime={} candidateEndTime={} candidateWordCount={}",
+            previous.finalSentence().startMs(), previous.finalSentence().endMs(), previous.parsedWords().rawWordCount(),
+            candidate.finalSentence().startMs(), candidate.finalSentence().endMs(), candidate.parsedWords().rawWordCount());
+        return invalidResponse("DashScope ASR 最终句子快照重叠且无法安全归一化");
     }
 
     static int wordCount(JsonNode sentence) {
@@ -412,6 +488,21 @@ public class DashScopeAsrProvider implements AsrProvider {
         String format,
         @JsonProperty("sample_rate") String sampleRate,
         @JsonProperty("language_hints") List<String> languageHints
+    ) {
+    }
+
+    private record FinalSentenceCandidate(
+        TranscriptSegment finalSentence,
+        JsonNode providerSnapshot,
+        TimedWordsParseResult parsedWords,
+        String sentenceId
+    ) {
+    }
+
+    private record NormalizationResult(
+        List<FinalSentenceCandidate> candidates,
+        int duplicates,
+        int superseded
     ) {
     }
 

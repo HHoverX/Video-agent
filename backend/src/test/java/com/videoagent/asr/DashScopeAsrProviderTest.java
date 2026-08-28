@@ -28,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 class DashScopeAsrProviderTest {
@@ -174,6 +175,130 @@ class DashScopeAsrProviderTest {
     }
 
     @Test
+    void shouldCollapseCumulativeSnapshotsBeforeRefiningTheCanonicalCandidate() throws Exception {
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEvent(1, 0, 16_000, "ab", words("a", 0, 8_000, "b", 8_000, 16_000))
+                + finalEvent(2, 0, 24_000, "abc", words(
+                    "a", 0, 8_000, "b", 8_000, 16_000, "c", 16_000, 24_000
+                ))
+        ));
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("cumulative-two.wav", 30), 49));
+
+        assertThat(result.segments()).extracting(TranscriptSegment::startMs)
+            .containsExactly(0L, 8_000L, 16_000L);
+        assertThat(result.segments()).extracting(TranscriptSegment::endMs)
+            .containsExactly(8_000L, 16_000L, 24_000L);
+    }
+
+    @Test
+    void shouldCollapseTheRealSevenSnapshotCumulativeShapeAndRefineOnlyTheLastSnapshot() throws Exception {
+        int[] counts = {69, 107, 168, 222, 284, 313, 339};
+        long[] ends = {20_820, 32_630, 55_030, 74_680, 95_870, 105_210, 115_520};
+        StringBuilder body = new StringBuilder();
+        for (int index = 0; index < counts.length; index++) {
+            body.append(finalEvent(
+                index + 1,
+                1_280,
+                ends[index],
+                "w".repeat(counts[index]),
+                cumulativeWords(counts[index], counts, ends)
+            ));
+        }
+        startServer(exchange -> respond(exchange, 200, "text/event-stream", body.toString()));
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("cumulative-seven.wav", 116), 116));
+
+        assertThat(result.segments()).hasSizeLessThan(20);
+        assertThat(result.segments().size()).isNotEqualTo(47);
+        assertThat(result.segments().getFirst().startMs()).isEqualTo(1_280L);
+        assertThat(result.segments().getLast().endMs()).isEqualTo(115_520L);
+        assertThat(result.segments()).allSatisfy(segment -> assertThat(segment.text()).isEqualTo("w".repeat(segment.text().length())));
+        assertMonotonic(result.segments());
+    }
+
+    @Test
+    void shouldIgnoreExactDuplicateAndPreserveCumulativeChainFollowedByDistinctSentence() throws Exception {
+        String first = finalEvent(1, 0, 8_000, "a", words("a", 0, 8_000));
+        String cumulative = finalEvent(2, 0, 16_000, "ab", words("a", 0, 8_000, "b", 8_000, 16_000));
+        String distinct = finalEvent(3, 16_500, 24_500, "c", words("c", 16_500, 24_500));
+        startServer(exchange -> respond(exchange, 200, "text/event-stream", first + first + cumulative + distinct));
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("duplicate-and-distinct.wav", 30), 49));
+
+        assertThat(result.segments()).containsExactly(
+            new TranscriptSegment(0, 8_000, "a"),
+            new TranscriptSegment(8_000, 16_000, "b"),
+            new TranscriptSegment(16_500, 24_500, "c")
+        );
+        assertMonotonic(result.segments());
+    }
+
+    @Test
+    void shouldPreserveNonOverlappingFallbackSentencesAndRejectAmbiguousOverlaps() throws Exception {
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEventWithoutWords(1, 0, 4_000, "fallback one")
+                + finalEventWithoutWords(2, 4_500, 8_000, "fallback two")
+        ));
+        TranscriptionResult fallbackResult = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("fallback-distinct.wav", 10), 49));
+        assertThat(fallbackResult.segments()).hasSize(2);
+
+        stopServer();
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEvent(1, 0, 8_000, "a", words("a", 0, 8_000))
+                + finalEvent(2, 4_000, 12_000, "b", words("b", 4_000, 12_000))
+        ));
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("partial-overlap.wav", 15), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
+            );
+
+        stopServer();
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEventWithoutWords(1, 0, 8_000, "fallback one")
+                + finalEventWithoutWords(2, 0, 12_000, "fallback one extended")
+        ));
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("fallback-overlap.wav", 15), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
+            );
+
+        stopServer();
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEvent(1, 0, 8_000, "a", words("a", 0, 8_000))
+                + finalEvent(2, 0, 16_000, "xb", words(
+                    "x", 0, 8_000, "b", 8_000, 16_000
+                ))
+        ));
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("incompatible-prefix.wav", 20), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
+            );
+    }
+
+    @Test
+    void shouldUseTimedWordPrefixDespiteSentenceSpacingOrPunctuationFormattingDifferences() throws Exception {
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEvent(1, 0, 8_000, "Hello,world", words("Hello", 0, 4_000, " world", 4_000, 8_000))
+                + finalEvent(2, 0, 16_000, "Hello, world!again", words(
+                    "Hello", 0, 4_000, " world", 4_000, 8_000, "again", 8_000, 16_000
+                ))
+        ));
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("formatting-variation.wav", 20), 49));
+
+        assertThat(result.segments()).containsExactly(new TranscriptSegment(0, 16_000, "Hello, world!again"));
+    }
+
+    @Test
     void shouldRejectMalformedFinalSentenceEvent() throws Exception {
         startServer(exchange -> respond(exchange, 200, "text/event-stream", """
             event:result
@@ -271,6 +396,78 @@ class DashScopeAsrProviderTest {
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
+    }
+
+    private String finalEvent(long sentenceId, long beginMs, long endMs, String text, String words) {
+        return """
+            event:result
+            data:{"output":{"sentence":{"sentence_id":%d,"sentence_end":true,"begin_time":%d,"end_time":%d,"text":"%s","words":[%s]}}}
+
+            """.formatted(sentenceId, beginMs, endMs, text, words);
+    }
+
+    private String finalEventWithoutWords(long sentenceId, long beginMs, long endMs, String text) {
+        return """
+            event:result
+            data:{"output":{"sentence":{"sentence_id":%d,"sentence_end":true,"begin_time":%d,"end_time":%d,"text":"%s"}}}
+
+            """.formatted(sentenceId, beginMs, endMs, text);
+    }
+
+    private String words(Object... values) {
+        if (values.length % 3 != 0) {
+            throw new IllegalArgumentException("word values must be text, beginMs, endMs triples");
+        }
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < values.length; index += 3) {
+            if (!result.isEmpty()) {
+                result.append(',');
+            }
+            result.append("{\"text\":\"")
+                .append(values[index])
+                .append("\",\"begin_time\":")
+                .append(values[index + 1])
+                .append(",\"end_time\":")
+                .append(values[index + 2])
+                .append(",\"punctuation\":\"\",\"fixed\":true}");
+        }
+        return result.toString();
+    }
+
+    private String cumulativeWords(int count, int[] cumulativeCounts, long[] cumulativeEnds) {
+        StringBuilder result = new StringBuilder();
+        int previousCount = 0;
+        long previousEnd = 1_280L;
+        int written = 0;
+        for (int group = 0; group < cumulativeCounts.length && written < count; group++) {
+            int groupCount = cumulativeCounts[group] - previousCount;
+            long groupEnd = cumulativeEnds[group];
+            for (int offset = 0; offset < groupCount && written < count; offset++) {
+                long beginMs = previousEnd + (groupEnd - previousEnd) * offset / groupCount;
+                long endMs = previousEnd + (groupEnd - previousEnd) * (offset + 1) / groupCount;
+                if (!result.isEmpty()) {
+                    result.append(',');
+                }
+                result.append("{\"text\":\"w\",\"begin_time\":")
+                    .append(beginMs)
+                    .append(",\"end_time\":")
+                    .append(endMs)
+                    .append(",\"punctuation\":\"\",\"fixed\":true}");
+                written++;
+            }
+            previousCount = cumulativeCounts[group];
+            previousEnd = groupEnd;
+        }
+        return result.toString();
+    }
+
+    private void assertMonotonic(List<TranscriptSegment> segments) {
+        for (int index = 1; index < segments.size(); index++) {
+            TranscriptSegment previous = segments.get(index - 1);
+            TranscriptSegment current = segments.get(index);
+            assertThat(current.startMs()).isGreaterThanOrEqualTo(previous.startMs());
+            assertThat(current.endMs()).isGreaterThanOrEqualTo(previous.endMs());
+        }
     }
 
     private Path createWav(String filename, int seconds) throws Exception {
