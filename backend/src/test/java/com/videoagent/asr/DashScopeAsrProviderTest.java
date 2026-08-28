@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -103,13 +104,32 @@ class DashScopeAsrProviderTest {
         assertThat(request.path("model").asText()).isEqualTo("fun-asr-flash-2026-06-15");
         assertThat(request.path("parameters").path("format").asText()).isEqualTo("wav");
         assertThat(request.path("parameters").path("sample_rate").asText()).isEqualTo("16000");
-        assertThat(request.path("parameters").path("language_hints").get(0).asText())
-            .isEqualTo("zh");
+        assertThat(request.path("parameters").has("language_hints")).isFalse();
         String dataUri = request.path("input").path("messages").get(0)
             .path("content").get(0).path("input_audio").path("data").asText();
         assertThat(dataUri).startsWith("data:audio/wav;base64,");
         byte[] decoded = Base64.getDecoder().decode(dataUri.substring(dataUri.indexOf(',') + 1));
         assertThat(decoded).isEqualTo(Files.readAllBytes(audio));
+    }
+
+    @Test
+    void shouldOmitLanguageHintsForEmptyAndBlankConfiguredValues() throws Exception {
+        assertThat(requestForHints(List.of()).path("parameters").has("language_hints")).isFalse();
+        assertThat(requestForHints(Arrays.asList(null, " ", "\t")).path("parameters").has("language_hints"))
+            .isFalse();
+    }
+
+    @Test
+    void shouldSendExplicitLanguageHintsInConfiguredOrder() throws Exception {
+        assertThat(requestForHints(List.of("zh")).path("parameters").path("language_hints"))
+            .extracting(JsonNode::asText)
+            .containsExactly("zh");
+        assertThat(requestForHints(List.of("en")).path("parameters").path("language_hints"))
+            .extracting(JsonNode::asText)
+            .containsExactly("en");
+        assertThat(requestForHints(List.of("zh", "en", "zh")).path("parameters").path("language_hints"))
+            .extracting(JsonNode::asText)
+            .containsExactly("zh", "en", "zh");
     }
 
     @Test
@@ -362,20 +382,47 @@ class DashScopeAsrProviderTest {
     }
 
     private DashScopeAsrProvider provider(Duration timeout) {
+        return provider(timeout, List.of());
+    }
+
+    private DashScopeAsrProvider provider(Duration timeout, List<String> languageHints) {
         return new DashScopeAsrProvider(
-            properties(timeout, "http://127.0.0.1:" + server.getAddress().getPort()),
+            properties(timeout, "http://127.0.0.1:" + server.getAddress().getPort(), languageHints),
             new AsrResultValidator()
         );
     }
 
     private AsrProviderProperties properties(Duration timeout, String baseUrl) {
+        return properties(timeout, baseUrl, List.of());
+    }
+
+    private AsrProviderProperties properties(Duration timeout, String baseUrl, List<String> languageHints) {
         return new AsrProviderProperties(
             "dashscope",
             TEST_CREDENTIAL,
             "fun-asr-flash-2026-06-15",
             baseUrl,
-            timeout
+            timeout,
+            languageHints
         );
+    }
+
+    private JsonNode requestForHints(List<String> languageHints) throws Exception {
+        if (server != null) {
+            stopServer();
+            server = null;
+        }
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        startServer(exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "text/event-stream", finalEvent(
+                1, 0, 1_000, "word", words("word", 0, 1_000)
+            ));
+        });
+
+        provider(Duration.ofSeconds(3), languageHints)
+            .transcribe(new AudioSource(createWav("language-hints.wav", 2)));
+        return objectMapper.readTree(requestBody.get());
     }
 
     private void startServer(ExchangeHandler handler) throws IOException {

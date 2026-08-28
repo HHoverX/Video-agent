@@ -1,5 +1,6 @@
 package com.videoagent.asr;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -167,7 +168,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                     new DashScopeAudio(audioDataUri)
                 ))
             ))),
-            new DashScopeParameters("wav", "16000", List.of("zh"))
+            new DashScopeParameters("wav", "16000", properties.languageHints())
         );
     }
 
@@ -487,7 +488,7 @@ public class DashScopeAsrProvider implements AsrProvider {
     private record DashScopeParameters(
         String format,
         @JsonProperty("sample_rate") String sampleRate,
-        @JsonProperty("language_hints") List<String> languageHints
+        @JsonProperty("language_hints") @JsonInclude(JsonInclude.Include.NON_EMPTY) List<String> languageHints
     ) {
     }
 

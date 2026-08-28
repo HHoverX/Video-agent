@@ -170,7 +170,8 @@ class GroqAsrProviderTest {
             "unit-test-placeholder",
             "whisper-large-v3-turbo",
             baseUrl,
-            timeout
+            timeout,
+            null
         );
     }
 

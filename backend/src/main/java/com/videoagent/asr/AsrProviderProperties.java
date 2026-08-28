@@ -3,6 +3,8 @@ package com.videoagent.asr;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Objects;
 
 @ConfigurationProperties(prefix = "videoagent.ai.asr")
 public record AsrProviderProperties(
@@ -10,7 +12,8 @@ public record AsrProviderProperties(
     String apiKey,
     String model,
     String baseUrl,
-    Duration timeout
+    Duration timeout,
+    List<String> languageHints
 ) {
 
     private static final String DEFAULT_GROQ_MODEL = "whisper-large-v3-turbo";
@@ -27,6 +30,11 @@ public record AsrProviderProperties(
         model = defaultIfBlank(model, defaultModel(provider));
         baseUrl = defaultIfBlank(baseUrl, defaultBaseUrl(provider));
         timeout = timeout == null ? Duration.ofSeconds(60) : timeout;
+        languageHints = languageHints == null ? List.of() : List.copyOf(languageHints.stream()
+            .filter(Objects::nonNull)
+            .map(String::strip)
+            .filter(hint -> !hint.isBlank())
+            .toList());
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("ASR timeout must be positive");
         }
