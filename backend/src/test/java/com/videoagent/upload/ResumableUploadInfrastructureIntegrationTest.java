@@ -13,6 +13,7 @@ import com.videoagent.upload.dto.UploadPartResponse;
 import com.videoagent.upload.dto.UploadPartUrlResponse;
 import com.videoagent.upload.dto.UploadSessionResponse;
 import com.videoagent.upload.entity.VideoUploadSessionEntity;
+import com.videoagent.upload.repository.VideoUploadPartRepository;
 import com.videoagent.upload.repository.VideoUploadSessionRepository;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
@@ -78,6 +79,9 @@ class ResumableUploadInfrastructureIntegrationTest {
     private VideoUploadSessionRepository sessionRepository;
 
     @Autowired
+    private VideoUploadPartRepository partRepository;
+
+    @Autowired
     private AnalysisTaskRepository taskRepository;
 
     @Autowired
@@ -95,6 +99,7 @@ class ResumableUploadInfrastructureIntegrationTest {
     private Session owner;
     private Session stranger;
     private String uploadId;
+    private String secondaryUploadId;
     private String objectKey;
     private Long videoId;
 
@@ -108,6 +113,9 @@ class ResumableUploadInfrastructureIntegrationTest {
         }
         if (uploadId != null) {
             sessionRepository.deleteById(uploadId);
+        }
+        if (secondaryUploadId != null) {
+            sessionRepository.deleteById(secondaryUploadId);
         }
         if (videoId != null) {
             videoRepository.deleteById(videoId);
@@ -225,7 +233,79 @@ class ResumableUploadInfrastructureIntegrationTest {
             .build()).size()).isEqualTo(completeFile.length);
     }
 
+    @Test
+    void shouldConfirmConcurrentDistinctAndDuplicatePartsWithoutDeadlock() {
+        owner = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-confirm-owner-" + System.nanoTime()
+        );
+        byte[] partOne = new byte[CHUNK_SIZE];
+        System.arraycopy(MP4_HEADER, 0, partOne, 0, MP4_HEADER.length);
+        byte[] partTwo = "tail-of-concurrent-confirm-video".getBytes();
+
+        ResponseEntity<UploadSessionResponse> created = restTemplate.exchange(
+            baseUrl("/api/uploads"),
+            HttpMethod.POST,
+            jsonEntity(owner, new CreateUploadSessionRequest(
+                "concurrent-confirm.mp4", "Concurrent confirm",
+                (long) partOne.length + partTwo.length, "video/mp4", (long) CHUNK_SIZE, null
+            )),
+            UploadSessionResponse.class
+        );
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(created.getBody()).isNotNull();
+        uploadId = created.getBody().uploadId();
+
+        uploadPartWithoutConfirmation(owner, uploadId, 1, partOne);
+        uploadPartWithoutConfirmation(owner, uploadId, 2, partTwo);
+
+        ResponseEntity<UploadSessionResponse> secondaryCreated = restTemplate.exchange(
+            baseUrl("/api/uploads"),
+            HttpMethod.POST,
+            jsonEntity(owner, new CreateUploadSessionRequest(
+                "separate-session.mp4", "Separate session",
+                (long) partOne.length, "video/mp4", (long) CHUNK_SIZE, null
+            )),
+            UploadSessionResponse.class
+        );
+        assertThat(secondaryCreated.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(secondaryCreated.getBody()).isNotNull();
+        secondaryUploadId = secondaryCreated.getBody().uploadId();
+        uploadPartWithoutConfirmation(owner, secondaryUploadId, 1, partOne);
+
+        List<UploadPartResponse> confirmations = confirmConcurrently(owner, List.of(
+            new PartConfirmation(uploadId, 1),
+            new PartConfirmation(uploadId, 1),
+            new PartConfirmation(uploadId, 2),
+            new PartConfirmation(secondaryUploadId, 1)
+        ));
+
+        assertThat(confirmations).extracting(UploadPartResponse::partNumber)
+            .containsExactlyInAnyOrder(1, 1, 1, 2);
+        assertThat(partRepository.findByUploadId(uploadId)).extracting(part -> part.getPartNumber())
+            .containsExactlyInAnyOrder(1, 2);
+        assertThat(partRepository.findByUploadId(secondaryUploadId)).extracting(part -> part.getPartNumber())
+            .containsExactly(1);
+        VideoUploadSessionEntity session = sessionRepository.selectById(uploadId);
+        assertThat(session.getStatus()).isEqualTo("UPLOADING");
+        assertThat(session.getVideoId()).isNull();
+        assertThat(sessionRepository.selectById(secondaryUploadId).getStatus()).isEqualTo("UPLOADING");
+    }
+
     private UploadPartResponse uploadAndConfirm(Session session, String id, int partNumber, byte[] bytes) {
+        uploadPartWithoutConfirmation(session, id, partNumber, bytes);
+
+        ResponseEntity<UploadPartResponse> confirmation = restTemplate.exchange(
+            baseUrl("/api/uploads/" + id + "/parts/" + partNumber + "/complete"),
+            HttpMethod.POST,
+            jsonEntity(session, Map.of()),
+            UploadPartResponse.class
+        );
+        assertThat(confirmation.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(confirmation.getBody()).isNotNull();
+        return confirmation.getBody();
+    }
+
+    private void uploadPartWithoutConfirmation(Session session, String id, int partNumber, byte[] bytes) {
         ResponseEntity<UploadPartUrlResponse> urlResponse = restTemplate.exchange(
             baseUrl("/api/uploads/" + id + "/parts/" + partNumber + "/url"),
             HttpMethod.POST,
@@ -248,16 +328,56 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(directPut.getStatusCode().is2xxSuccessful())
             .as("direct MinIO PUT status=%s body=%s", directPut.getStatusCode(), directPut.getBody())
             .isTrue();
+    }
 
-        ResponseEntity<UploadPartResponse> confirmation = restTemplate.exchange(
+    private List<UploadPartResponse> confirmConcurrently(Session session, List<PartConfirmation> confirmations) {
+        ExecutorService executor = Executors.newFixedThreadPool(confirmations.size());
+        CountDownLatch ready = new CountDownLatch(confirmations.size());
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<UploadPartResponse>> futures = confirmations.stream()
+                .map(confirmation -> executor.submit(() -> confirmAfterBarrier(
+                    session, confirmation.uploadId(), confirmation.partNumber(), ready, start
+                )))
+                .toList();
+            ready.await();
+            start.countDown();
+            return futures.stream().map(future -> {
+                try {
+                    return future.get();
+                } catch (Exception exception) {
+                    throw new IllegalStateException("并发确认分片失败", exception);
+                }
+            }).toList();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("并发确认分片被中断", exception);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private record PartConfirmation(String uploadId, int partNumber) {
+    }
+
+    private UploadPartResponse confirmAfterBarrier(
+        Session session,
+        String id,
+        int partNumber,
+        CountDownLatch ready,
+        CountDownLatch start
+    ) throws Exception {
+        ready.countDown();
+        start.await();
+        ResponseEntity<UploadPartResponse> response = restTemplate.exchange(
             baseUrl("/api/uploads/" + id + "/parts/" + partNumber + "/complete"),
             HttpMethod.POST,
             jsonEntity(session, Map.of()),
             UploadPartResponse.class
         );
-        assertThat(confirmation.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(confirmation.getBody()).isNotNull();
-        return confirmation.getBody();
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        return response.getBody();
     }
 
     private List<CompleteUploadResponse> completeConcurrently(Session session, String id) throws Exception {

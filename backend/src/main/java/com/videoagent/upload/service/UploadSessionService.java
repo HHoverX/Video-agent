@@ -132,10 +132,7 @@ public class UploadSessionService {
         String url = storageService.presignPutObject(objectKey, properties.presignTtl());
         if (UploadSessionStatus.CREATED.name().equals(session.getStatus())
             || UploadSessionStatus.FAILED.name().equals(session.getStatus())) {
-            session.setStatus(UploadSessionStatus.UPLOADING.name());
-            session.setLastError(null);
-            session.setUpdatedAt(LocalDateTime.now());
-            sessionRepository.updateById(session);
+            sessionRepository.markUploading(uploadId, LocalDateTime.now());
         }
         Instant expiresAt = Instant.now().plus(properties.presignTtl());
         return new UploadPartUrlResponse(partNumber, expectedSize, false, url, expiresAt);
@@ -170,10 +167,6 @@ public class UploadSessionService {
         partRepository.upsertCompleted(
             uploadId, partNumber, objectKey, expectedSize, stored.size(), stored.etag(), checksum, now
         );
-        session.setStatus(UploadSessionStatus.UPLOADING.name());
-        session.setLastError(null);
-        session.setUpdatedAt(now);
-        sessionRepository.updateById(session);
         return new UploadPartResponse(partNumber, stored.size(), stored.etag(), checksum);
     }
 

@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -96,6 +98,52 @@ class UploadSessionServiceTest {
             eq("u1"), eq(1), eq("upload-parts/u1/part-00001"), eq(16L), eq(16L),
             eq("etag-1"), eq(null), any(LocalDateTime.class)
         );
+        verify(sessions, never()).updateById(any(VideoUploadSessionEntity.class));
+    }
+
+    @Test
+    void shouldMarkCreatedSessionUploadingWhenCreatingPartUrl() {
+        VideoUploadSessionEntity session = session("CREATED");
+        when(sessions.findOwned("u1", 7L)).thenReturn(session);
+        when(storage.presignPutObject(eq("upload-parts/u1/part-00001"), any(Duration.class)))
+            .thenReturn("https://minio.example/upload");
+
+        service.createPartUrl(7L, "u1", 1);
+
+        verify(sessions).markUploading(eq("u1"), any(LocalDateTime.class));
+        verify(sessions, never()).updateById(any(VideoUploadSessionEntity.class));
+    }
+
+    @Test
+    void shouldMarkFailedSessionUploadingWhenCreatingPartUrl() {
+        VideoUploadSessionEntity session = session("FAILED");
+        when(sessions.findOwned("u1", 7L)).thenReturn(session);
+        when(storage.presignPutObject(eq("upload-parts/u1/part-00001"), any(Duration.class)))
+            .thenReturn("https://minio.example/upload");
+
+        service.createPartUrl(7L, "u1", 1);
+
+        verify(sessions).markUploading(eq("u1"), any(LocalDateTime.class));
+        verify(sessions, never()).updateById(any(VideoUploadSessionEntity.class));
+    }
+
+    @Test
+    void shouldRejectConflictingConfirmedPartWithoutWritingSession() {
+        VideoUploadSessionEntity session = session("UPLOADING");
+        VideoUploadPartEntity existing = part(1, 16, "etag-1");
+        when(sessions.findOwned("u1", 7L)).thenReturn(session);
+        when(parts.findPart("u1", 1)).thenReturn(existing);
+        when(storage.statObject("upload-parts/u1/part-00001"))
+            .thenReturn(new StoredObject("upload-parts/u1/part-00001", 16, "etag-2", "application/octet-stream"));
+
+        assertThatThrownBy(() -> service.confirmPart(7L, "u1", 1, null))
+            .isInstanceOfSatisfying(VideoAgentException.class,
+                error -> assertThat(error.errorCode()).isEqualTo(ErrorCode.UPLOAD_PART_INVALID));
+
+        verify(parts, never()).upsertCompleted(
+            any(), anyInt(), any(), anyLong(), anyLong(), any(), any(), any(LocalDateTime.class)
+        );
+        verify(sessions, never()).updateById(any(VideoUploadSessionEntity.class));
     }
 
     @Test

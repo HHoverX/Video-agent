@@ -20,6 +20,14 @@ public interface VideoUploadSessionRepository extends BaseMapper<VideoUploadSess
     @Select("SELECT * FROM video_upload_session WHERE id = #{uploadId} FOR UPDATE")
     VideoUploadSessionEntity lockById(@Param("uploadId") String uploadId);
 
+    @Update("""
+        UPDATE video_upload_session
+        SET status = 'UPLOADING', last_error = NULL, updated_at = #{now}
+        WHERE id = #{uploadId}
+          AND status IN ('CREATED', 'FAILED')
+        """)
+    int markUploading(@Param("uploadId") String uploadId, @Param("now") LocalDateTime now);
+
     @Select("""
         SELECT * FROM video_upload_session
         WHERE status IN ('CREATED', 'UPLOADING', 'FAILED')
