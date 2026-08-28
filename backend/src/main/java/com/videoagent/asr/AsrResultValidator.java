@@ -3,6 +3,8 @@ package com.videoagent.asr;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.sound.sampled.AudioInputStream;
@@ -15,6 +17,7 @@ import java.util.List;
 public class AsrResultValidator {
 
     private static final long AUDIO_DURATION_TOLERANCE_MS = 1_500;
+    private static final Logger log = LoggerFactory.getLogger(AsrResultValidator.class);
 
     public TranscriptionResult validate(AudioSource audioSource, List<TranscriptSegment> segments) {
         if (segments == null || segments.isEmpty()) {
@@ -24,14 +27,21 @@ public class AsrResultValidator {
         long audioDurationMs = audioDurationMs(audioSource);
         long previousStart = -1;
         long previousEnd = -1;
-        for (TranscriptSegment segment : segments) {
-            if (segment == null
-                || segment.text().isBlank()
-                || segment.startMs() < 0
-                || segment.endMs() <= segment.startMs()
-                || segment.startMs() < previousStart
-                || segment.endMs() < previousEnd
-                || segment.endMs() > audioDurationMs + AUDIO_DURATION_TOLERANCE_MS) {
+        for (int index = 0; index < segments.size(); index++) {
+            TranscriptSegment segment = segments.get(index);
+            ValidationReason reason = validationReason(segment, previousStart, previousEnd, audioDurationMs);
+            if (reason != null) {
+                log.debug("ASR segment validation rejected segmentIndex={} startMs={} endMs={} textLength={} previousStartMs={} previousEndMs={} audioDurationMs={} toleranceMs={} totalSegments={} validationReason={}",
+                    index,
+                    segment == null ? null : segment.startMs(),
+                    segment == null ? null : segment.endMs(),
+                    segment == null ? null : segment.text().length(),
+                    previousStart,
+                    previousEnd,
+                    audioDurationMs,
+                    AUDIO_DURATION_TOLERANCE_MS,
+                    segments.size(),
+                    reason);
                 throw invalid("ASR 字幕片段时间或文本无效");
             }
             previousStart = segment.startMs();
@@ -53,7 +63,47 @@ public class AsrResultValidator {
         }
     }
 
+    private ValidationReason validationReason(
+        TranscriptSegment segment,
+        long previousStart,
+        long previousEnd,
+        long audioDurationMs
+    ) {
+        if (segment == null) {
+            return ValidationReason.NULL_SEGMENT;
+        }
+        if (segment.text().isBlank()) {
+            return ValidationReason.BLANK_TEXT;
+        }
+        if (segment.startMs() < 0) {
+            return ValidationReason.NEGATIVE_START;
+        }
+        if (segment.endMs() <= segment.startMs()) {
+            return ValidationReason.NON_POSITIVE_DURATION;
+        }
+        if (segment.startMs() < previousStart) {
+            return ValidationReason.START_REGRESSION;
+        }
+        if (segment.endMs() < previousEnd) {
+            return ValidationReason.END_REGRESSION;
+        }
+        if (segment.endMs() > audioDurationMs + AUDIO_DURATION_TOLERANCE_MS) {
+            return ValidationReason.EXCEEDS_AUDIO_DURATION;
+        }
+        return null;
+    }
+
     private VideoAgentException invalid(String message) {
         return new VideoAgentException(ErrorCode.ASR_RESPONSE_INVALID, message);
+    }
+
+    private enum ValidationReason {
+        NULL_SEGMENT,
+        BLANK_TEXT,
+        NEGATIVE_START,
+        NON_POSITIVE_DURATION,
+        START_REGRESSION,
+        END_REGRESSION,
+        EXCEEDS_AUDIO_DURATION
     }
 }
