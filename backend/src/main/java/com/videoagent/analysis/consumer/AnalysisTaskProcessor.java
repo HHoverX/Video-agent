@@ -37,6 +37,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.OptionalInt;
 
 @Service
 public class AnalysisTaskProcessor {
@@ -176,6 +177,7 @@ public class AnalysisTaskProcessor {
             boolean transcriptPersisted = transcriptService.taskHasPersistedSegments(task.getId());
             TranscriptionResult transcription;
             if (transcriptPersisted) {
+                populateMissingDuration(task, video);
                 List<TranscriptSegment> segments = transcriptService.loadTaskSegments(task.getId());
                 transcription = new TranscriptionResult(segments);
                 log.info("[taskId={}][videoId={}][generation={}][stage=TRANSCRIPT_SAVED] resuming from persisted transcript",
@@ -183,13 +185,18 @@ public class AnalysisTaskProcessor {
             } else {
                 try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
                     storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
+                    persistDurationIfMissing(video, workspace.videoFile());
                     lastProgress = advance(task, generation, AnalysisStage.EXTRACTING_AUDIO, 35);
                     AudioExtractResult audio = mediaProcessor.extractAudio(
                         workspace.videoFile(),
                         workspace.audioFile()
                     );
                     lastProgress = advance(task, generation, AnalysisStage.TRANSCRIBING, 70);
-                    transcription = asrProvider.transcribe(new AudioSource(audio.audioFile()));
+                    log.debug("[taskId={}][videoId={}] ASR AudioSource videoDurationSeconds={}",
+                        task.getId(), task.getVideoId(), video.getDurationSeconds());
+                    transcription = asrProvider.transcribe(
+                        new AudioSource(audio.audioFile(), video.getDurationSeconds())
+                    );
                 }
                 lastProgress = advance(task, generation, AnalysisStage.TRANSCRIPT_SAVED, 75);
                 transcriptService.replaceTaskSegments(task, transcription);
@@ -293,6 +300,37 @@ public class AnalysisTaskProcessor {
         RuntimeException cause
     ) {
         handleFailure(task, progress, errorCode, message, cause, null);
+    }
+
+    private void populateMissingDuration(AnalysisTaskEntity task, VideoEntity video) {
+        if (video.getDurationSeconds() != null) {
+            return;
+        }
+        try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
+            storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
+            persistDurationIfMissing(video, workspace.videoFile());
+        } catch (RuntimeException exception) {
+            log.warn("[taskId={}][videoId={}][stage=PROBE_DURATION] unable to obtain source media for duration probe: {}",
+                task.getId(), task.getVideoId(), exception.getClass().getSimpleName());
+        }
+    }
+
+    private void persistDurationIfMissing(VideoEntity video, java.nio.file.Path videoFile) {
+        if (video.getDurationSeconds() != null) {
+            return;
+        }
+        OptionalInt duration = mediaProcessor.probeDurationSeconds(videoFile);
+        if (duration.isEmpty()) {
+            return;
+        }
+        int affectedRows = videoRepository.updateDurationSecondsIfMissing(
+            video.getId(), duration.getAsInt(), LocalDateTime.now()
+        );
+        if (affectedRows == 1) {
+            video.setDurationSeconds(duration.getAsInt());
+        }
+        log.debug("[videoId={}] duration probe probedDurationSeconds={} durationPersistenceAffectedRows={} effectiveDurationSeconds={}",
+            video.getId(), duration.getAsInt(), affectedRows, video.getDurationSeconds());
     }
 
     private void handleFailure(

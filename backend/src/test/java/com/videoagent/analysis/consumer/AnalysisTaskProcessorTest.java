@@ -53,6 +53,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.OptionalInt;
 
 class AnalysisTaskProcessorTest {
 
@@ -130,6 +131,7 @@ class AnalysisTaskProcessorTest {
         AnalysisTaskEntity task = taskWithStatus("PENDING");
         AnalysisTaskEntity claimed = claimedTask(task);
         VideoEntity video = video();
+        video.setDurationSeconds(null);
         Path source = Path.of("target", "test-media", "source.mp4").toAbsolutePath();
         Path audio = source.resolveSibling("audio.wav");
         TranscriptionResult transcription = result();
@@ -145,7 +147,10 @@ class AnalysisTaskProcessorTest {
         when(workspace.videoFile()).thenReturn(source);
         when(workspace.audioFile()).thenReturn(audio);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.of(2));
+        when(videoRepository.updateDurationSecondsIfMissing(eq(7L), eq(2), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(asrProvider.transcribe(new AudioSource(audio, 2))).thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenReturn(summaryResult());
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(summaryService.taskHasPersistedSummary(101L)).thenReturn(false);
@@ -153,14 +158,17 @@ class AnalysisTaskProcessorTest {
         processor.process(new AnalysisMessage(101L, 7L));
 
         verify(storageService).downloadObject("videos/demo.mp4", source);
+        verify(mediaProcessor).probeDurationSeconds(source);
+        verify(videoRepository).updateDurationSecondsIfMissing(eq(7L), eq(2), any(LocalDateTime.class));
         verify(mediaProcessor).extractAudio(source, audio);
-        verify(asrProvider).transcribe(new AudioSource(audio));
+        verify(asrProvider).transcribe(new AudioSource(audio, 2));
         verify(workspace).close();
         verify(transcriptService).replaceTaskSegments(claimed, transcription);
         verify(summaryProvider).summarize(any());
         verify(summaryService).replaceTaskResult(eq(claimed), any(), eq(summaryResult()));
         verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
         verify(terminalNotifier).succeeded(101L, 7L);
+        assertThat(video.getDurationSeconds()).isEqualTo(2);
 
         ArgumentCaptor<AnalysisProgressSnapshot> progressCaptor =
             ArgumentCaptor.forClass(AnalysisProgressSnapshot.class);
@@ -202,9 +210,77 @@ class AnalysisTaskProcessorTest {
 
         verify(asrProvider, never()).transcribe(any());
         verify(mediaProcessor, never()).extractAudio(any(), any());
+        verify(mediaProcessor, never()).probeDurationSeconds(any());
         verify(storageService, never()).downloadObject(anyString(), any());
         verify(transcriptService, never()).replaceTaskSegments(any(), any());
         verify(summaryProvider).summarize(any());
+        verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
+    }
+
+    @Test
+    void shouldProbeMissingDurationWhenResumingPersistedTranscriptWithoutRerunningAsr() {
+        AnalysisTaskEntity task = taskWithStatus("RETRY_WAITING");
+        VideoEntity video = video();
+        video.setDurationSeconds(null);
+        Path source = Path.of("target", "test-media", "source.mp4").toAbsolutePath();
+
+        when(repository.selectById(101L)).thenReturn(task, claimedTask(task));
+        when(repository.claimPending(eq(101L), eq("PREPARING"), eq(10), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.updateProcessingProgress(eq(101L), anyString(), anyInt(), eq(1), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.markSuccess(eq(101L), eq(1), any(LocalDateTime.class))).thenReturn(1);
+        when(videoRepository.selectById(7L)).thenReturn(video);
+        when(workspaceFactory.create(101L)).thenReturn(workspace);
+        when(workspace.videoFile()).thenReturn(source);
+        when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.of(4));
+        when(videoRepository.updateDurationSecondsIfMissing(eq(7L), eq(4), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(true);
+        when(transcriptService.loadTaskSegments(101L))
+            .thenReturn(List.of(new TranscriptSegment(0, 2_000, "segment one")));
+        when(summaryService.taskHasPersistedSummary(101L)).thenReturn(true);
+
+        processor.process(new AnalysisMessage(101L, 7L));
+
+        verify(storageService).downloadObject("videos/demo.mp4", source);
+        verify(mediaProcessor).probeDurationSeconds(source);
+        verify(videoRepository).updateDurationSecondsIfMissing(eq(7L), eq(4), any(LocalDateTime.class));
+        verify(mediaProcessor, never()).extractAudio(any(), any());
+        verify(asrProvider, never()).transcribe(any());
+    }
+
+    @Test
+    void shouldContinueAnalysisWhenDurationProbeFails() {
+        AnalysisTaskEntity task = taskWithStatus("PENDING");
+        VideoEntity video = video();
+        video.setDurationSeconds(null);
+        Path source = Path.of("target", "test-media", "source.mp4").toAbsolutePath();
+        Path audio = source.resolveSibling("audio.wav");
+        TranscriptionResult transcription = result();
+
+        when(repository.selectById(101L)).thenReturn(task, claimedTask(task));
+        when(repository.claimPending(eq(101L), eq("PREPARING"), eq(10), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.updateProcessingProgress(eq(101L), anyString(), anyInt(), eq(1), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.markSuccess(eq(101L), eq(1), any(LocalDateTime.class))).thenReturn(1);
+        when(videoRepository.selectById(7L)).thenReturn(video);
+        when(workspaceFactory.create(101L)).thenReturn(workspace);
+        when(workspace.videoFile()).thenReturn(source);
+        when(workspace.audioFile()).thenReturn(audio);
+        when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.empty());
+        when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
+        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
+        when(summaryService.taskHasPersistedSummary(101L)).thenReturn(true);
+
+        processor.process(new AnalysisMessage(101L, 7L));
+
+        verify(mediaProcessor).probeDurationSeconds(source);
+        verify(videoRepository, never()).updateDurationSecondsIfMissing(anyLong(), anyInt(), any());
+        verify(mediaProcessor).extractAudio(source, audio);
+        verify(asrProvider).transcribe(new AudioSource(audio));
         verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
     }
 
@@ -287,7 +363,7 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
             new VideoAgentException(ErrorCode.LLM_SUMMARY_FAILED, "provider unavailable")
         );
@@ -328,7 +404,7 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
             new VideoAgentException(ErrorCode.LLM_SUMMARY_FAILED, "provider unavailable")
         );
@@ -366,7 +442,7 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
             new NullPointerException("unexpected programming error")
         );
@@ -405,7 +481,7 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
 
         processor.process(new AnalysisMessage(101L, 7L));
 
@@ -463,6 +539,7 @@ class AnalysisTaskProcessorTest {
         video.setId(7L);
         video.setUserId(1L);
         video.setObjectKey("videos/demo.mp4");
+        video.setDurationSeconds(4);
         return video;
     }
 

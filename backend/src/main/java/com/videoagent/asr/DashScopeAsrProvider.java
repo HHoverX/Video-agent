@@ -36,6 +36,7 @@ public class DashScopeAsrProvider implements AsrProvider {
     private static final int MAX_FINAL_SENTENCE_DEBUG_LOGS = 20;
 
     private static final Logger log = LoggerFactory.getLogger(DashScopeAsrProvider.class);
+    private static final TranscriptEvidenceSegmenter evidenceSegmenter = new TranscriptEvidenceSegmenter();
 
     private final AsrProviderProperties properties;
     private final AsrResultValidator validator;
@@ -91,7 +92,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                             ErrorCode.ASR_PROVIDER_REJECTED
                         );
                     }
-                    return parseSse(response.getBody());
+                    return parseSse(response.getBody(), audioSource.videoDurationSeconds());
                 });
             return validator.validate(audioSource, segments);
         } catch (VideoAgentException exception) {
@@ -170,7 +171,10 @@ public class DashScopeAsrProvider implements AsrProvider {
         );
     }
 
-    private List<TranscriptSegment> parseSse(InputStream inputStream) throws IOException {
+    private List<TranscriptSegment> parseSse(
+        InputStream inputStream,
+        Integer videoDurationSeconds
+    ) throws IOException {
         List<TranscriptSegment> segments = new ArrayList<>();
         SseDiagnostics diagnostics = new SseDiagnostics();
         try {
@@ -182,7 +186,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.isEmpty()) {
-                        acceptEvent(eventName, data, segments, diagnostics);
+                        acceptEvent(eventName, data, segments, diagnostics, videoDurationSeconds);
                         eventName = null;
                         data.setLength(0);
                     } else if (line.startsWith("event:")) {
@@ -194,7 +198,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                         data.append(line.substring("data:".length()).stripLeading());
                     }
                 }
-                acceptEvent(eventName, data, segments, diagnostics);
+                acceptEvent(eventName, data, segments, diagnostics, videoDurationSeconds);
             }
             if (segments.isEmpty()) {
                 throw new VideoAgentException(
@@ -212,7 +216,8 @@ public class DashScopeAsrProvider implements AsrProvider {
         String eventName,
         StringBuilder data,
         List<TranscriptSegment> segments,
-        SseDiagnostics diagnostics
+        SseDiagnostics diagnostics,
+        Integer videoDurationSeconds
     ) {
         if (eventName == null && data.isEmpty()) {
             return;
@@ -245,11 +250,31 @@ public class DashScopeAsrProvider implements AsrProvider {
                 || text.asText().isBlank()) {
                 throw invalidResponse("DashScope ASR 最终句子字段无效");
             }
-            segments.add(new TranscriptSegment(
+            TranscriptSegment finalSentence = new TranscriptSegment(
                 beginTime.longValue(),
                 endTime.longValue(),
                 text.asText()
-            ));
+            );
+            TimedWordsParseResult parsedWords = timedWords(sentence);
+            if (parsedWords.reason() != null) {
+                log.debug("DashScope ASR timed-word parsing fallback rawWordCount={} parsedTimedWordCount={} reason={} wordIndex={}",
+                    parsedWords.rawWordCount(), parsedWords.parsedTimedWordCount(), parsedWords.reason(), parsedWords.wordIndex());
+                log.debug("DashScope ASR evidence refinement fallback reason={} inputTimedWords={}",
+                    TranscriptEvidenceSegmenter.FallbackReason.INVALID_WORD_FIELD, parsedWords.words().size());
+                segments.add(finalSentence);
+                return;
+            }
+            TranscriptEvidenceSegmenter.RefinementResult refinement = evidenceSegmenter.refineWithDiagnostics(
+                finalSentence, parsedWords.words(), videoDurationSeconds
+            );
+            if (refinement.refined()) {
+                TranscriptEvidenceSegmenter.DurationPolicy policy = refinement.policy();
+                log.debug("DashScope ASR evidence refinement succeeded policyMinMs={} policyTargetMs={} policyMaxMs={} inputTimedWords={} outputSegments={}",
+                    policy.minMs(), policy.targetMs(), policy.maxMs(), refinement.inputTimedWords(), refinement.segments().size());
+            } else {
+                logRefinementFallback(refinement);
+            }
+            segments.addAll(refinement.segments());
         } catch (JsonProcessingException exception) {
             throw invalidResponse("DashScope ASR SSE 数据无法解析");
         }
@@ -258,6 +283,77 @@ public class DashScopeAsrProvider implements AsrProvider {
     static int wordCount(JsonNode sentence) {
         JsonNode words = sentence.path("words");
         return words.isArray() ? words.size() : 0;
+    }
+
+    private TimedWordsParseResult timedWords(JsonNode sentence) {
+        JsonNode words = sentence.path("words");
+        if (!words.isArray()) {
+            return TimedWordsParseResult.failure(0, 0, "INVALID_WORD_TEXT", null);
+        }
+        if (words.isEmpty()) {
+            return TimedWordsParseResult.success(0, List.of());
+        }
+        List<TranscriptEvidenceSegmenter.TimedWord> timedWords = new ArrayList<>(words.size());
+        for (int index = 0; index < words.size(); index++) {
+            JsonNode word = words.get(index);
+            JsonNode text = word.path("text");
+            JsonNode beginTime = word.path("begin_time");
+            JsonNode endTime = word.path("end_time");
+            JsonNode punctuation = word.path("punctuation");
+            JsonNode fixed = word.path("fixed");
+            if (!text.isTextual()) {
+                logWordStructure(index, text, punctuation);
+                return TimedWordsParseResult.failure(words.size(), timedWords.size(), "INVALID_WORD_TEXT", index);
+            }
+            if (!beginTime.isIntegralNumber() || !endTime.isIntegralNumber()) {
+                return TimedWordsParseResult.failure(words.size(), timedWords.size(), "INVALID_WORD_TIME_TYPE", index);
+            }
+            if (!punctuation.isMissingNode() && !punctuation.isTextual()) {
+                return TimedWordsParseResult.failure(words.size(), timedWords.size(), "INVALID_PUNCTUATION", index);
+            }
+            String punctuationValue = punctuation.isMissingNode() ? "" : punctuation.asText();
+            if (text.asText().isEmpty() && punctuationValue.isEmpty()) {
+                logWordStructure(index, text, punctuation);
+                return TimedWordsParseResult.failure(words.size(), timedWords.size(), "INVALID_WORD_TEXT", index);
+            }
+            if (!fixed.isMissingNode() && !fixed.isBoolean()) {
+                return TimedWordsParseResult.failure(words.size(), timedWords.size(), "INVALID_FIXED", index);
+            }
+            if (fixed.isBoolean() && !fixed.asBoolean()) {
+                return TimedWordsParseResult.failure(words.size(), timedWords.size(), "UNSTABLE_WORD", index);
+            }
+            timedWords.add(new TranscriptEvidenceSegmenter.TimedWord(
+                text.asText(),
+                punctuationValue,
+                beginTime.longValue(),
+                endTime.longValue()
+            ));
+        }
+        return TimedWordsParseResult.success(words.size(), timedWords);
+    }
+
+    private void logWordStructure(int wordIndex, JsonNode text, JsonNode punctuation) {
+        log.debug("DashScope ASR timed-word structure wordIndex={} textPresent={} textIsString={} textLength={} punctuationPresent={} punctuationIsString={} punctuationLength={}",
+            wordIndex,
+            !text.isMissingNode(),
+            text.isTextual(),
+            text.isTextual() ? text.asText().length() : null,
+            !punctuation.isMissingNode(),
+            punctuation.isTextual(),
+            punctuation.isTextual() ? punctuation.asText().length() : null);
+    }
+
+    private void logRefinementFallback(TranscriptEvidenceSegmenter.RefinementResult refinement) {
+        TranscriptEvidenceSegmenter.EvidenceValidation validation = refinement.validation();
+        if (validation == null) {
+            log.debug("DashScope ASR evidence refinement fallback reason={} inputTimedWords={}",
+                refinement.fallbackReason(), refinement.inputTimedWords());
+            return;
+        }
+        log.debug("DashScope ASR evidence refinement fallback reason={} inputTimedWords={} wordIndex={} beginTime={} endTime={} previousBeginTime={} previousEndTime={} reconstructedLength={} sentenceTextLength={}",
+            refinement.fallbackReason(), refinement.inputTimedWords(), validation.wordIndex(),
+            validation.beginTime(), validation.endTime(), validation.previousBeginTime(), validation.previousEndTime(),
+            validation.reconstructedLength(), validation.sentenceTextLength());
     }
 
     private VideoAgentException invalidResponse(String message) {
@@ -357,5 +453,21 @@ public class DashScopeAsrProvider implements AsrProvider {
     }
 
     private record FinalSentenceMetadata(String sentenceId, Long beginTime, Long endTime, int wordCount) {
+    }
+
+    private record TimedWordsParseResult(
+        int rawWordCount,
+        List<TranscriptEvidenceSegmenter.TimedWord> words,
+        int parsedTimedWordCount,
+        String reason,
+        Integer wordIndex
+    ) {
+        private static TimedWordsParseResult success(int rawWordCount, List<TranscriptEvidenceSegmenter.TimedWord> words) {
+            return new TimedWordsParseResult(rawWordCount, words, words.size(), null, null);
+        }
+
+        private static TimedWordsParseResult failure(int rawWordCount, int parsedTimedWordCount, String reason, Integer wordIndex) {
+            return new TimedWordsParseResult(rawWordCount, List.of(), parsedTimedWordCount, reason, wordIndex);
+        }
     }
 }

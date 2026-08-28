@@ -68,12 +68,12 @@ class DashScopeAsrProviderTest {
 
                 id:2
                 event:result
-                data:{"output":{"sentence":{"sentence_id":1,"sentence_end":true,"begin_time":120,"end_time":1250,"text":"第一句","words":[{"text":"第"},{"text":"一句"}]}},"request_id":"local-1"}
+                data:{"output":{"sentence":{"sentence_id":1,"sentence_end":true,"begin_time":120,"end_time":1250,"text":"第一句","words":[{"text":"第","begin_time":120,"end_time":600,"punctuation":"","fixed":true},{"text":"一句","begin_time":600,"end_time":1250,"punctuation":"","fixed":true}]}},"request_id":"local-1"}
 
                 id:3
                 event:result
                 :HTTP_STATUS/200
-                data:{"output":{"sentence":{"sentence_id":2,"sentence_end":true,"begin_time":1250,"end_time":2500,"text":"第二句","words":{}}},"request_id":"local-1"}
+                data:{"output":{"sentence":{"sentence_id":2,"sentence_end":true,"begin_time":1250,"end_time":2500,"text":"第二句","words":[{"text":"第","begin_time":1250,"end_time":1800,"punctuation":"","fixed":true},{"text":"二句","begin_time":1800,"end_time":2500,"punctuation":"","fixed":true}]}},"request_id":"local-1"}
 
                 """);
         });
@@ -89,7 +89,7 @@ class DashScopeAsrProviderTest {
         assertThat(result.segments()).extracting(TranscriptSegment::text)
             .containsExactly("第一句", "第二句");
         JsonNode finalSentence = objectMapper.readTree("""
-            {"words":[{"text":"第"},{"text":"一句"}]}
+            {"words":[{"text":"第","begin_time":120,"end_time":600,"punctuation":"","fixed":true},{"text":"一句","begin_time":600,"end_time":1250,"punctuation":"","fixed":true}]}
             """);
         assertThat(DashScopeAsrProvider.wordCount(finalSentence)).isEqualTo(2);
         assertThat(DashScopeAsrProvider.wordCount(objectMapper.readTree("{}"))).isZero();
@@ -124,6 +124,53 @@ class DashScopeAsrProviderTest {
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
             );
+    }
+
+    @Test
+    void shouldRefineCoarseFinalSentenceWhenTimedWordsAreCompleteAndFixedIsMissing() throws Exception {
+        startServer(exchange -> respond(exchange, 200, "text/event-stream", """
+            event:result
+            data:{"output":{"sentence":{"sentence_end":true,"begin_time":0,"end_time":16000,"text":"ab","words":[{"text":"a","begin_time":0,"end_time":8000,"punctuation":""},{"text":"b","begin_time":8000,"end_time":16000,"punctuation":""}]}}}
+
+            """));
+        Path audio = createWav("coarse.wav", 20);
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(audio, 49));
+
+        assertThat(result.segments()).extracting(TranscriptSegment::startMs).containsExactly(0L, 8_000L);
+        assertThat(result.segments()).extracting(TranscriptSegment::endMs).containsExactly(8_000L, 16_000L);
+    }
+
+    @Test
+    void shouldPreserveCoarseFinalSentenceWhenAWordIsExplicitlyNotFixed() throws Exception {
+        startServer(exchange -> respond(exchange, 200, "text/event-stream", """
+            event:result
+            data:{"output":{"sentence":{"sentence_end":true,"begin_time":0,"end_time":16000,"text":"ab","words":[{"text":"a","begin_time":0,"end_time":8000,"punctuation":"","fixed":false},{"text":"b","begin_time":8000,"end_time":16000,"punctuation":"","fixed":true}]}}}
+
+            """));
+        Path audio = createWav("unfixed.wav", 20);
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(audio, 49));
+
+        assertThat(result.segments()).containsExactly(new TranscriptSegment(0, 16_000, "ab"));
+    }
+
+    @Test
+    void shouldUsePunctuationOnlyTimedWordsForCoarseSentenceRefinement() throws Exception {
+        startServer(exchange -> respond(exchange, 200, "text/event-stream", """
+            event:result
+            data:{"output":{"sentence":{"sentence_end":true,"begin_time":0,"end_time":18000,"text":"甲。乙。丙。","words":[{"text":"甲","begin_time":0,"end_time":5000,"punctuation":"","fixed":true},{"text":"","begin_time":5000,"end_time":6000,"punctuation":"。","fixed":true},{"text":"乙","begin_time":6000,"end_time":11000,"punctuation":"","fixed":true},{"text":"","begin_time":11000,"end_time":12000,"punctuation":"。","fixed":true},{"text":"丙","begin_time":12000,"end_time":18000,"punctuation":"。","fixed":true}]}}}
+
+            """));
+        Path audio = createWav("punctuation-only.wav", 20);
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(audio, 49));
+
+        assertThat(result.segments()).extracting(TranscriptSegment::text)
+            .containsExactly("甲。乙。", "丙。");
     }
 
     @Test
