@@ -348,13 +348,31 @@ function updateProgress() {
       </div>
 
       <aside class="upload-note">
-        <span class="note-index">RELIABLE</span>
-        <h2>长视频上传链路</h2>
+        <div class="upload-note__heading">
+          <div>
+            <p class="upload-note__eyebrow">安心上传</p>
+            <h2>为长视频准备</h2>
+            <p class="upload-note__description">上传过程更从容，意外中断后也能继续完成。</p>
+          </div>
+          <span class="note-index">可靠上传</span>
+        </div>
         <ol>
-          <li><span>01</span> MySQL 持久化上传会话</li>
-          <li><span>02</span> 浏览器限并发直传临时分片</li>
-          <li><span>03</span> 查询会话后只补缺失分片</li>
-          <li><span>04</span> MinIO 服务端合并为可播放视频</li>
+          <li>
+            <span>01</span>
+            <div><strong>断点续传</strong><p>网络中断后可继续上传</p></div>
+          </li>
+          <li>
+            <span>02</span>
+            <div><strong>缺失分片补传</strong><p>只重新上传未完成部分</p></div>
+          </li>
+          <li>
+            <span>03</span>
+            <div><strong>稳定合并</strong><p>上传完成后自动校验并合并</p></div>
+          </li>
+          <li>
+            <span>04</span>
+            <div><strong>可靠恢复</strong><p>异常后可继续完成上传流程</p></div>
+          </li>
         </ol>
       </aside>
     </div>

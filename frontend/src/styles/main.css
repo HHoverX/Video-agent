@@ -375,6 +375,12 @@ p {
   color: #edf0f6;
 }
 
+.upload-panel .el-input__count,
+.upload-panel .el-input__count .el-input__count-inner {
+  color: #737c90;
+  background: transparent;
+}
+
 .video-uploader .el-upload,
 .video-uploader .el-upload-dragger {
   width: 100%;
@@ -476,29 +482,51 @@ p {
 }
 
 .upload-note {
-  padding: 30px;
+  padding: 28px;
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 22px;
   background: rgba(14, 16, 23, 0.72);
 }
 
+.upload-note__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.upload-note__eyebrow {
+  margin: 0 0 8px;
+  color: #8cf0d4;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
 .note-index {
-  width: 42px;
-  height: 42px;
-  display: grid;
-  place-items: center;
+  flex: 0 0 auto;
+  padding: 7px 9px;
   border: 1px solid rgba(102, 92, 255, 0.3);
-  border-radius: 13px;
+  border-radius: 999px;
   color: #aaa4ff;
   background: rgba(102, 92, 255, 0.08);
   font-size: 11px;
   font-weight: 800;
+  line-height: 1;
 }
 
 .upload-note h2 {
-  margin: 24px 0;
+  margin: 0;
   color: #e7eaf2;
   font-size: 19px;
+}
+
+.upload-note__description {
+  margin: 9px 0 0;
+  color: #818a9d;
+  font-size: 12px;
+  line-height: 1.65;
 }
 
 .upload-note ol {
@@ -508,19 +536,38 @@ p {
 }
 
 .upload-note li {
-  min-height: 54px;
+  padding: 15px 0;
   display: flex;
-  align-items: center;
-  gap: 13px;
+  align-items: flex-start;
+  gap: 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  color: #7f8799;
-  font-size: 12px;
 }
 
 .upload-note li span {
+  width: 25px;
+  padding-top: 2px;
+  flex: 0 0 auto;
   color: #626b7e;
   font-size: 10px;
   font-weight: 800;
+}
+
+.upload-note li div {
+  min-width: 0;
+}
+
+.upload-note li strong {
+  display: block;
+  color: #d9deea;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.upload-note li p {
+  margin: 5px 0 0;
+  color: #7f8799;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .back-link {
@@ -1366,6 +1413,10 @@ p {
   .qa-panel,
   .transcript-panel {
     padding: 22px;
+  }
+
+  .upload-note__heading {
+    gap: 14px;
   }
 
   .analysis-start-button.el-button {
