@@ -96,6 +96,7 @@ videoagent:
     planner-model: ${AGENT_PLANNER_MODEL:}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+    ffprobe-path: ${FFPROBE_PATH:ffprobe}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:30s}
     temp-root: ${MEDIA_TEMP_ROOT:${java.io.tmpdir}/videoagent-media}
     stderr-max-chars: ${FFMPEG_STDERR_MAX_CHARS:4000}

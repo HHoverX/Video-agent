@@ -3,6 +3,8 @@ package com.videoagent.media;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -10,10 +12,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
 
 @Component
 public class FfmpegMediaProcessor implements MediaProcessor {
+
+    private static final Logger log = LoggerFactory.getLogger(FfmpegMediaProcessor.class);
 
     private final MediaProperties properties;
 
@@ -107,6 +112,77 @@ public class FfmpegMediaProcessor implements MediaProcessor {
         }
     }
 
+    @Override
+    public OptionalInt probeDurationSeconds(Path videoFile) {
+        Path input;
+        try {
+            input = safeRegularInput(videoFile);
+        } catch (VideoAgentException exception) {
+            log.warn("[stage=PROBE_DURATION] ffprobe skipped: invalid source media");
+            return OptionalInt.empty();
+        }
+
+        Path stdoutFile = null;
+        Path stderrFile = null;
+        Process process = null;
+        try {
+            stdoutFile = Files.createTempFile(input.getParent(), "ffprobe-", ".stdout");
+            stderrFile = Files.createTempFile(input.getParent(), "ffprobe-", ".stderr");
+            process = new ProcessBuilder(
+                properties.ffprobePath(),
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input.toString()
+            )
+                .redirectOutput(stdoutFile.toFile())
+                .redirectError(stderrFile.toFile())
+                .start();
+
+            if (!process.waitFor(properties.ffmpegTimeout().toMillis(), TimeUnit.MILLISECONDS)) {
+                terminate(process);
+                log.warn("[stage=PROBE_DURATION] ffprobe timed out");
+                return OptionalInt.empty();
+            }
+            if (process.exitValue() != 0) {
+                log.warn("[stage=PROBE_DURATION] ffprobe exited with code={}", process.exitValue());
+                return OptionalInt.empty();
+            }
+
+            OptionalInt duration = parseDurationSeconds(Files.readString(stdoutFile, StandardCharsets.UTF_8));
+            if (duration.isEmpty()) {
+                log.warn("[stage=PROBE_DURATION] ffprobe returned an invalid duration");
+            }
+            return duration;
+        } catch (InterruptedException exception) {
+            if (process != null) {
+                terminate(process);
+            }
+            Thread.currentThread().interrupt();
+            log.warn("[stage=PROBE_DURATION] ffprobe interrupted");
+            return OptionalInt.empty();
+        } catch (IOException exception) {
+            log.warn("[stage=PROBE_DURATION] ffprobe unavailable or failed: {}", exception.getClass().getSimpleName());
+            return OptionalInt.empty();
+        } finally {
+            deleteIfExists(stdoutFile);
+            deleteIfExists(stderrFile);
+        }
+    }
+
+    static OptionalInt parseDurationSeconds(String output) {
+        try {
+            double seconds = Double.parseDouble(output == null ? "" : output.strip());
+            if (!Double.isFinite(seconds) || seconds <= 0) {
+                return OptionalInt.empty();
+            }
+            long rounded = Math.max(1L, Math.round(seconds));
+            return rounded > Integer.MAX_VALUE ? OptionalInt.empty() : OptionalInt.of((int) rounded);
+        } catch (NumberFormatException exception) {
+            return OptionalInt.empty();
+        }
+    }
+
     private Path safeRegularInput(Path input) {
         Path normalized = input.toAbsolutePath().normalize();
         if (!Files.isRegularFile(normalized) || Files.isSymbolicLink(normalized)) {
@@ -155,6 +231,17 @@ public class FfmpegMediaProcessor implements MediaProcessor {
         } catch (InterruptedException exception) {
             process.destroyForcibly();
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private void deleteIfExists(Path file) {
+        if (file == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException ignored) {
+            // The enclosing task workspace performs a final recursive cleanup.
         }
     }
 }

@@ -155,13 +155,30 @@ async function handleAsk(question: string) {
   }
 }
 
+async function loadVideoMetadata(videoId: number, loadVersion: number): Promise<boolean> {
+  try {
+    const loadedVideo = await getVideo(videoId)
+    if (loadVersion === pageLoadVersion && Number(route.params.id) === videoId) {
+      video.value = loadedVideo
+      return true
+    }
+    return false
+  } catch (error) {
+    if (loadVersion === pageLoadVersion && Number(route.params.id) === videoId) {
+      errorMessage.value = apiErrorMessage(error, '视频详情加载失败。')
+    }
+    return false
+  }
+}
+
 async function loadVideo() {
+  const videoId = Number(route.params.id)
+  const loadVersion = pageLoadVersion
   loading.value = true
   try {
-    video.value = await getVideo(Number(route.params.id))
-    await Promise.all([loadTranscript(), loadSummary(), loadRagStatus()])
-  } catch (error) {
-    errorMessage.value = apiErrorMessage(error, '视频详情加载失败。')
+    if (await loadVideoMetadata(videoId, loadVersion)) {
+      await Promise.all([loadTranscript(), loadSummary(), loadRagStatus()])
+    }
   } finally {
     loading.value = false
   }
@@ -229,7 +246,11 @@ async function handleTerminalTask(task: AnalysisTask) {
   stopAnalysisTransport()
   if (task.status === 'SUCCESS') {
     forgetTask()
-    await Promise.all([loadTranscript(), loadSummary()])
+    await Promise.all([
+      loadVideoMetadata(Number(route.params.id), pageLoadVersion),
+      loadTranscript(),
+      loadSummary(),
+    ])
   } else {
     rememberTask(task.taskId)
   }

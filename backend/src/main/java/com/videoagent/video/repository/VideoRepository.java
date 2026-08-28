@@ -8,6 +8,9 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+
+import java.time.LocalDateTime;
 
 @Mapper
 public interface VideoRepository extends BaseMapper<VideoEntity> {
@@ -36,4 +39,16 @@ public interface VideoRepository extends BaseMapper<VideoEntity> {
         @Param("fileHash") String fileHash
     );
 
+    @Update("""
+        UPDATE video
+        SET duration_seconds = #{durationSeconds},
+            updated_at = #{now}
+        WHERE id = #{videoId}
+          AND duration_seconds IS NULL
+        """)
+    int updateDurationSecondsIfMissing(
+        @Param("videoId") long videoId,
+        @Param("durationSeconds") int durationSeconds,
+        @Param("now") LocalDateTime now
+    );
 }

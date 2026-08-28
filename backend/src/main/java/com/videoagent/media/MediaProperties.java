@@ -8,12 +8,14 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "videoagent.media")
 public record MediaProperties(
     String ffmpegPath,
+    String ffprobePath,
     Duration ffmpegTimeout,
     Path tempRoot,
     Integer stderrMaxChars
 ) {
     public MediaProperties {
         ffmpegPath = ffmpegPath == null || ffmpegPath.isBlank() ? "ffmpeg" : ffmpegPath;
+        ffprobePath = ffprobePath == null || ffprobePath.isBlank() ? "ffprobe" : ffprobePath;
         ffmpegTimeout = ffmpegTimeout == null ? Duration.ofSeconds(30) : ffmpegTimeout;
         tempRoot = tempRoot == null
             ? Path.of(System.getProperty("java.io.tmpdir"), "videoagent-media")

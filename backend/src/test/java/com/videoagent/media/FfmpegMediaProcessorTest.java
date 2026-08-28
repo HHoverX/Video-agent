@@ -13,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
 
 @EnabledIfEnvironmentVariable(named = "VIDEOAGENT_FFMPEG_TEST", matches = "true")
@@ -36,6 +37,23 @@ class FfmpegMediaProcessorTest {
     }
 
     @Test
+    void shouldProbeAndRoundSourceVideoDuration() throws Exception {
+        Path video = generateVideo("duration.mp4", 2);
+
+        assertThat(processor(Duration.ofSeconds(20)).probeDurationSeconds(video)).isEqualTo(OptionalInt.of(2));
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("0.1")).isEqualTo(OptionalInt.of(1));
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("1.5")).isEqualTo(OptionalInt.of(2));
+    }
+
+    @Test
+    void shouldRejectInvalidProbeDurationOutput() {
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("not-a-number")).isEqualTo(OptionalInt.empty());
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("Infinity")).isEqualTo(OptionalInt.empty());
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("0")).isEqualTo(OptionalInt.empty());
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("2147483648")).isEqualTo(OptionalInt.empty());
+    }
+
+    @Test
     void shouldExposeNonZeroExitAsFfmpegFailure() throws Exception {
         Path invalidVideo = tempDirectory.resolve("invalid.mp4");
         Files.writeString(invalidVideo, "not a media file");
@@ -47,6 +65,15 @@ class FfmpegMediaProcessorTest {
             assertThat(exception.errorCode()).isEqualTo(ErrorCode.FFMPEG_EXECUTION_FAILED);
             assertThat(exception.getMessage()).contains("FFmpeg 退出码", "stderr=");
         });
+    }
+
+    @Test
+    void shouldLeaveDurationUnknownWhenFfprobeRejectsVideo() throws Exception {
+        Path invalidVideo = tempDirectory.resolve("invalid-probe.mp4");
+        Files.writeString(invalidVideo, "not a media file");
+
+        assertThat(processor(Duration.ofSeconds(20)).probeDurationSeconds(invalidVideo))
+            .isEqualTo(OptionalInt.empty());
     }
 
     @Test
@@ -78,6 +105,7 @@ class FfmpegMediaProcessorTest {
         String executable = System.getenv().getOrDefault("FFMPEG_PATH", "ffmpeg");
         return new FfmpegMediaProcessor(new MediaProperties(
             executable,
+            System.getenv().getOrDefault("FFPROBE_PATH", "ffprobe"),
             timeout,
             tempDirectory,
             4_000

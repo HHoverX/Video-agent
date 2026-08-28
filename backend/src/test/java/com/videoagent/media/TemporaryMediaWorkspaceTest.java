@@ -40,6 +40,6 @@ class TemporaryMediaWorkspaceTest {
     }
 
     private MediaProperties properties(Path root) {
-        return new MediaProperties("ffmpeg", Duration.ofSeconds(30), root, 4_000);
+        return new MediaProperties("ffmpeg", "ffprobe", Duration.ofSeconds(30), root, 4_000);
     }
 }
