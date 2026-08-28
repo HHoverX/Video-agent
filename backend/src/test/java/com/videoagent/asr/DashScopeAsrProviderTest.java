@@ -68,13 +68,12 @@ class DashScopeAsrProviderTest {
 
                 id:2
                 event:result
-                :HTTP_STATUS/200
-                data:{"output":{"sentence":{"sentence_id":1,"sentence_end":true,"begin_time":120,"end_time":1250,"text":"第一句"}},"request_id":"local-1"}
+                data:{"output":{"sentence":{"sentence_id":1,"sentence_end":true,"begin_time":120,"end_time":1250,"text":"第一句","words":[{"text":"第"},{"text":"一句"}]}},"request_id":"local-1"}
 
                 id:3
                 event:result
                 :HTTP_STATUS/200
-                data:{"output":{"sentence":{"sentence_id":2,"sentence_end":true,"begin_time":1250,"end_time":2500,"text":"第二句"}},"request_id":"local-1"}
+                data:{"output":{"sentence":{"sentence_id":2,"sentence_end":true,"begin_time":1250,"end_time":2500,"text":"第二句","words":{}}},"request_id":"local-1"}
 
                 """);
         });
@@ -89,6 +88,12 @@ class DashScopeAsrProviderTest {
             .containsExactly(1_250L, 2_500L);
         assertThat(result.segments()).extracting(TranscriptSegment::text)
             .containsExactly("第一句", "第二句");
+        JsonNode finalSentence = objectMapper.readTree("""
+            {"words":[{"text":"第"},{"text":"一句"}]}
+            """);
+        assertThat(DashScopeAsrProvider.wordCount(finalSentence)).isEqualTo(2);
+        assertThat(DashScopeAsrProvider.wordCount(objectMapper.readTree("{}"))).isZero();
+        assertThat(DashScopeAsrProvider.wordCount(objectMapper.readTree("{\"words\":{}}"))).isZero();
         assertThat(authorization.get()).isEqualTo("Bearer " + TEST_CREDENTIAL);
         assertThat(sseHeader.get()).isEqualTo("enable");
         assertThat(contentType.get()).startsWith("application/json");
