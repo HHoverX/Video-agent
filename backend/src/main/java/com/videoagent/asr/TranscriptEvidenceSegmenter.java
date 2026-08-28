@@ -24,19 +24,31 @@ final class TranscriptEvidenceSegmenter {
         List<TimedWord> words,
         Integer videoDurationSeconds
     ) {
+        return refineWithDiagnostics(
+            finalSentence.startMs(), finalSentence.endMs(), finalSentence.text(), words, videoDurationSeconds
+        );
+    }
+
+    RefinementResult refineWithDiagnostics(
+        long sentenceStartMs,
+        long sentenceEndMs,
+        String sentenceText,
+        List<TimedWord> words,
+        Integer videoDurationSeconds
+    ) {
         if (videoDurationSeconds == null || words == null || words.size() < 2) {
-            return fallback(finalSentence, words, null,
+            return fallback(sentenceStartMs, sentenceEndMs, sentenceText, words, null,
                 videoDurationSeconds == null ? FallbackReason.MISSING_DURATION : FallbackReason.INSUFFICIENT_TIMED_WORDS,
                 null);
         }
 
         DurationPolicy policy = durationPolicy(videoDurationSeconds);
-        if (finalSentence.endMs() - finalSentence.startMs() <= policy.maxMs()) {
-            return fallback(finalSentence, words, policy, FallbackReason.SENTENCE_WITHIN_MAX, null);
+        if (sentenceEndMs - sentenceStartMs <= policy.maxMs()) {
+            return fallback(sentenceStartMs, sentenceEndMs, sentenceText, words, policy, FallbackReason.SENTENCE_WITHIN_MAX, null);
         }
-        EvidenceValidation validation = validateEvidence(finalSentence, words);
+        EvidenceValidation validation = validateEvidence(sentenceStartMs, sentenceEndMs, sentenceText, words);
         if (!validation.valid()) {
-            return fallback(finalSentence, words, policy, validation.reason(), validation);
+            return fallback(sentenceStartMs, sentenceEndMs, sentenceText, words, policy, validation.reason(), validation);
         }
 
         List<WordRange> ranges = split(words, policy);
@@ -53,16 +65,33 @@ final class TranscriptEvidenceSegmenter {
     }
 
     private RefinementResult fallback(
-        TranscriptSegment sentence,
+        long sentenceStartMs,
+        long sentenceEndMs,
+        String sentenceText,
         List<TimedWord> words,
         DurationPolicy policy,
         FallbackReason reason,
         EvidenceValidation validation
     ) {
-        return new RefinementResult(List.of(sentence), reason, policy, words == null ? 0 : words.size(), validation);
+        return new RefinementResult(
+            List.of(new TranscriptSegment(sentenceStartMs, sentenceEndMs, sentenceText)),
+            reason,
+            policy,
+            words == null ? 0 : words.size(),
+            validation
+        );
     }
 
-    private EvidenceValidation validateEvidence(TranscriptSegment sentence, List<TimedWord> words) {
+    EvidenceValidation validateEvidence(TranscriptSegment sentence, List<TimedWord> words) {
+        return validateEvidence(sentence.startMs(), sentence.endMs(), sentence.text(), words);
+    }
+
+    EvidenceValidation validateEvidence(
+        long sentenceStartMs,
+        long sentenceEndMs,
+        String sentenceText,
+        List<TimedWord> words
+    ) {
         StringBuilder reconstructed = new StringBuilder();
         long previousBegin = -1L;
         long previousEnd = -1L;
@@ -72,17 +101,17 @@ final class TranscriptEvidenceSegmenter {
                 || word.text().isEmpty() && word.punctuation().isEmpty()) {
                 return EvidenceValidation.field(index);
             }
-            if (word.beginMs() < sentence.startMs() || word.endMs() > sentence.endMs()
+            if (word.beginMs() < sentenceStartMs || word.endMs() > sentenceEndMs
                 || word.endMs() <= word.beginMs() || word.beginMs() < previousBegin
                 || word.beginMs() < previousEnd || word.endMs() < previousEnd) {
-                return EvidenceValidation.timing(index, word, previousBegin, previousEnd, sentence);
+                return EvidenceValidation.timing(index, word, previousBegin, previousEnd, sentenceStartMs, sentenceEndMs);
             }
             reconstructed.append(word.text()).append(word.punctuation());
             previousBegin = word.beginMs();
             previousEnd = word.endMs();
         }
-        if (!reconstructed.toString().strip().equals(sentence.text().strip())) {
-            return EvidenceValidation.textMismatch(reconstructed.length(), sentence.text().length());
+        if (!reconstructed.toString().strip().equals(sentenceText.strip())) {
+            return EvidenceValidation.textMismatch(reconstructed.length(), sentenceText.length());
         }
         return EvidenceValidation.successful();
     }
@@ -269,7 +298,8 @@ final class TranscriptEvidenceSegmenter {
             TimedWord word,
             long previousBeginTime,
             long previousEndTime,
-            TranscriptSegment sentence
+            long sentenceBeginTime,
+            long sentenceEndTime
         ) {
             return new EvidenceValidation(false, FallbackReason.INVALID_WORD_TIMING,
                 wordIndex, word.beginMs(), word.endMs(), previousBeginTime, previousEndTime,

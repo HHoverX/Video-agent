@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class DashScopeAsrProviderTest {
 
@@ -110,6 +111,132 @@ class DashScopeAsrProviderTest {
         assertThat(dataUri).startsWith("data:audio/wav;base64,");
         byte[] decoded = Base64.getDecoder().decode(dataUri.substring(dataUri.indexOf(',') + 1));
         assertThat(decoded).isEqualTo(Files.readAllBytes(audio));
+    }
+
+    @Test
+    void shouldProcessLongAudioSequentiallyAndRunEvidenceSegmentationOnceGlobally() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        List<String> payloads = new java.util.ArrayList<>();
+        startServer(exchange -> {
+            payloads.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            int requestIndex = requestCount.getAndIncrement();
+            String body = requestIndex == 0
+                ? finalEvent(1, 0, 1_000, "ab", words("a", 0, 500, "b", 500, 1_000))
+                : finalEvent(1, 0, 900, "cd", words("c", 0, 450, "d", 450, 900));
+            respond(exchange, 200, "text/event-stream", body);
+        });
+        long planningTargetChars = 44_000L;
+        Path audio = createWav("long-sequential.wav", 2);
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3), planningTargetChars)
+            .transcribe(new AudioSource(audio, 49));
+
+        assertThat(requestCount.get()).isEqualTo(2);
+        for (String payload : payloads) {
+            JsonNode request = objectMapper.readTree(payload);
+            String dataUri = request.path("input").path("messages").get(0)
+                .path("content").get(0).path("input_audio").path("data").asText();
+            assertThat(dataUri.length()).isLessThanOrEqualTo((int) planningTargetChars);
+        }
+        assertThat(result.segments()).containsExactly(new TranscriptSegment(0, 1_929, "abcd"));
+        assertNoGeneratedChunkDirectory();
+    }
+
+    @Test
+    void shouldNormalizeCumulativeSnapshotsInsideEachLongAudioRequest() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        startServer(exchange -> {
+            int requestIndex = requestCount.getAndIncrement();
+            String body = requestIndex == 0
+                ? finalEvent(1, 0, 500, "a", words("a", 0, 500))
+                    + finalEvent(2, 0, 1_000, "ab", words("a", 0, 500, "b", 500, 1_000))
+                : finalEvent(1, 0, 900, "cd", words("c", 0, 450, "d", 450, 900));
+            respond(exchange, 200, "text/event-stream", body);
+        });
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3), 44_000L)
+            .transcribe(new AudioSource(createWav("long-cumulative.wav", 2), 49));
+
+        assertThat(requestCount.get()).isEqualTo(2);
+        assertThat(result.segments()).containsExactly(new TranscriptSegment(0, 1_929, "abcd"));
+    }
+
+    @Test
+    void shouldRejectChunkLocalTimestampBeyondPhysicalChunkDurationAndCleanGeneratedFiles() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        startServer(exchange -> {
+            requestCount.incrementAndGet();
+            respond(exchange, 200, "text/event-stream", finalEvent(
+                1, 0, 3_000, "ab", words("a", 0, 1_500, "b", 1_500, 3_000)
+            ));
+        });
+
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3), 44_000L)
+            .transcribe(new AudioSource(createWav("long-invalid-local-time.wav", 2), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
+            );
+        assertThat(requestCount.get()).isEqualTo(1);
+        assertNoGeneratedChunkDirectory();
+    }
+
+    @Test
+    void shouldRejectLongAudioChunkWithoutTimedWordEvidence() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        startServer(exchange -> {
+            requestCount.incrementAndGet();
+            respond(exchange, 200, "text/event-stream", finalEventWithoutWords(1, 0, 900, "fallback"));
+        });
+
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3), 44_000L)
+            .transcribe(new AudioSource(createWav("long-missing-words.wav", 2), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
+            );
+        assertThat(requestCount.get()).isEqualTo(1);
+        assertNoGeneratedChunkDirectory();
+    }
+
+    @Test
+    void shouldRejectGlobalTimestampRegressionRatherThanSortingAcrossChunks() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        startServer(exchange -> {
+            int requestIndex = requestCount.getAndIncrement();
+            String body = requestIndex == 0
+                ? finalEvent(1, 0, 2_000, "ab", words("a", 0, 1_000, "b", 1_000, 2_000))
+                : finalEvent(1, 0, 900, "cd", words("c", 0, 450, "d", 450, 900));
+            respond(exchange, 200, "text/event-stream", body);
+        });
+
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3), 44_000L)
+            .transcribe(new AudioSource(createWav("long-global-regression.wav", 2), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_RESPONSE_INVALID)
+            );
+        assertThat(requestCount.get()).isEqualTo(2);
+    }
+
+    @Test
+    void shouldStopAfterMiddleLongAudioRequestFailureAndCleanGeneratedFiles() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        startServer(exchange -> {
+            int requestIndex = requestCount.getAndIncrement();
+            if (requestIndex == 1) {
+                respond(exchange, 500, "application/json", "{}");
+                return;
+            }
+            respond(exchange, 200, "text/event-stream", finalEvent(
+                1, 0, 900, "ab", words("a", 0, 450, "b", 450, 900)
+            ));
+        });
+
+        assertThatThrownBy(() -> provider(Duration.ofSeconds(3), 44_000L)
+            .transcribe(new AudioSource(createWav("long-middle-failure.wav", 3), 49)))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ASR_REQUEST_FAILED)
+            );
+        assertThat(requestCount.get()).isEqualTo(2);
+        assertNoGeneratedChunkDirectory();
     }
 
     @Test
@@ -210,6 +337,29 @@ class DashScopeAsrProviderTest {
             .containsExactly(0L, 8_000L, 16_000L);
         assertThat(result.segments()).extracting(TranscriptSegment::endMs)
             .containsExactly(8_000L, 16_000L, 24_000L);
+    }
+
+    @Test
+    void shouldNormalizeLongRawCumulativeSnapshotBeforeCreatingFinalTranscriptSegments() throws Exception {
+        int prefixWordCount = 1_000;
+        int finalWordCount = 2_501;
+        startServer(exchange -> respond(exchange, 200, "text/event-stream",
+            finalEvent(1, 0, 12_000, "w".repeat(prefixWordCount),
+                cumulativeLongWords(prefixWordCount, prefixWordCount, 12_000, 12_000))
+                + finalEvent(2, 0, 24_000, "w".repeat(finalWordCount),
+                    cumulativeLongWords(finalWordCount, prefixWordCount, 12_000, 24_000))
+        ));
+
+        TranscriptionResult result = provider(Duration.ofSeconds(3))
+            .transcribe(new AudioSource(createWav("long-cumulative-candidate.wav", 30), 49));
+
+        assertThat(result.segments()).hasSizeGreaterThan(1);
+        assertThat(result.segments()).extracting(TranscriptSegment::startMs).contains(0L);
+        assertThat(result.segments()).extracting(TranscriptSegment::endMs).contains(24_000L);
+        assertThat(result.segments()).allSatisfy(segment ->
+            assertThat(segment.text().length()).isLessThanOrEqualTo(2_000)
+        );
+        assertMonotonic(result.segments());
     }
 
     @Test
@@ -392,6 +542,24 @@ class DashScopeAsrProviderTest {
         );
     }
 
+    private DashScopeAsrProvider provider(Duration timeout, long planningTargetChars) {
+        return new DashScopeAsrProvider(
+            properties(timeout, "http://127.0.0.1:" + server.getAddress().getPort(), List.of()),
+            new AsrResultValidator(),
+            RestClient.builder().build(),
+            objectMapper,
+            new com.videoagent.media.PcmWavAudioChunker(),
+            planningTargetChars
+        );
+    }
+
+    private void assertNoGeneratedChunkDirectory() throws IOException {
+        try (var files = Files.list(tempDirectory)) {
+            assertThat(files.map(path -> path.getFileName().toString()))
+                .noneMatch(name -> name.startsWith("asr-chunks-"));
+        }
+    }
+
     private AsrProviderProperties properties(Duration timeout, String baseUrl) {
         return properties(timeout, baseUrl, List.of());
     }
@@ -504,6 +672,32 @@ class DashScopeAsrProviderTest {
             }
             previousCount = cumulativeCounts[group];
             previousEnd = groupEnd;
+        }
+        return result.toString();
+    }
+
+    private String cumulativeLongWords(int count, int prefixCount, long prefixEndMs, long endMs) {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < count; index++) {
+            long beginMs;
+            long wordEndMs;
+            if (index < prefixCount) {
+                beginMs = prefixEndMs * index / prefixCount;
+                wordEndMs = prefixEndMs * (index + 1) / prefixCount;
+            } else {
+                int suffixCount = count - prefixCount;
+                int suffixIndex = index - prefixCount;
+                beginMs = prefixEndMs + (endMs - prefixEndMs) * suffixIndex / suffixCount;
+                wordEndMs = prefixEndMs + (endMs - prefixEndMs) * (suffixIndex + 1) / suffixCount;
+            }
+            if (!result.isEmpty()) {
+                result.append(',');
+            }
+            result.append("{\"text\":\"w\",\"begin_time\":")
+                .append(beginMs)
+                .append(",\"end_time\":")
+                .append(wordEndMs)
+                .append(",\"punctuation\":\"\",\"fixed\":true}");
         }
         return result.toString();
     }

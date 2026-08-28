@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.media.AudioChunk;
+import com.videoagent.media.AudioChunkSet;
+import com.videoagent.media.PcmWavAudioChunker;
 import com.videoagent.provider.ProviderHttpFailure;
 
 import org.slf4j.Logger;
@@ -25,6 +28,7 @@ import java.io.InputStreamReader;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -33,7 +37,9 @@ import java.util.Locale;
 public class DashScopeAsrProvider implements AsrProvider {
 
     private static final String WAV_DATA_URI_PREFIX = "data:audio/wav;base64,";
+    private static final long TARGET_DATA_URI_CHARS = 8L * 1024 * 1024;
     private static final long MAX_DATA_URI_CHARS = 10L * 1024 * 1024;
+    private static final long LOCAL_CHUNK_TOLERANCE_MS = 1_500L;
     private static final int MAX_FINAL_SENTENCE_DEBUG_LOGS = 20;
 
     private static final Logger log = LoggerFactory.getLogger(DashScopeAsrProvider.class);
@@ -43,12 +49,14 @@ public class DashScopeAsrProvider implements AsrProvider {
     private final AsrResultValidator validator;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final PcmWavAudioChunker audioChunker;
+    private final long targetDataUriChars;
 
     public DashScopeAsrProvider(
         AsrProviderProperties properties,
         AsrResultValidator validator
     ) {
-        this(properties, validator, restClient(properties), new ObjectMapper());
+        this(properties, validator, restClient(properties), new ObjectMapper(), new PcmWavAudioChunker(), TARGET_DATA_URI_CHARS);
     }
 
     DashScopeAsrProvider(
@@ -57,44 +65,38 @@ public class DashScopeAsrProvider implements AsrProvider {
         RestClient restClient,
         ObjectMapper objectMapper
     ) {
+        this(properties, validator, restClient, objectMapper, new PcmWavAudioChunker(), TARGET_DATA_URI_CHARS);
+    }
+
+    DashScopeAsrProvider(
+        AsrProviderProperties properties,
+        AsrResultValidator validator,
+        RestClient restClient,
+        ObjectMapper objectMapper,
+        PcmWavAudioChunker audioChunker,
+        long targetDataUriChars
+    ) {
         this.properties = properties;
         this.validator = validator;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
+        this.audioChunker = audioChunker;
+        if (targetDataUriChars <= WAV_DATA_URI_PREFIX.length() || targetDataUriChars > MAX_DATA_URI_CHARS) {
+            throw new IllegalArgumentException("DashScope ASR transport target is invalid");
+        }
+        this.targetDataUriChars = targetDataUriChars;
     }
 
     @Override
     public TranscriptionResult transcribe(AudioSource audioSource) {
         try {
-            String audioDataUri = wavDataUri(audioSource);
-            DashScopeRequest body = request(audioDataUri);
-            List<TranscriptSegment> segments = restClient.post()
-                .uri(properties.generationUrl())
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept(MediaType.TEXT_EVENT_STREAM)
-                .headers(headers -> {
-                    headers.setBearerAuth(properties.apiKey());
-                    headers.set("X-DashScope-SSE", "enable");
-                })
-                .body(body)
-                .exchange((request, response) -> {
-                    String responseContentType = response.getHeaders().getFirst("Content-Type");
-                    boolean responseIsSse = responseContentType != null
-                        && responseContentType.toLowerCase(Locale.ROOT).startsWith("text/event-stream");
-                    log.debug("DashScope ASR response status={} contentType={} responseIsSse={} parser=sse",
-                        response.getStatusCode().value(), responseContentType, responseIsSse);
-                    if (!response.getStatusCode().is2xxSuccessful()) {
-                        throw ProviderHttpFailure.forStatus(
-                            response.getStatusCode().value(),
-                            response.getHeaders().getFirst("Retry-After"),
-                            "DashScope ASR",
-                            "语音转写",
-                            ErrorCode.ASR_REQUEST_FAILED,
-                            ErrorCode.ASR_PROVIDER_REJECTED
-                        );
-                    }
-                    return parseSse(response.getBody(), audioSource.videoDurationSeconds());
-                });
+            List<TranscriptSegment> segments;
+            try (AudioChunkSet chunkSet = audioChunker.chunk(audioSource, maxWavBytesForTarget())) {
+                segments = chunkSet.chunks().size() == 1
+                    ? transcribeSingleChunk(audioSource, chunkSet)
+                    : transcribeMultipleChunks(audioSource, chunkSet);
+            }
+            logFinalSegments(segments);
             return validator.validate(audioSource, segments);
         } catch (VideoAgentException exception) {
             throw exception;
@@ -128,16 +130,262 @@ public class DashScopeAsrProvider implements AsrProvider {
         }
     }
 
-    private String wavDataUri(AudioSource audioSource) {
+    private List<TranscriptSegment> transcribeSingleChunk(AudioSource audioSource, AudioChunkSet chunkSet) {
+        List<TranscriptSegment> segments = new ArrayList<>();
+        DashScopeChunkEvidence evidence = requestChunk(chunkSet.chunks().getFirst(), chunkSet, 1);
+        for (FinalSentenceCandidate candidate : evidence.candidates()) {
+            refineCandidate(candidate, segments, audioSource.videoDurationSeconds());
+        }
+        return segments;
+    }
+
+    private List<TranscriptSegment> transcribeMultipleChunks(AudioSource audioSource, AudioChunkSet chunkSet) {
+        List<TranscriptEvidenceSegmenter.TimedWord> globalWords = new ArrayList<>();
+        List<AudioChunk> chunks = chunkSet.chunks();
+        for (AudioChunk chunk : chunks) {
+            DashScopeChunkEvidence evidence = requestChunk(chunk, chunkSet, chunks.size());
+            appendGlobalTimedWords(evidence, chunk, chunkSet, globalWords);
+        }
+        validateGlobalTimeline(globalWords);
+        TranscriptEvidenceSegmenter.RefinementResult refinement = evidenceSegmenter.refineWithDiagnostics(
+            globalWords.getFirst().beginMs(),
+            globalWords.getLast().endMs(),
+            globalText(globalWords),
+            globalWords,
+            audioSource.videoDurationSeconds()
+        );
+        if (refinement.refined()) {
+            TranscriptEvidenceSegmenter.DurationPolicy policy = refinement.policy();
+            log.debug("DashScope ASR global evidence refinement succeeded policyMinMs={} policyTargetMs={} policyMaxMs={} inputTimedWords={} outputSegments={}",
+                policy.minMs(), policy.targetMs(), policy.maxMs(), refinement.inputTimedWords(), refinement.segments().size());
+        } else {
+            logRefinementFallback(refinement);
+        }
+        return refinement.segments();
+    }
+
+    private DashScopeChunkEvidence requestChunk(AudioChunk chunk, AudioChunkSet chunkSet, int chunkCount) {
+        String audioDataUri = wavDataUri(chunk.file());
+        long chunkDurationMs = durationMs(chunk.frameCount(), chunkSet.frameRate());
+        log.debug("DashScope ASR transport chunk index={} chunkCount={} physicalStartMs={} durationMs={} wavBytes={} encodedChars={}",
+            chunk.index(), chunkCount, chunkSet.startMs(chunk), chunkDurationMs, fileSize(chunk.file()), audioDataUri.length());
+        List<FinalSentenceCandidate> candidates = restClient.post()
+                .uri(properties.generationUrl())
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .headers(headers -> {
+                    headers.setBearerAuth(properties.apiKey());
+                    headers.set("X-DashScope-SSE", "enable");
+                })
+                .body(request(audioDataUri))
+                .exchange((request, response) -> {
+                    String responseContentType = response.getHeaders().getFirst("Content-Type");
+                    boolean responseIsSse = responseContentType != null
+                        && responseContentType.toLowerCase(Locale.ROOT).startsWith("text/event-stream");
+                    log.debug("DashScope ASR response status={} contentType={} responseIsSse={} parser=sse",
+                        response.getStatusCode().value(), responseContentType, responseIsSse);
+                    if (!response.getStatusCode().is2xxSuccessful()) {
+                        throw ProviderHttpFailure.forStatus(
+                            response.getStatusCode().value(),
+                            response.getHeaders().getFirst("Retry-After"),
+                            "DashScope ASR",
+                            "语音转写",
+                            ErrorCode.ASR_REQUEST_FAILED,
+                            ErrorCode.ASR_PROVIDER_REJECTED
+                        );
+                    }
+                    return parseSse(response.getBody());
+                });
+        return new DashScopeChunkEvidence(candidates);
+    }
+
+    private void appendGlobalTimedWords(
+        DashScopeChunkEvidence evidence,
+        AudioChunk chunk,
+        AudioChunkSet chunkSet,
+        List<TranscriptEvidenceSegmenter.TimedWord> globalWords
+    ) {
+        long chunkDurationMs = durationMs(chunk.frameCount(), chunkSet.frameRate());
+        long chunkStartMs = chunkSet.startMs(chunk);
+        long previousStartMs = -1L;
+        long previousEndMs = -1L;
+        for (FinalSentenceCandidate candidate : evidence.candidates()) {
+            TimedWordsParseResult parsedWords = candidate.parsedWords();
+            if (parsedWords.reason() != null || parsedWords.words().isEmpty()) {
+                log.debug("DashScope ASR chunk evidence rejected chunkIndex={} reason={} rawWordCount={} parsedTimedWordCount={}",
+                    chunk.index(), parsedWords.reason() == null ? "MISSING_TIMED_WORDS" : parsedWords.reason(),
+                    parsedWords.rawWordCount(), parsedWords.parsedTimedWordCount());
+                throw invalidResponse("DashScope ASR 长音频分片缺少可信词级时间证据");
+            }
+            LocalChunkValidationReason sentenceReason = localSentenceReason(
+                candidate.beginMs(), candidate.endMs(), previousStartMs, previousEndMs, chunkDurationMs
+            );
+            if (sentenceReason != null) {
+                rejectLocalChunkEvidence(chunk, candidate.beginMs(), candidate.endMs(), chunkDurationMs, sentenceReason);
+            }
+            TranscriptEvidenceSegmenter.EvidenceValidation validation = evidenceSegmenter.validateEvidence(
+                candidate.beginMs(), candidate.endMs(), candidate.text(), parsedWords.words()
+            );
+            if (!validation.valid()) {
+                log.debug("DashScope ASR chunk evidence rejected chunkIndex={} reason={} wordIndex={} beginTime={} endTime={} previousBeginTime={} previousEndTime={}",
+                    chunk.index(), validation.reason(), validation.wordIndex(), validation.beginTime(), validation.endTime(),
+                    validation.previousBeginTime(), validation.previousEndTime());
+                throw invalidResponse("DashScope ASR 长音频分片词级时间证据无效");
+            }
+            for (TranscriptEvidenceSegmenter.TimedWord word : parsedWords.words()) {
+                LocalChunkValidationReason wordReason = localWordReason(
+                    word, previousStartMs, previousEndMs, chunkDurationMs
+                );
+                if (wordReason != null) {
+                    rejectLocalChunkEvidence(chunk, word, chunkDurationMs, wordReason);
+                }
+                globalWords.add(new TranscriptEvidenceSegmenter.TimedWord(
+                    word.text(), word.punctuation(),
+                    Math.addExact(chunkStartMs, word.beginMs()),
+                    Math.addExact(chunkStartMs, word.endMs())
+                ));
+                previousStartMs = word.beginMs();
+                previousEndMs = word.endMs();
+            }
+        }
+    }
+
+    private void validateGlobalTimeline(List<TranscriptEvidenceSegmenter.TimedWord> words) {
+        if (words.isEmpty()) {
+            throw invalidResponse("DashScope ASR 未返回可信词级时间证据");
+        }
+        long previousStartMs = -1L;
+        long previousEndMs = -1L;
+        for (int index = 0; index < words.size(); index++) {
+            TranscriptEvidenceSegmenter.TimedWord word = words.get(index);
+            LocalChunkValidationReason reason = localWordReason(word, previousStartMs, previousEndMs, Long.MAX_VALUE);
+            if (reason != null) {
+                log.debug("DashScope ASR global timed-word timeline rejected wordIndex={} startMs={} endMs={} previousStartMs={} previousEndMs={} reason={}",
+                    index, word.beginMs(), word.endMs(), previousStartMs, previousEndMs, reason);
+                throw invalidResponse("DashScope ASR 全局词级时间线无效");
+            }
+            previousStartMs = word.beginMs();
+            previousEndMs = word.endMs();
+        }
+    }
+
+    private String globalText(List<TranscriptEvidenceSegmenter.TimedWord> words) {
+        StringBuilder text = new StringBuilder();
+        for (TranscriptEvidenceSegmenter.TimedWord word : words) {
+            text.append(word.text()).append(word.punctuation());
+        }
+        if (text.toString().isBlank()) {
+            throw invalidResponse("DashScope ASR 全局词级时间线文本无效");
+        }
+        return text.toString();
+    }
+
+    private LocalChunkValidationReason localSentenceReason(
+        long startMs,
+        long endMs,
+        long previousStartMs,
+        long previousEndMs,
+        long chunkDurationMs
+    ) {
+        if (startMs < 0) {
+            return LocalChunkValidationReason.NEGATIVE_START;
+        }
+        if (endMs <= startMs) {
+            return LocalChunkValidationReason.NON_POSITIVE_DURATION;
+        }
+        if (startMs < previousStartMs) {
+            return LocalChunkValidationReason.START_REGRESSION;
+        }
+        if (endMs < previousEndMs) {
+            return LocalChunkValidationReason.END_REGRESSION;
+        }
+        if (endMs > chunkDurationMs + LOCAL_CHUNK_TOLERANCE_MS) {
+            return LocalChunkValidationReason.EXCEEDS_CHUNK_DURATION;
+        }
+        return null;
+    }
+
+    private LocalChunkValidationReason localWordReason(
+        TranscriptEvidenceSegmenter.TimedWord word,
+        long previousStartMs,
+        long previousEndMs,
+        long chunkDurationMs
+    ) {
+        if (word.beginMs() < 0) {
+            return LocalChunkValidationReason.NEGATIVE_START;
+        }
+        if (word.endMs() <= word.beginMs()) {
+            return LocalChunkValidationReason.NON_POSITIVE_DURATION;
+        }
+        if (word.beginMs() < previousStartMs || word.beginMs() < previousEndMs) {
+            return LocalChunkValidationReason.START_REGRESSION;
+        }
+        if (word.endMs() < previousEndMs) {
+            return LocalChunkValidationReason.END_REGRESSION;
+        }
+        if (chunkDurationMs != Long.MAX_VALUE
+            && word.endMs() > chunkDurationMs + LOCAL_CHUNK_TOLERANCE_MS) {
+            return LocalChunkValidationReason.EXCEEDS_CHUNK_DURATION;
+        }
+        return null;
+    }
+
+    private void rejectLocalChunkEvidence(
+        AudioChunk chunk,
+        long startMs,
+        long endMs,
+        long chunkDurationMs,
+        LocalChunkValidationReason reason
+    ) {
+        log.debug("DashScope ASR chunk evidence rejected chunkIndex={} startMs={} endMs={} chunkDurationMs={} toleranceMs={} reason={}",
+            chunk.index(), startMs, endMs, chunkDurationMs, LOCAL_CHUNK_TOLERANCE_MS, reason);
+        throw invalidResponse("DashScope ASR 长音频分片时间证据超出物理范围");
+    }
+
+    private void rejectLocalChunkEvidence(
+        AudioChunk chunk,
+        TranscriptEvidenceSegmenter.TimedWord word,
+        long chunkDurationMs,
+        LocalChunkValidationReason reason
+    ) {
+        log.debug("DashScope ASR chunk evidence rejected chunkIndex={} startMs={} endMs={} chunkDurationMs={} toleranceMs={} reason={}",
+            chunk.index(), word.beginMs(), word.endMs(), chunkDurationMs, LOCAL_CHUNK_TOLERANCE_MS, reason);
+        throw invalidResponse("DashScope ASR 长音频分片时间证据超出物理范围");
+    }
+
+    private long maxWavBytesForTarget() {
+        return ((targetDataUriChars - WAV_DATA_URI_PREFIX.length()) / 4L) * 3L;
+    }
+
+    private long durationMs(long frameCount, int frameRate) {
+        return Math.round(frameCount * 1_000.0 / frameRate);
+    }
+
+    private long fileSize(Path file) {
         try {
-            if (!Files.isRegularFile(audioSource.file())
-                || Files.isSymbolicLink(audioSource.file())) {
+            return Files.size(file);
+        } catch (IOException exception) {
+            throw new VideoAgentException(ErrorCode.ASR_REQUEST_FAILED, "DashScope ASR 无法读取输入音频");
+        }
+    }
+
+    private void logFinalSegments(List<TranscriptSegment> segments) {
+        long minStartMs = segments.stream().mapToLong(TranscriptSegment::startMs).min().orElse(-1L);
+        long maxEndMs = segments.stream().mapToLong(TranscriptSegment::endMs).max().orElse(-1L);
+        log.debug("DashScope ASR final transcript returnedSegments={} minStartMs={} maxEndMs={}",
+            segments.size(), minStartMs, maxEndMs);
+    }
+
+    private String wavDataUri(Path audioFile) {
+        try {
+            if (!Files.isRegularFile(audioFile)
+                || Files.isSymbolicLink(audioFile)) {
                 throw new VideoAgentException(
                     ErrorCode.ASR_REQUEST_FAILED,
                     "DashScope ASR 输入音频无效"
                 );
             }
-            long size = Files.size(audioSource.file());
+            long size = Files.size(audioFile);
             long encodedChars = 4L * ((size + 2L) / 3L);
             if (size == 0 || encodedChars + WAV_DATA_URI_PREFIX.length() > MAX_DATA_URI_CHARS) {
                 throw new VideoAgentException(
@@ -146,7 +394,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                 );
             }
             return WAV_DATA_URI_PREFIX + Base64.getEncoder().encodeToString(
-                Files.readAllBytes(audioSource.file())
+                Files.readAllBytes(audioFile)
             );
         } catch (VideoAgentException exception) {
             throw exception;
@@ -172,11 +420,7 @@ public class DashScopeAsrProvider implements AsrProvider {
         );
     }
 
-    private List<TranscriptSegment> parseSse(
-        InputStream inputStream,
-        Integer videoDurationSeconds
-    ) throws IOException {
-        List<TranscriptSegment> segments = new ArrayList<>();
+    private List<FinalSentenceCandidate> parseSse(InputStream inputStream) throws IOException {
         List<FinalSentenceCandidate> candidates = new ArrayList<>();
         SseDiagnostics diagnostics = new SseDiagnostics();
         try {
@@ -211,12 +455,9 @@ public class DashScopeAsrProvider implements AsrProvider {
             NormalizationResult normalized = normalizeCandidates(candidates);
             log.debug("DashScope ASR final candidate normalization candidates={} canonical={} duplicates={} superseded={}",
                 candidates.size(), normalized.candidates().size(), normalized.duplicates(), normalized.superseded());
-            for (FinalSentenceCandidate candidate : normalized.candidates()) {
-                refineCandidate(candidate, segments, videoDurationSeconds);
-            }
-            return segments;
+            return normalized.candidates();
         } finally {
-            diagnostics.logSummary(segments);
+            diagnostics.logSummary();
         }
     }
 
@@ -257,14 +498,11 @@ public class DashScopeAsrProvider implements AsrProvider {
                 || text.asText().isBlank()) {
                 throw invalidResponse("DashScope ASR 最终句子字段无效");
             }
-            TranscriptSegment finalSentence = new TranscriptSegment(
-                beginTime.longValue(),
-                endTime.longValue(),
-                text.asText()
-            );
             TimedWordsParseResult parsedWords = timedWords(sentence);
             candidates.add(new FinalSentenceCandidate(
-                finalSentence,
+                beginTime.longValue(),
+                endTime.longValue(),
+                text.asText(),
                 sentence.deepCopy(),
                 parsedWords,
                 sentence.path("sentence_id").isValueNode() ? sentence.path("sentence_id").asText() : null
@@ -280,17 +518,16 @@ public class DashScopeAsrProvider implements AsrProvider {
         Integer videoDurationSeconds
     ) {
         TimedWordsParseResult parsedWords = candidate.parsedWords();
-        TranscriptSegment finalSentence = candidate.finalSentence();
         if (parsedWords.reason() != null) {
             log.debug("DashScope ASR timed-word parsing fallback rawWordCount={} parsedTimedWordCount={} reason={} wordIndex={}",
                 parsedWords.rawWordCount(), parsedWords.parsedTimedWordCount(), parsedWords.reason(), parsedWords.wordIndex());
             log.debug("DashScope ASR evidence refinement fallback reason={} inputTimedWords={}",
                 TranscriptEvidenceSegmenter.FallbackReason.INVALID_WORD_FIELD, parsedWords.words().size());
-            segments.add(finalSentence);
+            segments.add(new TranscriptSegment(candidate.beginMs(), candidate.endMs(), candidate.text()));
             return;
         }
         TranscriptEvidenceSegmenter.RefinementResult refinement = evidenceSegmenter.refineWithDiagnostics(
-            finalSentence, parsedWords.words(), videoDurationSeconds
+            candidate.beginMs(), candidate.endMs(), candidate.text(), parsedWords.words(), videoDurationSeconds
         );
         if (refinement.refined()) {
             TranscriptEvidenceSegmenter.DurationPolicy policy = refinement.policy();
@@ -321,7 +558,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                 superseded++;
                 continue;
             }
-            if (candidate.finalSentence().startMs() >= previous.finalSentence().endMs()) {
+            if (candidate.beginMs() >= previous.endMs()) {
                 canonical.add(candidate);
                 continue;
             }
@@ -331,7 +568,9 @@ public class DashScopeAsrProvider implements AsrProvider {
     }
 
     private boolean isExactDuplicate(FinalSentenceCandidate previous, FinalSentenceCandidate candidate) {
-        return previous.finalSentence().equals(candidate.finalSentence())
+        return previous.beginMs() == candidate.beginMs()
+            && previous.endMs() == candidate.endMs()
+            && previous.text().equals(candidate.text())
             && previous.providerSnapshot().equals(candidate.providerSnapshot());
     }
 
@@ -340,8 +579,8 @@ public class DashScopeAsrProvider implements AsrProvider {
         List<TranscriptEvidenceSegmenter.TimedWord> laterWords = candidate.parsedWords().words();
         if (previous.parsedWords().reason() != null || candidate.parsedWords().reason() != null
             || earlierWords.isEmpty() || laterWords.size() <= earlierWords.size()
-            || candidate.finalSentence().startMs() != previous.finalSentence().startMs()
-            || candidate.finalSentence().endMs() <= previous.finalSentence().endMs()) {
+            || candidate.beginMs() != previous.beginMs()
+            || candidate.endMs() <= previous.endMs()) {
             return false;
         }
         return laterWords.subList(0, earlierWords.size()).equals(earlierWords);
@@ -352,8 +591,8 @@ public class DashScopeAsrProvider implements AsrProvider {
         FinalSentenceCandidate candidate
     ) {
         log.debug("DashScope ASR final candidate normalization ambiguous overlap previousBeginTime={} previousEndTime={} previousWordCount={} candidateBeginTime={} candidateEndTime={} candidateWordCount={}",
-            previous.finalSentence().startMs(), previous.finalSentence().endMs(), previous.parsedWords().rawWordCount(),
-            candidate.finalSentence().startMs(), candidate.finalSentence().endMs(), candidate.parsedWords().rawWordCount());
+            previous.beginMs(), previous.endMs(), previous.parsedWords().rawWordCount(),
+            candidate.beginMs(), candidate.endMs(), candidate.parsedWords().rawWordCount());
         return invalidResponse("DashScope ASR 最终句子快照重叠且无法安全归一化");
     }
 
@@ -493,7 +732,9 @@ public class DashScopeAsrProvider implements AsrProvider {
     }
 
     private record FinalSentenceCandidate(
-        TranscriptSegment finalSentence,
+        long beginMs,
+        long endMs,
+        String text,
         JsonNode providerSnapshot,
         TimedWordsParseResult parsedWords,
         String sentenceId
@@ -505,6 +746,17 @@ public class DashScopeAsrProvider implements AsrProvider {
         int duplicates,
         int superseded
     ) {
+    }
+
+    private record DashScopeChunkEvidence(List<FinalSentenceCandidate> candidates) {
+    }
+
+    private enum LocalChunkValidationReason {
+        NEGATIVE_START,
+        NON_POSITIVE_DURATION,
+        START_REGRESSION,
+        END_REGRESSION,
+        EXCEEDS_CHUNK_DURATION
     }
 
     private static final class SseDiagnostics {
@@ -531,11 +783,9 @@ public class DashScopeAsrProvider implements AsrProvider {
             ));
         }
 
-        private void logSummary(List<TranscriptSegment> segments) {
-            long minStartMs = segments.stream().mapToLong(TranscriptSegment::startMs).min().orElse(-1L);
-            long maxEndMs = segments.stream().mapToLong(TranscriptSegment::endMs).max().orElse(-1L);
-            log.debug("DashScope ASR SSE parsedEvents={} resultEvents={} finalSentences={} returnedSegments={} minStartMs={} maxEndMs={}",
-                totalEventCount, resultEventCount, finalSentenceCount, segments.size(), minStartMs, maxEndMs);
+        private void logSummary() {
+            log.debug("DashScope ASR SSE parsedEvents={} resultEvents={} finalSentences={}",
+                totalEventCount, resultEventCount, finalSentenceCount);
             for (int index = 0; index < finalSentences.size(); index++) {
                 FinalSentenceMetadata sentence = finalSentences.get(index);
                 log.debug("DashScope ASR final sentence index={} sentenceId={} beginTime={} endTime={} wordCount={}",
