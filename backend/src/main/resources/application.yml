@@ -54,6 +54,7 @@ videoagent:
     analysis-type: ${VIDEO_ANALYSIS_TYPE:STRUCTURED_SUMMARY}
     model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m5-langchain4j-structured-v1}
     progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
+    max-video-duration: ${ANALYSIS_MAX_VIDEO_DURATION:60m}
     reliability:
       max-attempts: ${ANALYSIS_MAX_ATTEMPTS:3}
       processing-lease: ${ANALYSIS_PROCESSING_LEASE:15m}
@@ -134,3 +135,4 @@ videoagent:
       timeout: ${LLM_TIMEOUT:60s}
       max-retries: ${LLM_MAX_RETRIES:1}
       structured-output-mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_schema}
+      max-user-prompt-chars: ${LLM_MAX_USER_PROMPT_CHARS:50000}

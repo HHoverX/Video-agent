@@ -1,6 +1,7 @@
 package com.videoagent.summary.provider;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 import java.time.Duration;
 
@@ -12,8 +13,22 @@ public record SummaryProviderProperties(
     String baseUrl,
     Duration timeout,
     Integer maxRetries,
-    String structuredOutputMode
+    String structuredOutputMode,
+    Integer maxUserPromptChars
 ) {
+    public SummaryProviderProperties(
+        String provider,
+        String apiKey,
+        String model,
+        String baseUrl,
+        Duration timeout,
+        Integer maxRetries,
+        String structuredOutputMode
+    ) {
+        this(provider, apiKey, model, baseUrl, timeout, maxRetries, structuredOutputMode, null);
+    }
+
+    @ConstructorBinding
     public SummaryProviderProperties {
         provider = defaultIfBlank(provider, "mock").toLowerCase();
         apiKey = apiKey == null ? "" : apiKey.strip();
@@ -23,11 +38,15 @@ public record SummaryProviderProperties(
         maxRetries = maxRetries == null ? 1 : maxRetries;
         structuredOutputMode = defaultIfBlank(structuredOutputMode, "json_schema")
             .toLowerCase(java.util.Locale.ROOT);
+        maxUserPromptChars = maxUserPromptChars == null ? 50_000 : maxUserPromptChars;
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("LLM timeout must be positive");
         }
         if (maxRetries < 0 || maxRetries > 3) {
             throw new IllegalArgumentException("LLM maxRetries must be between 0 and 3");
+        }
+        if (maxUserPromptChars <= 0) {
+            throw new IllegalArgumentException("LLM maxUserPromptChars must be positive");
         }
         if (!structuredOutputMode.equals("json_schema")
             && !structuredOutputMode.equals("json_object")

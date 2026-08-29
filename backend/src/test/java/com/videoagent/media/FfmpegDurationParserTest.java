@@ -9,9 +9,9 @@ import org.junit.jupiter.api.Test;
 class FfmpegDurationParserTest {
 
     @Test
-    void shouldRoundPositiveFractionalDurationToNearestSecondWithMinimumOne() {
+    void shouldRoundPositiveFractionalDurationUpWithMinimumOne() {
         assertThat(FfmpegMediaProcessor.parseDurationSeconds("0.1")).isEqualTo(OptionalInt.of(1));
-        assertThat(FfmpegMediaProcessor.parseDurationSeconds("1.49")).isEqualTo(OptionalInt.of(1));
+        assertThat(FfmpegMediaProcessor.parseDurationSeconds("1.49")).isEqualTo(OptionalInt.of(2));
         assertThat(FfmpegMediaProcessor.parseDurationSeconds("1.5")).isEqualTo(OptionalInt.of(2));
     }
 

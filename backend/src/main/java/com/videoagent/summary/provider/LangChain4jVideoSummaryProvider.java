@@ -7,19 +7,30 @@ import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.exception.NonRetriableException;
 import dev.langchain4j.exception.RetriableException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class LangChain4jVideoSummaryProvider implements VideoSummaryProvider {
 
+    private static final Logger log = LoggerFactory.getLogger(LangChain4jVideoSummaryProvider.class);
+
     private final LangChain4jSummaryAiService aiService;
+    private final int maxUserPromptChars;
+
     public LangChain4jVideoSummaryProvider(
-        LangChain4jSummaryAiService aiService
+        LangChain4jSummaryAiService aiService,
+        int maxUserPromptChars
     ) {
         this.aiService = aiService;
+        this.maxUserPromptChars = maxUserPromptChars;
     }
 
     @Override
     public VideoSummaryDraft summarize(VideoSummaryRequest request) {
         try {
-            return aiService.summarize(prompt(request));
+            String userPrompt = prompt(request);
+            validateUserPromptBudget(request, userPrompt);
+            return aiService.summarize(userPrompt);
         } catch (VideoAgentException exception) {
             throw exception;
         } catch (HttpException exception) {
@@ -69,7 +80,7 @@ public class LangChain4jVideoSummaryProvider implements VideoSummaryProvider {
         return message == null || message.isBlank() ? "未知错误" : message;
     }
 
-    private String prompt(VideoSummaryRequest request) {
+    String prompt(VideoSummaryRequest request) {
         StringBuilder transcript = new StringBuilder();
         for (int index = 0; index < request.transcriptSegments().size(); index++) {
             var segment = request.transcriptSegments().get(index);
@@ -95,6 +106,20 @@ public class LangChain4jVideoSummaryProvider implements VideoSummaryProvider {
             request.videoId(),
             request.taskId(),
             transcript
+        );
+    }
+
+    private void validateUserPromptBudget(VideoSummaryRequest request, String userPrompt) {
+        int actualUserPromptChars = userPrompt.length();
+        if (actualUserPromptChars <= maxUserPromptChars) {
+            return;
+        }
+        log.warn("[videoId={}][taskId={}][stage=SUMMARY_INPUT_GUARD] actualUserPromptChars={} maxUserPromptChars={} evidenceCount={}",
+            request.videoId(), request.taskId(), actualUserPromptChars, maxUserPromptChars,
+            request.transcriptSegments().size());
+        throw new VideoAgentException(
+            ErrorCode.SUMMARY_INPUT_TOO_LARGE,
+            "视频字幕内容超过当前 AI 总结支持范围，请缩短视频后重试"
         );
     }
 }

@@ -176,8 +176,8 @@ public class FfmpegMediaProcessor implements MediaProcessor {
             if (!Double.isFinite(seconds) || seconds <= 0) {
                 return OptionalInt.empty();
             }
-            long rounded = Math.max(1L, Math.round(seconds));
-            return rounded > Integer.MAX_VALUE ? OptionalInt.empty() : OptionalInt.of((int) rounded);
+            long roundedUp = Math.max(1L, (long) Math.ceil(seconds));
+            return roundedUp > Integer.MAX_VALUE ? OptionalInt.empty() : OptionalInt.of((int) roundedUp);
         } catch (NumberFormatException exception) {
             return OptionalInt.empty();
         }

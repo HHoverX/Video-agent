@@ -53,6 +53,16 @@ class SummaryProviderConfigurationTest {
     }
 
     @Test
+    void shouldDefaultAndValidateMaxUserPromptChars() {
+        assertThat(new SummaryProviderProperties(null, null, null, null, null, null, null)
+            .maxUserPromptChars()).isEqualTo(50_000);
+        assertThatThrownBy(() -> new SummaryProviderProperties(
+            "mock", "", "", "", Duration.ofSeconds(5), 0, null, 0
+        )).isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("maxUserPromptChars");
+    }
+
+    @Test
     void shouldBuildOpenAiCompatibleProviderInJsonObjectModeForDeepSeek() {
         VideoSummaryProvider provider = configuration.videoSummaryProvider(
             new SummaryProviderProperties(

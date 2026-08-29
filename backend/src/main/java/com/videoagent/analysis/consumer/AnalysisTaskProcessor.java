@@ -17,6 +17,7 @@ import com.videoagent.asr.AudioSource;
 import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.asr.TranscriptionResult;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.media.AudioExtractResult;
 import com.videoagent.media.MediaProcessor;
 import com.videoagent.media.MediaWorkspace;
@@ -185,7 +186,8 @@ public class AnalysisTaskProcessor {
             } else {
                 try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
                     storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
-                    persistDurationIfMissing(video, workspace.videoFile());
+                    Integer effectiveDurationSeconds = probeDurationAndPersistIfMissing(video, workspace.videoFile());
+                    validateVideoDuration(task, effectiveDurationSeconds);
                     lastProgress = advance(task, generation, AnalysisStage.EXTRACTING_AUDIO, 35);
                     AudioExtractResult audio = mediaProcessor.extractAudio(
                         workspace.videoFile(),
@@ -308,29 +310,42 @@ public class AnalysisTaskProcessor {
         }
         try (MediaWorkspace workspace = workspaceFactory.create(task.getId())) {
             storageService.downloadObject(video.getObjectKey(), workspace.videoFile());
-            persistDurationIfMissing(video, workspace.videoFile());
+            probeDurationAndPersistIfMissing(video, workspace.videoFile());
         } catch (RuntimeException exception) {
             log.warn("[taskId={}][videoId={}][stage=PROBE_DURATION] unable to obtain source media for duration probe: {}",
                 task.getId(), task.getVideoId(), exception.getClass().getSimpleName());
         }
     }
 
-    private void persistDurationIfMissing(VideoEntity video, java.nio.file.Path videoFile) {
-        if (video.getDurationSeconds() != null) {
-            return;
-        }
+    private Integer probeDurationAndPersistIfMissing(VideoEntity video, java.nio.file.Path videoFile) {
         OptionalInt duration = mediaProcessor.probeDurationSeconds(videoFile);
         if (duration.isEmpty()) {
+            return null;
+        }
+        int affectedRows = 0;
+        if (video.getDurationSeconds() == null) {
+            affectedRows = videoRepository.updateDurationSecondsIfMissing(
+                video.getId(), duration.getAsInt(), LocalDateTime.now()
+            );
+            if (affectedRows == 1) {
+                video.setDurationSeconds(duration.getAsInt());
+            }
+        }
+        log.debug("[videoId={}] duration probe probedDurationSeconds={} durationPersistenceAffectedRows={} persistedDurationSeconds={}",
+            video.getId(), duration.getAsInt(), affectedRows, video.getDurationSeconds());
+        return duration.getAsInt();
+    }
+
+    private void validateVideoDuration(AnalysisTaskEntity task, Integer durationSeconds) {
+        if (durationSeconds == null || durationSeconds <= properties.maxVideoDuration().toSeconds()) {
             return;
         }
-        int affectedRows = videoRepository.updateDurationSecondsIfMissing(
-            video.getId(), duration.getAsInt(), LocalDateTime.now()
+        log.warn("[taskId={}][videoId={}][stage=DURATION_GUARD] durationSeconds={} maxVideoDurationSeconds={}",
+            task.getId(), task.getVideoId(), durationSeconds, properties.maxVideoDuration().toSeconds());
+        throw new VideoAgentException(
+            ErrorCode.ANALYSIS_VIDEO_TOO_LONG,
+            "视频时长超过当前 AI 分析支持范围，请缩短视频后重试"
         );
-        if (affectedRows == 1) {
-            video.setDurationSeconds(duration.getAsInt());
-        }
-        log.debug("[videoId={}] duration probe probedDurationSeconds={} durationPersistenceAffectedRows={} effectiveDurationSeconds={}",
-            video.getId(), duration.getAsInt(), affectedRows, video.getDurationSeconds());
     }
 
     private void handleFailure(

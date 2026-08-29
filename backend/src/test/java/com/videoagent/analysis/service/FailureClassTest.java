@@ -38,11 +38,15 @@ class FailureClassTest {
             .isEqualTo(FailureClass.NON_RETRYABLE);
         assertThat(FailureClass.of(new VideoAgentException(ErrorCode.ASR_INPUT_TOO_LARGE)))
             .isEqualTo(FailureClass.NON_RETRYABLE);
+        assertThat(FailureClass.of(new VideoAgentException(ErrorCode.ANALYSIS_VIDEO_TOO_LONG)))
+            .isEqualTo(FailureClass.NON_RETRYABLE);
         assertThat(FailureClass.of(new VideoAgentException(ErrorCode.ASR_RESPONSE_INVALID)))
             .isEqualTo(FailureClass.NON_RETRYABLE);
         assertThat(FailureClass.of(new VideoAgentException(ErrorCode.LLM_PROVIDER_REJECTED)))
             .isEqualTo(FailureClass.NON_RETRYABLE);
         assertThat(FailureClass.of(new VideoAgentException(ErrorCode.LLM_SUMMARY_INVALID)))
+            .isEqualTo(FailureClass.NON_RETRYABLE);
+        assertThat(FailureClass.of(new VideoAgentException(ErrorCode.SUMMARY_INPUT_TOO_LARGE)))
             .isEqualTo(FailureClass.NON_RETRYABLE);
         assertThat(FailureClass.of(new VideoAgentException(ErrorCode.FFMPEG_EXECUTION_FAILED)))
             .isEqualTo(FailureClass.NON_RETRYABLE);

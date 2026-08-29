@@ -56,6 +56,6 @@ public class SummaryProviderConfiguration {
             LangChain4jSummaryAiService.class,
             chatModel
         );
-        return new LangChain4jVideoSummaryProvider(aiService);
+        return new LangChain4jVideoSummaryProvider(aiService, properties.maxUserPromptChars());
     }
 }

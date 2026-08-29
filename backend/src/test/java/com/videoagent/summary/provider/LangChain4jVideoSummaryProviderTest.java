@@ -3,7 +3,10 @@ package com.videoagent.summary.provider;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.videoagent.asr.TranscriptSegment;
@@ -16,11 +19,12 @@ import dev.langchain4j.exception.InvalidRequestException;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.ArrayList;
 
 class LangChain4jVideoSummaryProviderTest {
 
     private final LangChain4jSummaryAiService aiService = mock(LangChain4jSummaryAiService.class);
-    private final LangChain4jVideoSummaryProvider provider = new LangChain4jVideoSummaryProvider(aiService);
+    private final LangChain4jVideoSummaryProvider provider = new LangChain4jVideoSummaryProvider(aiService, 50_000);
 
     @Test
     void shouldReturnEvidenceIdDraftAndIncludeAuthoritativeTimesInPrompt() {
@@ -87,11 +91,66 @@ class LangChain4jVideoSummaryProviderTest {
                 .isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED.name()));
     }
 
+    @Test
+    void shouldAllowActualUserPromptsAtOrBelowConfiguredBudgetAndRejectAboveBeforeModelInvocation() {
+        VideoSummaryRequest below = requestWithPromptChars(49_999);
+        VideoSummaryRequest atLimit = requestWithPromptChars(50_000);
+        VideoSummaryRequest above = requestWithPromptChars(50_001);
+        when(aiService.summarize(anyString())).thenReturn(draft());
+
+        provider.summarize(below);
+        provider.summarize(atLimit);
+
+        assertThatThrownBy(() -> provider.summarize(above))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception -> {
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.SUMMARY_INPUT_TOO_LARGE);
+                assertThat(exception.getMessage()).doesNotContain("[E", "transcript");
+            });
+        verify(aiService).summarize(provider.prompt(below));
+        verify(aiService).summarize(provider.prompt(atLimit));
+        verify(aiService, never()).summarize(provider.prompt(above));
+    }
+
     private VideoSummaryRequest request() {
         return new VideoSummaryRequest(
             7L,
             11L,
             List.of(new TranscriptSegment(0, 2_000, "transcript"))
+        );
+    }
+
+    private VideoSummaryRequest requestWithPromptChars(int promptChars) {
+        List<String> texts = new ArrayList<>(List.of("x"));
+        while (true) {
+            List<String> candidate = new ArrayList<>(texts);
+            candidate.add(candidate.size() - 1, "x".repeat(1_800));
+            if (provider.prompt(request(candidate)).length() > promptChars) {
+                break;
+            }
+            texts = candidate;
+        }
+        int delta = promptChars - provider.prompt(request(texts)).length();
+        texts.set(texts.size() - 1, "x".repeat(texts.getLast().length() + delta));
+        VideoSummaryRequest request = request(texts);
+        assertThat(provider.prompt(request)).hasSize(promptChars);
+        return request;
+    }
+
+    private VideoSummaryRequest request(List<String> texts) {
+        return new VideoSummaryRequest(
+            7L,
+            11L,
+            java.util.stream.IntStream.range(0, texts.size())
+                .mapToObj(index -> new TranscriptSegment(index * 2_000L, index * 2_000L + 1_000L, texts.get(index)))
+                .toList()
+        );
+    }
+
+    private VideoSummaryDraft draft() {
+        return new VideoSummaryDraft(
+            "overview",
+            List.of(new VideoSummaryDraft.Chapter("chapter", "summary", "E0", "E0")),
+            List.of(new VideoSummaryDraft.KeyPoint("point", "E0", "E0"))
         );
     }
 }

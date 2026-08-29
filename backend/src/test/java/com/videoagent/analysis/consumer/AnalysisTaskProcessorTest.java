@@ -1,6 +1,7 @@
 package com.videoagent.analysis.consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -79,7 +80,8 @@ class AnalysisTaskProcessorTest {
             "test-consumer",
             "STRUCTURED_SUMMARY",
             "m5-langchain4j-structured-v1",
-            Duration.ofHours(24)
+            Duration.ofHours(24),
+            Duration.ofHours(1)
         );
         processor = new AnalysisTaskProcessor(
             repository,
@@ -213,6 +215,66 @@ class AnalysisTaskProcessorTest {
         verify(transcriptService, never()).replaceTaskSegments(any(), any());
         verify(summaryProvider).summarize(any());
         verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
+    }
+
+    @Test
+    void shouldRejectNonPositiveAnalysisMaxVideoDuration() {
+        assertThatThrownBy(() -> new AnalysisProperties(
+            "topic", "consumer", "type", "version", Duration.ofHours(24), Duration.ZERO
+        )).isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("maxVideoDuration");
+    }
+
+    @Test
+    void shouldAllowVideoDurationAtConfiguredAnalysisLimit() {
+        processSupportedVideoDuration(3_600);
+    }
+
+    @Test
+    void shouldAllowVideoDurationBelowConfiguredAnalysisLimit() {
+        processSupportedVideoDuration(3_599);
+    }
+
+    @Test
+    void shouldRejectCurrentProbedDurationAboveConfiguredLimitDespiteLegacyPersistedDuration() {
+        AnalysisTaskEntity task = taskWithStatus("PENDING");
+        AnalysisTaskEntity claimed = claimedTask(task);
+        VideoEntity video = video();
+        video.setDurationSeconds(3_600);
+        Path source = Path.of("target", "test-media", "source.mp4").toAbsolutePath();
+        Path audio = source.resolveSibling("audio.wav");
+
+        when(repository.selectById(101L)).thenReturn(task, claimed);
+        when(repository.claimPending(eq(101L), eq("PREPARING"), eq(10), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.updateProcessingProgress(eq(101L), anyString(), anyInt(), eq(1), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.markFailedForGeneration(
+            eq(101L), eq(1), eq("ANALYSIS_VIDEO_TOO_LONG"), anyString(), any(LocalDateTime.class)
+        )).thenReturn(1);
+        when(videoRepository.selectById(7L)).thenReturn(video);
+        when(workspaceFactory.create(101L)).thenReturn(workspace);
+        when(workspace.videoFile()).thenReturn(source);
+        when(workspace.audioFile()).thenReturn(audio);
+        when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
+        when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.of(3_601));
+
+        processor.process(new AnalysisMessage(101L, 7L));
+
+        verify(mediaProcessor).probeDurationSeconds(source);
+        verify(videoRepository, never()).updateDurationSecondsIfMissing(anyLong(), anyInt(), any(LocalDateTime.class));
+        verify(mediaProcessor, never()).extractAudio(any(), any());
+        verify(asrProvider, never()).transcribe(any());
+        verify(summaryProvider, never()).summarize(any());
+        verify(repository).markFailedForGeneration(
+            eq(101L), eq(1), eq("ANALYSIS_VIDEO_TOO_LONG"),
+            eq("视频时长超过当前 AI 分析支持范围，请缩短视频后重试"), any(LocalDateTime.class)
+        );
+        verify(terminalNotifier).failed(
+            eq(101L), eq(7L), anyInt(), eq("ANALYSIS_VIDEO_TOO_LONG"),
+            eq("视频时长超过当前 AI 分析支持范围，请缩短视频后重试")
+        );
+        verify(workspace).close();
     }
 
     @Test
@@ -516,6 +578,39 @@ class AnalysisTaskProcessorTest {
         task.setRetryCount(0);
         task.setProcessingGeneration(0);
         return task;
+    }
+
+    private void processSupportedVideoDuration(int durationSeconds) {
+        AnalysisTaskEntity task = taskWithStatus("PENDING");
+        AnalysisTaskEntity claimed = claimedTask(task);
+        VideoEntity video = video();
+        video.setDurationSeconds(durationSeconds);
+        Path source = Path.of("target", "test-media", "source.mp4").toAbsolutePath();
+        Path audio = source.resolveSibling("audio.wav");
+
+        when(repository.selectById(101L)).thenReturn(task, claimed);
+        when(repository.claimPending(eq(101L), eq("PREPARING"), eq(10), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.updateProcessingProgress(eq(101L), anyString(), anyInt(), eq(1), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.markSuccess(eq(101L), eq(1), any(LocalDateTime.class))).thenReturn(1);
+        when(videoRepository.selectById(7L)).thenReturn(video);
+        when(workspaceFactory.create(101L)).thenReturn(workspace);
+        when(workspace.videoFile()).thenReturn(source);
+        when(workspace.audioFile()).thenReturn(audio);
+        when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
+        when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.of(durationSeconds));
+        when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
+        when(asrProvider.transcribe(new AudioSource(audio, durationSeconds))).thenReturn(result());
+        when(summaryProvider.summarize(any())).thenReturn(summaryResult());
+        when(summaryService.taskHasPersistedSummary(101L)).thenReturn(false);
+
+        processor.process(new AnalysisMessage(101L, 7L));
+
+        verify(mediaProcessor).extractAudio(source, audio);
+        verify(mediaProcessor).probeDurationSeconds(source);
+        verify(asrProvider).transcribe(new AudioSource(audio, durationSeconds));
+        verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
     }
 
     private AnalysisTaskEntity claimedTask(AnalysisTaskEntity original) {
