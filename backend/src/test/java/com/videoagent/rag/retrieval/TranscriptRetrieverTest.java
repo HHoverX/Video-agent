@@ -11,6 +11,8 @@ import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.vector.QdrantVectorStore;
 import com.videoagent.rag.vector.VectorPoint;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,6 +55,18 @@ class TranscriptRetrieverTest {
         List<RetrievedChunk> chunks = retriever.retrieve(1L, 7L, "nothing");
 
         assertThat(chunks).isEmpty();
+    }
+
+    @Test
+    void shouldPassQaTelemetryContextToQueryEmbedding() {
+        QaTelemetryContext context = new QaTelemetryContext("request-1", 7L, 3L);
+        when(embeddingProvider.embedQuery("question", context, QaTelemetryRoute.BASIC_RAG))
+            .thenReturn(new float[384]);
+        when(vectorStore.search(1L, 7L, new float[384], 5)).thenReturn(List.of());
+
+        retriever.retrieve(1L, 7L, "question", context, QaTelemetryRoute.BASIC_RAG);
+
+        verify(embeddingProvider).embedQuery("question", context, QaTelemetryRoute.BASIC_RAG);
     }
 
     @Test

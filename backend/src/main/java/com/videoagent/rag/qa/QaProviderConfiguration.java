@@ -3,6 +3,7 @@ package com.videoagent.rag.qa;
 import static dev.langchain4j.model.chat.Capability.RESPONSE_FORMAT_JSON_SCHEMA;
 
 import com.videoagent.summary.provider.SummaryProviderProperties;
+import com.videoagent.telemetry.AiUsageMetrics;
 
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
@@ -19,15 +20,25 @@ public class QaProviderConfiguration {
     private static final Logger log = LoggerFactory.getLogger(QaProviderConfiguration.class);
 
     @Bean
-    public VideoQaProvider videoQaProvider(SummaryProviderProperties properties) {
+    public VideoQaProvider videoQaProvider(
+        SummaryProviderProperties properties,
+        AiUsageMetrics usageMetrics
+    ) {
         return switch (properties.provider()) {
             case "mock" -> new MockVideoQaProvider();
-            case "openai" -> realOrMock(properties);
+            case "openai" -> realOrMock(properties, usageMetrics);
             default -> new MockVideoQaProvider();
         };
     }
 
-    private VideoQaProvider realOrMock(SummaryProviderProperties properties) {
+    VideoQaProvider videoQaProvider(SummaryProviderProperties properties) {
+        return videoQaProvider(properties, AiUsageMetrics.noop());
+    }
+
+    private VideoQaProvider realOrMock(
+        SummaryProviderProperties properties,
+        AiUsageMetrics usageMetrics
+    ) {
         if (!properties.hasRealProviderConfiguration()) {
             log.warn("LLM provider=openai is missing API key or model; using MockVideoQaProvider");
             return new MockVideoQaProvider();
@@ -55,6 +66,6 @@ public class QaProviderConfiguration {
             LangChain4jQaAiService.class,
             chatModel
         );
-        return new LangChain4jVideoQaProvider(aiService);
+        return new LangChain4jVideoQaProvider(aiService, properties, usageMetrics);
     }
 }

@@ -12,6 +12,8 @@ import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.config.EmbeddingProperties;
 import com.videoagent.telemetry.AiUsageMetrics;
 import com.videoagent.telemetry.AnalysisTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -83,6 +85,46 @@ class RealEmbeddingProviderTest {
         assertThat(meterRegistry.get("videoagent.ai.provider.requests")
             .tag("stage", "embedding_document").tag("outcome", "failure")
             .tag("error_category", "HTTP_5XX").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    void shouldRecordOneQaQueryProviderRequestWithQaScope() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        startServer(exchange -> {
+            requestCount.incrementAndGet();
+            respond(exchange, 200, responseFor(1));
+        });
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        RealEmbeddingProvider provider = provider(new AiUsageMetrics(meterRegistry));
+
+        float[] vector = provider.embedQuery(
+            "question",
+            new QaTelemetryContext("request-1", 7L, 3L),
+            QaTelemetryRoute.BASIC_RAG
+        );
+
+        assertThat(vector).containsExactly(1.0f, 2.0f);
+        assertThat(requestCount.get()).isOne();
+        assertThat(meterRegistry.get("videoagent.ai.provider.requests")
+            .tag("scope", "qa").tag("stage", "embedding_query")
+            .tag("mode", "basic_rag").tag("outcome", "success").counter().count()).isEqualTo(1.0d);
+        assertThat(meterRegistry.get("videoagent.ai.input.scale")
+            .tag("scope", "qa").tag("stage", "embedding_query")
+            .tag("input_type", "query_chars").summary().totalAmount()).isEqualTo(8.0d);
+    }
+
+    @Test
+    void shouldKeepQaQueryProviderFailureWhenMetricsRegistryFails() throws Exception {
+        startServer(exchange -> respond(exchange, 500, "{}"));
+        io.micrometer.core.instrument.MeterRegistry failingRegistry =
+            org.mockito.Mockito.mock(io.micrometer.core.instrument.MeterRegistry.class);
+
+        assertThatThrownBy(() -> provider(new AiUsageMetrics(failingRegistry)).embedQuery(
+            "question",
+            new QaTelemetryContext("request-1", 7L, 3L),
+            QaTelemetryRoute.BASIC_RAG
+        )).isInstanceOfSatisfying(VideoAgentException.class, exception ->
+            assertThat(exception.errorCode()).isEqualTo(ErrorCode.EMBEDDING_REQUEST_FAILED));
     }
 
     private RealEmbeddingProvider provider(AiUsageMetrics usageMetrics) {

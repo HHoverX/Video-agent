@@ -25,11 +25,30 @@ class AiUsageMetricsTest {
         );
 
         Meter.Id id = meterRegistry.get("videoagent.ai.logical.calls").meter().getId();
+        assertThat(id.getTag("scope")).isEqualTo("analysis");
         assertThat(id.getTags().stream().map(Tag::getKey)).containsExactlyInAnyOrder(
             "scope", "stage", "provider", "model", "mode", "outcome", "error_category"
         );
         assertThat(id.getTags().stream().map(Tag::getKey))
             .doesNotContain("taskId", "videoId", "generation", "retryCount", "userId");
+    }
+
+    @Test
+    void shouldAcceptExplicitQaScopeWithoutHighCardinalityTags() {
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        AiUsageMetrics metrics = new AiUsageMetrics(meterRegistry);
+
+        metrics.recordLogicalCall(
+            "qa", "qa_basic", "openai", "model", "basic_direct", "success", "none", 12
+        );
+
+        Meter.Id id = meterRegistry.get("videoagent.ai.logical.calls").meter().getId();
+        assertThat(id.getTag("scope")).isEqualTo("qa");
+        assertThat(id.getTags().stream().map(Tag::getKey)).containsExactlyInAnyOrder(
+            "scope", "stage", "provider", "model", "mode", "outcome", "error_category"
+        );
+        assertThat(id.getTags().stream().map(Tag::getKey))
+            .doesNotContain("requestId", "videoId", "analysisTaskId", "userId", "question", "errorMessage");
     }
 
     @Test

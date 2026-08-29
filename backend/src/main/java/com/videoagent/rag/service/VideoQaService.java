@@ -15,6 +15,8 @@ import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 import com.videoagent.video.service.VideoOwnershipService;
 
 import org.slf4j.Logger;
@@ -27,6 +29,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Orchestrates grounded QA across both modes:
@@ -71,22 +75,89 @@ public class VideoQaService {
     }
 
     public QaResponse answer(long videoId, long userId, String question) {
-        ownershipService.requireOwned(videoId, userId);
-        List<VideoTranscriptSegmentEntity> segments =
-            strategyResolver.requireNonEmpty(segmentRepository.findLatestSuccessfulByVideoId(videoId));
-        QaContextMode mode = strategyResolver.resolveMode(segments);
+        return answerInternal(videoId, userId, question, QaTelemetryContext.newRequest(videoId), null);
+    }
 
-        if (mode == QaContextMode.DIRECT_CONTEXT) {
-            return answerDirect(videoId, userId, question, segments);
+    /**
+     * Application-internal entry point for a future Agentic fallback. The
+     * caller owns the request correlation and this method never replaces it.
+     */
+    public QaResponse answerWithContext(
+        long videoId,
+        long userId,
+        String question,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
+    ) {
+        return answerInternal(
+            videoId,
+            userId,
+            question,
+            Objects.requireNonNull(telemetryContext, "telemetryContext"),
+            Objects.requireNonNull(telemetryRoute, "telemetryRoute")
+        );
+    }
+
+    private QaResponse answerInternal(
+        long videoId,
+        long userId,
+        String question,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute routeOverride
+    ) {
+        long startedAtNanos = System.nanoTime();
+        QaTelemetryContext effectiveContext = telemetryContext;
+        QaTelemetryRoute effectiveRoute = routeOverride;
+        String outcome = "failure";
+        String errorCategory = ErrorCode.INTERNAL_ERROR.name();
+        try {
+            ownershipService.requireOwned(videoId, userId);
+            List<VideoTranscriptSegmentEntity> segments =
+                strategyResolver.requireNonEmpty(segmentRepository.findLatestSuccessfulByVideoId(videoId));
+            effectiveContext = effectiveContext.withAnalysisTaskId(segments.getFirst().getTaskId());
+            QaContextMode mode = strategyResolver.resolveMode(segments);
+
+            if (mode == QaContextMode.DIRECT_CONTEXT) {
+                effectiveRoute = routeOverride == null ? QaTelemetryRoute.BASIC_DIRECT : routeOverride;
+                QaResponse response = answerDirect(
+                    videoId, userId, question, segments, effectiveContext, effectiveRoute
+                );
+                outcome = "success";
+                errorCategory = "none";
+                return response;
+            }
+
+            effectiveRoute = routeOverride == null ? QaTelemetryRoute.BASIC_RAG : routeOverride;
+            VideoRagIndexEntity index = ragIndexService.requireReady(videoId, userId);
+            if (index.getAnalysisTaskId() != null) {
+                effectiveContext = effectiveContext.withAnalysisTaskId(index.getAnalysisTaskId());
+            }
+            QaResponse response = answerRag(
+                videoId, userId, question, index, effectiveContext, effectiveRoute
+            );
+            outcome = "success";
+            errorCategory = "none";
+            return response;
+        } catch (VideoAgentException exception) {
+            errorCategory = exception.errorCode().name();
+            throw exception;
+        } finally {
+            long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+            String route = effectiveRoute == null ? "none" : effectiveRoute.value();
+            boolean fallback = effectiveRoute == QaTelemetryRoute.AGENTIC_FALLBACK_BASIC;
+            log.info("event=ai.qa_request requestId={} videoId={} analysisTaskId={} route={} totalDurationMs={} outcome={} errorCategory={} fallback={}",
+                effectiveContext.requestId(), effectiveContext.videoId(), effectiveContext.analysisTaskId(), route,
+                durationMs, outcome, errorCategory, fallback);
         }
-        return answerRag(videoId, userId, question);
     }
 
     private QaResponse answerDirect(
         long videoId,
         long userId,
         String question,
-        List<VideoTranscriptSegmentEntity> segments
+        List<VideoTranscriptSegmentEntity> segments,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
     ) {
         List<VideoQaRequest.ContextItem> context = new ArrayList<>(segments.size());
         for (VideoTranscriptSegmentEntity segment : segments) {
@@ -98,7 +169,9 @@ public class VideoQaService {
                 segment.getEndMs() == null ? 0L : segment.getEndMs()
             ));
         }
-        VideoQaResult result = qaProvider.answer(new VideoQaRequest(videoId, question, context));
+        VideoQaResult result = qaProvider.answer(
+            new VideoQaRequest(videoId, question, context), telemetryContext, telemetryRoute
+        );
 
         Map<Integer, VideoQaRequest.ContextItem> byIndex = new LinkedHashMap<>();
         for (VideoQaRequest.ContextItem item : context) {
@@ -112,9 +185,17 @@ public class VideoQaService {
         return new QaResponse(QaContextMode.DIRECT_CONTEXT.name(), answer, citations);
     }
 
-    private QaResponse answerRag(long videoId, long userId, String question) {
-        VideoRagIndexEntity index = ragIndexService.requireReady(videoId, userId);
-        List<RetrievedChunk> chunks = retriever.retrieve(userId, videoId, question);
+    private QaResponse answerRag(
+        long videoId,
+        long userId,
+        String question,
+        VideoRagIndexEntity index,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
+    ) {
+        List<RetrievedChunk> chunks = retriever.retrieve(
+            userId, videoId, question, telemetryContext, telemetryRoute
+        );
         if (chunks.isEmpty()) {
             log.info("[userId={}][videoId={}][contextMode=RAG] no evidence above minimum score", userId, videoId);
             return new QaResponse(QaContextMode.RAG.name(), INSUFFICIENT_EVIDENCE, List.of());
@@ -129,7 +210,9 @@ public class VideoQaService {
                 chunk.endMs()
             ));
         }
-        VideoQaResult result = qaProvider.answer(new VideoQaRequest(videoId, question, context));
+        VideoQaResult result = qaProvider.answer(
+            new VideoQaRequest(videoId, question, context), telemetryContext, telemetryRoute
+        );
 
         Map<Integer, VideoQaRequest.ContextItem> byIndex = new LinkedHashMap<>();
         for (VideoQaRequest.ContextItem item : context) {

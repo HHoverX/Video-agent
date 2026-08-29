@@ -2,6 +2,9 @@ package com.videoagent.rag.embedding;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -15,6 +18,18 @@ class MockEmbeddingProviderTest {
         float[] a = provider.embedQuery("Redis 用于缓存进度");
         float[] b = provider.embedQuery("Redis 用于缓存进度");
         assertThat(a).containsExactly(b);
+    }
+
+    @Test
+    void shouldKeepQueryBehaviorThroughTelemetryAwareDefaultOverload() {
+        float[] original = provider.embedQuery("Redis 用于缓存进度");
+        float[] withContext = provider.embedQuery(
+            "Redis 用于缓存进度",
+            new QaTelemetryContext("request-1", 7L, 3L),
+            QaTelemetryRoute.BASIC_RAG
+        );
+
+        assertThat(withContext).containsExactly(original);
     }
 
     @Test

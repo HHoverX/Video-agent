@@ -16,7 +16,7 @@ import java.time.Duration;
 @Component
 public final class AiUsageMetrics {
 
-    private static final String SCOPE = "analysis";
+    private static final String ANALYSIS_SCOPE = "analysis";
 
     private final MeterRegistry meterRegistry;
 
@@ -37,8 +37,21 @@ public final class AiUsageMetrics {
         String errorCategory,
         long durationMs
     ) {
+        recordLogicalCall(ANALYSIS_SCOPE, stage, provider, model, mode, outcome, errorCategory, durationMs);
+    }
+
+    public void recordLogicalCall(
+        String scope,
+        String stage,
+        String provider,
+        String model,
+        String mode,
+        String outcome,
+        String errorCategory,
+        long durationMs
+    ) {
         safely(() -> {
-            Tags tags = callTags(stage, provider, model, mode, outcome, errorCategory);
+            Tags tags = callTags(scope, stage, provider, model, mode, outcome, errorCategory);
             meterRegistry.counter("videoagent.ai.logical.calls", tags).increment();
             Timer.builder("videoagent.ai.logical.duration")
                 .tags(tags)
@@ -56,8 +69,21 @@ public final class AiUsageMetrics {
         String errorCategory,
         long durationMs
     ) {
+        recordProviderRequest(ANALYSIS_SCOPE, stage, provider, model, mode, outcome, errorCategory, durationMs);
+    }
+
+    public void recordProviderRequest(
+        String scope,
+        String stage,
+        String provider,
+        String model,
+        String mode,
+        String outcome,
+        String errorCategory,
+        long durationMs
+    ) {
         safely(() -> {
-            Tags tags = callTags(stage, provider, model, mode, outcome, errorCategory);
+            Tags tags = callTags(scope, stage, provider, model, mode, outcome, errorCategory);
             meterRegistry.counter("videoagent.ai.provider.requests", tags).increment();
             Timer.builder("videoagent.ai.provider.request.duration")
                 .tags(tags)
@@ -74,9 +100,21 @@ public final class AiUsageMetrics {
         String inputType,
         long value
     ) {
+        recordInputScale(ANALYSIS_SCOPE, stage, provider, model, mode, inputType, value);
+    }
+
+    public void recordInputScale(
+        String scope,
+        String stage,
+        String provider,
+        String model,
+        String mode,
+        String inputType,
+        long value
+    ) {
         safely(() -> DistributionSummary.builder("videoagent.ai.input.scale")
             .tags(Tags.of(
-                "scope", SCOPE,
+                "scope", tag(scope),
                 "stage", tag(stage),
                 "provider", tag(provider),
                 "model", tag(model),
@@ -88,6 +126,7 @@ public final class AiUsageMetrics {
     }
 
     private Tags callTags(
+        String scope,
         String stage,
         String provider,
         String model,
@@ -96,7 +135,7 @@ public final class AiUsageMetrics {
         String errorCategory
     ) {
         return Tags.of(
-            "scope", SCOPE,
+            "scope", tag(scope),
             "stage", tag(stage),
             "provider", tag(provider),
             "model", tag(model),

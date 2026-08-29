@@ -1,6 +1,8 @@
 package com.videoagent.rag.embedding;
 
 import com.videoagent.telemetry.AnalysisTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 
 import java.util.List;
 
@@ -23,4 +25,12 @@ public interface EmbeddingProvider {
     }
 
     float[] embedQuery(String text);
+
+    default float[] embedQuery(
+        String text,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
+    ) {
+        return embedQuery(text);
+    }
 }

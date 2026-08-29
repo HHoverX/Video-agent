@@ -4,6 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.videoagent.rag.config.EmbeddingProperties;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.Test;
 
@@ -19,6 +24,22 @@ class EmbeddingProviderConfigurationTest {
             new EmbeddingProperties("mock", "", "", "", 384, Duration.ofSeconds(5))
         );
         assertThat(provider).isInstanceOf(MockEmbeddingProvider.class);
+    }
+
+    @Test
+    void shouldNotRecordExternalProviderUsageForMockQuery() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        EmbeddingProvider provider = configuration.embeddingProvider(
+            new EmbeddingProperties("mock", "", "", "", 384, Duration.ofSeconds(5)),
+            new AiUsageMetrics(registry)
+        );
+
+        assertThat(provider.embedQuery(
+            "question",
+            new QaTelemetryContext("request-1", 7L, 3L),
+            QaTelemetryRoute.BASIC_RAG
+        )).hasSize(384);
+        assertThat(registry.find("videoagent.ai.provider.requests").counter()).isNull();
     }
 
     @Test

@@ -4,6 +4,8 @@ import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.vector.QdrantVectorStore;
 import com.videoagent.rag.vector.VectorPoint;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 
 import org.springframework.stereotype.Component;
 
@@ -32,7 +34,24 @@ public class TranscriptRetriever {
     }
 
     public List<RetrievedChunk> retrieve(long userId, long videoId, String question) {
-        float[] queryVector = embeddingProvider.embedQuery(question);
+        return retrieve(userId, videoId, embeddingProvider.embedQuery(question));
+    }
+
+    public List<RetrievedChunk> retrieve(
+        long userId,
+        long videoId,
+        String question,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
+    ) {
+        return retrieve(
+            userId,
+            videoId,
+            embeddingProvider.embedQuery(question, telemetryContext, telemetryRoute)
+        );
+    }
+
+    private List<RetrievedChunk> retrieve(long userId, long videoId, float[] queryVector) {
         List<VectorPoint> hits = vectorStore.search(
             userId,
             videoId,

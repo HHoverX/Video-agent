@@ -1,5 +1,8 @@
 package com.videoagent.rag.qa;
 
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
+
 /**
  * Provides grounded question answering over a given transcript context.
  * Separate from the summary provider because summarization and QA have
@@ -9,4 +12,12 @@ package com.videoagent.rag.qa;
 public interface VideoQaProvider {
 
     VideoQaResult answer(VideoQaRequest request);
+
+    default VideoQaResult answer(
+        VideoQaRequest request,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
+    ) {
+        return answer(request);
+    }
 }

@@ -8,6 +8,8 @@ import com.videoagent.rag.config.EmbeddingProperties;
 import com.videoagent.provider.ProviderHttpFailure;
 import com.videoagent.telemetry.AiUsageMetrics;
 import com.videoagent.telemetry.AnalysisTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,29 +93,52 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
         int batchCount = (texts.size() + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE;
         for (int offset = 0; offset < texts.size(); offset += MAX_BATCH_SIZE) {
             List<String> batch = texts.subList(offset, Math.min(texts.size(), offset + MAX_BATCH_SIZE));
-            all.addAll(embed(batch, context, offset / MAX_BATCH_SIZE, batchCount));
+            all.addAll(embed(batch, context, null, null, offset / MAX_BATCH_SIZE, batchCount));
         }
         return all;
     }
 
     @Override
     public float[] embedQuery(String text) {
-        return embed(List.of(text), AnalysisTelemetryContext.unavailable(), 0, 1).getFirst();
+        return embed(List.of(text), AnalysisTelemetryContext.unavailable(), null, null, 0, 1).getFirst();
+    }
+
+    @Override
+    public float[] embedQuery(
+        String text,
+        QaTelemetryContext telemetryContext,
+        QaTelemetryRoute telemetryRoute
+    ) {
+        return embed(
+            List.of(text),
+            AnalysisTelemetryContext.unavailable(),
+            telemetryContext,
+            telemetryRoute,
+            0,
+            1
+        ).getFirst();
     }
 
     private List<float[]> embed(
         List<String> texts,
         AnalysisTelemetryContext telemetryContext,
+        QaTelemetryContext qaTelemetryContext,
+        QaTelemetryRoute qaTelemetryRoute,
         int batchIndex,
         int batchCount
     ) {
         boolean analysisTelemetry = telemetryContext.taskId() != null;
+        boolean qaTelemetry = qaTelemetryContext != null && qaTelemetryRoute != null;
         long inputChars = texts.stream().mapToLong(text -> text == null ? 0L : text.length()).sum();
         if (analysisTelemetry) {
             usageMetrics.recordInputScale("embedding_document", properties.provider(), properties.model(), "document",
                 "document_count", texts.size());
             usageMetrics.recordInputScale("embedding_document", properties.provider(), properties.model(), "document",
                 "input_chars", inputChars);
+        }
+        if (qaTelemetry) {
+            usageMetrics.recordInputScale("qa", "embedding_query", properties.provider(), properties.model(),
+                qaTelemetryRoute.value(), "query_chars", inputChars);
         }
         long startedAtNanos = System.nanoTime();
         String outcome = "failure";
@@ -171,6 +196,15 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
                 log.info("event=ai.provider_request scope=analysis stage=embedding_document provider={} model={} taskId={} videoId={} generation={} retryCount={} batchIndex={} batchCount={} documentCount={} inputChars={} durationMs={} outcome={} httpStatus={} errorCategory={}",
                     properties.provider(), properties.model(), telemetryContext.taskId(), telemetryContext.videoId(),
                     telemetryContext.generation(), telemetryContext.retryCount(), batchIndex, batchCount, texts.size(),
+                    inputChars, durationMs, outcome, httpStatus < 0 ? null : httpStatus, errorCategory);
+            }
+            if (qaTelemetry) {
+                long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+                usageMetrics.recordProviderRequest("qa", "embedding_query", properties.provider(), properties.model(),
+                    qaTelemetryRoute.value(), outcome, errorCategory, durationMs);
+                log.info("event=ai.provider_request scope=qa stage=embedding_query provider={} model={} requestId={} videoId={} analysisTaskId={} mode={} queryChars={} durationMs={} outcome={} httpStatus={} errorCategory={}",
+                    properties.provider(), properties.model(), qaTelemetryContext.requestId(),
+                    qaTelemetryContext.videoId(), qaTelemetryContext.analysisTaskId(), qaTelemetryRoute.value(),
                     inputChars, durationMs, outcome, httpStatus < 0 ? null : httpStatus, errorCategory);
             }
         }
