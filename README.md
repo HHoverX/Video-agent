@@ -15,7 +15,7 @@ VideoAgent 是一个 Java 后端 + AI 视频理解应用。用户可以上传长
 - 前端：Vue 3、TypeScript、Vite、Pinia、Vue Router、Axios、Element Plus
 - 基础设施：MySQL 8、Redis、MinIO、Apache RocketMQ、Qdrant、Docker Compose
 - 媒体与 AI：FFmpeg、可替换 ASR/LLM/Embedding Provider、确定性 Mock Provider
-- 实时进度：Spring MVC `SseEmitter`、Browser `EventSource`、有限 GET fallback
+- 实时进度：Spring MVC `SseEmitter`、Browser `fetch + AbortController` 读取 SSE、有限 GET fallback
 
 ## 整体链路
 
@@ -27,7 +27,9 @@ flowchart LR
     Browser -->|"分片直传"| MinIO[(MinIO)]
     Browser -->|"确认分片"| API
     API -->|"Compose + 校验"| MinIO
-    API -->|"同一事务：Video + Task + Outbox"| MySQL
+    API -->|"完成时：Video（或复用既有 Video）"| MySQL
+    Browser -->|"显式开始分析"| API
+    API -->|"同一事务：AnalysisTask + Outbox"| MySQL
     Outbox["Outbox Publisher"] --> MQ[(RocketMQ)]
     MySQL --> Outbox
     MQ --> Worker["Analysis Worker"]
@@ -37,7 +39,7 @@ flowchart LR
     RAG --> QA["Evidence 约束回答与后端引用映射"]
 ```
 
-HTTP 完成接口只提交持久任务，不在请求线程中执行 FFmpeg、ASR、总结或向量化。
+上传完成接口只创建或复用持久 Video；用户显式调用 `POST /api/videos/{videoId}/analysis` 后才创建分析任务与 Outbox。两类接口均不在请求线程中执行 FFmpeg、ASR、总结或向量化。
 
 ## 本地启动
 
@@ -49,7 +51,7 @@ Copy-Item .env.example .env
 
 修改 `.env` 中所有 `change-me-*` 值，并至少配置一个足够长的 `JWT_SECRET`。真实账号、密钥和 API Key 不得提交到仓库。示例基线见 `.env.example`，实际默认值见 `backend/src/main/resources/application.yml`。
 
-默认使用 Mock ASR、Mock LLM、Mock Embedding 和 Mock Agent Planner，不需要第三方 API Key。
+默认使用 Mock ASR、Mock LLM、Mock Embedding 和 Mock Agent Planner，不需要第三方 API Key。真实 Provider 通过 `.env.example` 中对应的 `*_PROVIDER` 与凭据/模型变量启用；`LLM_PROVIDER=openai` 时必须同时配置 `LLM_API_KEY` 和 `LLM_MODEL`，否则后端会启动失败。
 
 ### 2. 启动基础设施
 
@@ -70,11 +72,12 @@ Compose 为本地 `http://localhost:5173` 配置了 MinIO CORS。非本地环境
 
 ### 3. 启动后端
 
-需要 Java 21 或更高版本，以及可执行的 FFmpeg。FFmpeg 不在 `PATH` 时设置 `FFMPEG_PATH`：
+需要 Java 21 或更高版本，以及同时包含 `ffmpeg` 和 `ffprobe` 的 FFmpeg 发行版。它们不在 `PATH` 时分别设置 `FFMPEG_PATH` 与 `FFPROBE_PATH`：
 
 ```powershell
 Set-Location backend
 $env:FFMPEG_PATH = 'C:\path\to\ffmpeg.exe'
+$env:FFPROBE_PATH = 'C:\path\to\ffprobe.exe'
 mvn spring-boot:run
 ```
 
@@ -84,7 +87,7 @@ mvn spring-boot:run
 Invoke-RestMethod http://localhost:8080/api/health
 ```
 
-Flyway 会自动执行 `V1`–`V9` 数据库迁移。
+Flyway 会自动执行 `V1`–`V11` 数据库迁移。
 
 ### 4. 启动前端
 
@@ -118,8 +121,8 @@ DELETE /api/uploads/{uploadId}
 3. 客户端为稳定的 `partNumber` 申请短时效预签名 URL，并直接 `PUT` 到 MinIO。视频字节不经过 Spring Boot。
 4. 客户端确认分片后，服务端从 MinIO 读取实际大小和 ETag，再幂等写入 MySQL。
 5. 页面刷新或网络恢复后，客户端查询会话，只补传响应中缺失的分片。前端默认最多 3 个并发请求，支持暂停、继续、取消、进度显示和带抖动的有限重试。
-6. 完成时服务端锁定会话，重新检查所有分片，用 MinIO Compose 生成确定性的正式对象，并校验最终大小、MP4 `ftyp` 头；请求提供整文件 SHA-256 时还会校验摘要。
-7. 同一数据库事务中创建唯一视频、唯一分析任务和待发送 Outbox 事件。并发或重复完成请求返回同一结果，不会重复建视频或任务。
+6. 完成时服务端锁定会话，重新检查所有分片，用 MinIO Compose 生成确定性的正式对象，并校验最终大小、MP4 `ftyp` 头；服务端始终计算最终源对象的 SHA-256，调用方提供整文件 SHA-256 时再比对摘要。
+7. 同一数据库事务中按 `(userId, fileHash)` 创建或复用正式视频并完成会话；并发或重复完成请求返回同一 canonical `videoId`，不会重复建逻辑视频。分析任务和初始 Outbox 事件只在用户显式开始分析时创建。
 
 上传会话状态：
 
@@ -160,7 +163,7 @@ CREATED / UPLOADING / FAILED → CANCELLED 或 EXPIRED
 
 ### 持久化衔接与状态机
 
-`video`、`analysis_task` 和 `analysis_outbox_event` 在同一个 MySQL 事务中保存。Outbox Publisher 独立重试消息发送，避免数据库已提交但 RocketMQ 消息丢失。
+上传完成时保存或复用 `video`；用户显式开始分析时，`analysis_task` 和 `analysis_outbox_event` 在同一个 MySQL 事务中保存。Outbox Publisher 独立重试消息发送，避免数据库已提交但 RocketMQ 消息丢失。
 
 分析任务沿用现有兼容状态名：
 
@@ -289,10 +292,11 @@ mvn '-Dtest=Milestone8AgentInfrastructureIntegrationTest' test
 
 | 验证 | 真实结果 |
 | --- | --- |
-| 后端 `mvn test` | 308 tests，0 failures，0 errors，33 skipped（带开关的基础设施/真实 AI 测试） |
+| 后端 `mvn test` | 435 tests，0 failures，0 errors，43 skipped（带开关的基础设施/真实 AI 测试） |
 | 分片上传基础设施测试 | 1/1 通过；覆盖预签名直传、重复确认、缺片恢复、并发/重复完成、SHA-256、单一视频/任务和跨用户拒绝 |
 | M7 可靠性基础设施测试 | 9/9 通过；覆盖事务 Outbox、重复消息、检查点恢复、过期租约接管、generation 隔离和重试预算 |
 | M8 RAG 基础设施测试 | 2/2 通过；覆盖短/长上下文、Qdrant 过滤和后端 Citation 映射 |
+| 前端 `npm test` | 5 个测试文件 / 22 个测试通过 |
 | 前端 `npm run build` | 构建成功；Vite 仅提示主 chunk 较大 |
 
 没有执行过真实 20GB 文件的压力/性能测试，也没有执行需要付费凭据的真实 ASR、LLM 和 Embedding 端到端 Smoke Test；README 不声明相关性能数据。
@@ -315,7 +319,7 @@ backend/
     rag/         分块、Embedding、Qdrant、QA 与 Citation
     agent/       白名单检索工具与 Planner
     provider/    第三方 HTTP 错误分类
-  src/main/resources/db/migration/  Flyway V1-V9
+  src/main/resources/db/migration/  Flyway V1-V11
 frontend/        Vue 3 Web 应用与可恢复上传客户端
 infra/           RocketMQ 本地配置
 docker-compose.yml
@@ -325,12 +329,12 @@ docker-compose.yml
 
 - 当前只接受 MP4；完成阶段校验容器头，但不做完整媒体解码验证。
 - 前端刷新后受浏览器文件权限限制，需要用户重新选择同一个本地文件，随后会自动查询会话并只补传缺失分片。
-- 前端当前不计算整文件 SHA-256；服务端始终校验分片 ETag、大小、最终大小和 MP4 头，调用方提供 SHA-256 时才做整文件摘要校验。
+- 前端当前不计算整文件 SHA-256；服务端始终校验分片 ETag、大小、最终大小和 MP4 头，并计算、持久化最终源对象 SHA-256；调用方提供 SHA-256 时再比对摘要。
 - MinIO Compose 依赖临时分片对象；生产部署必须监控清理任务并正确配置 CORS、生命周期和存储容量。
 - LangChain4j LLM 适配器能按异常/状态分类重试；如果 SDK 异常不暴露响应头，则无法读取该次 LLM 响应的 `Retry-After`。REST ASR/Embedding 适配器支持该响应头。
 - 默认 Provider 都是 Mock。真实模型质量、限流配额、成本和最大输入需要按供应商单独验证。
 - SSE 订阅者保存在当前应用进程；多实例部署若要跨实例实时推送，需要额外的广播方案。Redis 仍只用作临时进度缓存。
-- 前端尚未提供视频播放器与点击 Citation 跳转播放功能；后端已返回真实时间范围。
+- 前端提供原生视频播放；章节、要点、转录与带时间范围的 Citation 可跳转到对应位置。
 - 已完成正确性测试，但未进行大文件并发压测、故障注入压测或性能基准测试。
 
 当前能力以代码、Flyway 迁移和测试结果为准。
