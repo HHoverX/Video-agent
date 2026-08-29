@@ -43,6 +43,7 @@ import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 import com.videoagent.rag.service.RagIndexService;
+import com.videoagent.telemetry.AnalysisTelemetryContext;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -150,7 +151,8 @@ class AnalysisTaskProcessorTest {
         when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.of(2));
         when(videoRepository.updateDurationSecondsIfMissing(eq(7L), eq(2), any(LocalDateTime.class)))
             .thenReturn(1);
-        when(asrProvider.transcribe(new AudioSource(audio, 2))).thenReturn(transcription);
+        when(asrProvider.transcribe(eq(new AudioSource(audio, 2)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenReturn(summaryResult());
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(summaryService.taskHasPersistedSummary(101L)).thenReturn(false);
@@ -161,7 +163,11 @@ class AnalysisTaskProcessorTest {
         verify(mediaProcessor).probeDurationSeconds(source);
         verify(videoRepository).updateDurationSecondsIfMissing(eq(7L), eq(2), any(LocalDateTime.class));
         verify(mediaProcessor).extractAudio(source, audio);
-        verify(asrProvider).transcribe(new AudioSource(audio, 2));
+        ArgumentCaptor<AnalysisTelemetryContext> telemetryContextCaptor =
+            ArgumentCaptor.forClass(AnalysisTelemetryContext.class);
+        verify(asrProvider).transcribe(eq(new AudioSource(audio, 2)), telemetryContextCaptor.capture());
+        assertThat(telemetryContextCaptor.getValue())
+            .isEqualTo(new AnalysisTelemetryContext(101L, 7L, 1, 0));
         verify(workspace).close();
         verify(transcriptService).replaceTaskSegments(claimed, transcription);
         verify(summaryProvider).summarize(any());
@@ -208,7 +214,7 @@ class AnalysisTaskProcessorTest {
 
         processor.process(new AnalysisMessage(101L, 7L));
 
-        verify(asrProvider, never()).transcribe(any());
+        verify(asrProvider, never()).transcribe(any(AudioSource.class), any(AnalysisTelemetryContext.class));
         verify(mediaProcessor, never()).extractAudio(any(), any());
         verify(mediaProcessor, never()).probeDurationSeconds(any());
         verify(storageService, never()).downloadObject(anyString(), any());
@@ -264,7 +270,7 @@ class AnalysisTaskProcessorTest {
         verify(mediaProcessor).probeDurationSeconds(source);
         verify(videoRepository, never()).updateDurationSecondsIfMissing(anyLong(), anyInt(), any(LocalDateTime.class));
         verify(mediaProcessor, never()).extractAudio(any(), any());
-        verify(asrProvider, never()).transcribe(any());
+        verify(asrProvider, never()).transcribe(any(AudioSource.class), any(AnalysisTelemetryContext.class));
         verify(summaryProvider, never()).summarize(any());
         verify(repository).markFailedForGeneration(
             eq(101L), eq(1), eq("ANALYSIS_VIDEO_TOO_LONG"),
@@ -307,7 +313,7 @@ class AnalysisTaskProcessorTest {
         verify(mediaProcessor).probeDurationSeconds(source);
         verify(videoRepository).updateDurationSecondsIfMissing(eq(7L), eq(4), any(LocalDateTime.class));
         verify(mediaProcessor, never()).extractAudio(any(), any());
-        verify(asrProvider, never()).transcribe(any());
+        verify(asrProvider, never()).transcribe(any(AudioSource.class), any(AnalysisTelemetryContext.class));
     }
 
     @Test
@@ -331,7 +337,8 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.empty());
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio))).thenReturn(transcription);
+        when(asrProvider.transcribe(eq(new AudioSource(audio)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(transcription);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(summaryService.taskHasPersistedSummary(101L)).thenReturn(true);
 
@@ -340,7 +347,7 @@ class AnalysisTaskProcessorTest {
         verify(mediaProcessor).probeDurationSeconds(source);
         verify(videoRepository, never()).updateDurationSecondsIfMissing(anyLong(), anyInt(), any());
         verify(mediaProcessor).extractAudio(source, audio);
-        verify(asrProvider).transcribe(new AudioSource(audio));
+        verify(asrProvider).transcribe(eq(new AudioSource(audio)), any(AnalysisTelemetryContext.class));
         verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
     }
 
@@ -423,7 +430,8 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
+        when(asrProvider.transcribe(eq(new AudioSource(audio, 4)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
             new VideoAgentException(ErrorCode.LLM_SUMMARY_FAILED, "provider unavailable")
         );
@@ -464,7 +472,8 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
+        when(asrProvider.transcribe(eq(new AudioSource(audio, 4)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
             new VideoAgentException(ErrorCode.LLM_SUMMARY_FAILED, "provider unavailable")
         );
@@ -502,7 +511,8 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
+        when(asrProvider.transcribe(eq(new AudioSource(audio, 4)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
             new NullPointerException("unexpected programming error")
         );
@@ -541,7 +551,8 @@ class AnalysisTaskProcessorTest {
         when(workspace.audioFile()).thenReturn(audio);
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio, 4))).thenReturn(transcription);
+        when(asrProvider.transcribe(eq(new AudioSource(audio, 4)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(transcription);
 
         processor.process(new AnalysisMessage(101L, 7L));
 
@@ -601,7 +612,8 @@ class AnalysisTaskProcessorTest {
         when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(false);
         when(mediaProcessor.probeDurationSeconds(source)).thenReturn(OptionalInt.of(durationSeconds));
         when(mediaProcessor.extractAudio(source, audio)).thenReturn(new AudioExtractResult(audio, 128L));
-        when(asrProvider.transcribe(new AudioSource(audio, durationSeconds))).thenReturn(result());
+        when(asrProvider.transcribe(eq(new AudioSource(audio, durationSeconds)), any(AnalysisTelemetryContext.class)))
+            .thenReturn(result());
         when(summaryProvider.summarize(any())).thenReturn(summaryResult());
         when(summaryService.taskHasPersistedSummary(101L)).thenReturn(false);
 
@@ -609,7 +621,7 @@ class AnalysisTaskProcessorTest {
 
         verify(mediaProcessor).extractAudio(source, audio);
         verify(mediaProcessor).probeDurationSeconds(source);
-        verify(asrProvider).transcribe(new AudioSource(audio, durationSeconds));
+        verify(asrProvider).transcribe(eq(new AudioSource(audio, durationSeconds)), any(AnalysisTelemetryContext.class));
         verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
     }
 

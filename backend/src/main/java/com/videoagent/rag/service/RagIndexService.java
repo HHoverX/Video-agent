@@ -18,9 +18,12 @@ import com.videoagent.rag.vector.VectorPoint;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.video.service.VideoOwnershipService;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.AnalysisTelemetryContext;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -32,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Builds and tracks the RAG index lifecycle in MySQL (the source of truth),
@@ -56,7 +60,9 @@ public class RagIndexService {
     private final RagProperties ragProperties;
     private final EmbeddingProperties embeddingProperties;
     private final TransactionTemplate transactionTemplate;
+    private final AiUsageMetrics usageMetrics;
 
+    @Autowired
     public RagIndexService(
         VideoRagIndexRepository indexRepository,
         VideoTranscriptSegmentRepository segmentRepository,
@@ -67,7 +73,8 @@ public class RagIndexService {
         QdrantVectorStore vectorStore,
         RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
-        Optional<PlatformTransactionManager> transactionManager
+        Optional<PlatformTransactionManager> transactionManager,
+        AiUsageMetrics usageMetrics
     ) {
         this.indexRepository = indexRepository;
         this.segmentRepository = segmentRepository;
@@ -79,6 +86,23 @@ public class RagIndexService {
         this.ragProperties = ragProperties;
         this.embeddingProperties = embeddingProperties;
         this.transactionTemplate = transactionManager.map(TransactionTemplate::new).orElse(null);
+        this.usageMetrics = usageMetrics == null ? AiUsageMetrics.noop() : usageMetrics;
+    }
+
+    RagIndexService(
+        VideoRagIndexRepository indexRepository,
+        VideoTranscriptSegmentRepository segmentRepository,
+        VideoOwnershipService ownershipService,
+        ContextStrategyResolver strategyResolver,
+        TranscriptChunker chunker,
+        EmbeddingProvider embeddingProvider,
+        QdrantVectorStore vectorStore,
+        RagProperties ragProperties,
+        EmbeddingProperties embeddingProperties,
+        Optional<PlatformTransactionManager> transactionManager
+    ) {
+        this(indexRepository, segmentRepository, ownershipService, strategyResolver, chunker, embeddingProvider,
+            vectorStore, ragProperties, embeddingProperties, transactionManager, AiUsageMetrics.noop());
     }
 
     @Transactional(readOnly = true)
@@ -144,7 +168,7 @@ public class RagIndexService {
             }
             return candidate;
         });
-        return build(index, userId, videoId, segments, buildToken, false);
+        return build(index, userId, videoId, segments, buildToken, false, AnalysisTelemetryContext.unavailable());
     }
 
     /**
@@ -181,7 +205,10 @@ public class RagIndexService {
             }
             return candidate;
         });
-        return build(index, userId, videoId, segments, buildToken, true);
+        AnalysisTelemetryContext telemetryContext = new AnalysisTelemetryContext(
+            task.getId(), task.getVideoId(), task.getProcessingGeneration(), task.getRetryCount()
+        );
+        return build(index, userId, videoId, segments, buildToken, true, telemetryContext);
     }
 
     private VideoRagIndexEntity build(
@@ -190,12 +217,13 @@ public class RagIndexService {
         long videoId,
         List<VideoTranscriptSegmentEntity> segments,
         String buildToken,
-        boolean propagateFailure
+        boolean propagateFailure,
+        AnalysisTelemetryContext telemetryContext
     ) {
         try {
             List<TranscriptChunk> chunks = chunker.chunk(segments);
             List<String> texts = chunks.stream().map(TranscriptChunk::text).toList();
-            List<float[]> vectors = embeddingProvider.embedDocuments(texts);
+            List<float[]> vectors = embedDocuments(texts, telemetryContext);
             vectorStore.ensureCollection(embeddingProperties.dimension());
 
             List<VectorPoint> points = new ArrayList<>(chunks.size());
@@ -239,6 +267,36 @@ public class RagIndexService {
                 throw exception;
             }
             return indexRepository.selectById(index.getId());
+        }
+    }
+
+    private List<float[]> embedDocuments(List<String> texts, AnalysisTelemetryContext telemetryContext) {
+        if (telemetryContext.taskId() == null) {
+            return embeddingProvider.embedDocuments(texts);
+        }
+        long startedAtNanos = System.nanoTime();
+        String outcome = "failure";
+        String errorCategory = ErrorCode.RAG_INDEX_BUILD_FAILED.name();
+        try {
+            List<float[]> vectors = embeddingProvider.embedDocuments(texts, telemetryContext);
+            outcome = "success";
+            errorCategory = "none";
+            return vectors;
+        } catch (RuntimeException exception) {
+            if (exception instanceof VideoAgentException providerFailure) {
+                errorCategory = providerFailure.errorCode().name();
+            } else {
+                errorCategory = ErrorCode.RAG_INDEX_BUILD_FAILED.name();
+            }
+            throw exception;
+        } finally {
+            long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+            usageMetrics.recordLogicalCall("embedding_document", embeddingProvider.providerName(),
+                embeddingProperties.model(), "document", outcome, errorCategory, durationMs);
+            log.info("event=ai.logical_call scope=analysis stage=embedding_document provider={} model={} taskId={} videoId={} generation={} retryCount={} documentCount={} durationMs={} outcome={} errorCategory={}",
+                embeddingProvider.providerName(), embeddingProperties.model(), telemetryContext.taskId(),
+                telemetryContext.videoId(), telemetryContext.generation(), telemetryContext.retryCount(), texts.size(),
+                durationMs, outcome, errorCategory);
         }
     }
 

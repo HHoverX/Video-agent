@@ -6,6 +6,8 @@ import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.config.EmbeddingProperties;
 import com.videoagent.provider.ProviderHttpFailure;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.AnalysisTelemetryContext;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +20,7 @@ import org.springframework.web.client.ResourceAccessException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * OpenAI-compatible embedding provider over HTTP. Fully configured by
@@ -32,9 +35,14 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
     private final EmbeddingProperties properties;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final AiUsageMetrics usageMetrics;
 
     public RealEmbeddingProvider(EmbeddingProperties properties) {
-        this(properties, restClient(properties), new ObjectMapper());
+        this(properties, AiUsageMetrics.noop());
+    }
+
+    public RealEmbeddingProvider(EmbeddingProperties properties, AiUsageMetrics usageMetrics) {
+        this(properties, restClient(properties), new ObjectMapper(), usageMetrics);
     }
 
     RealEmbeddingProvider(
@@ -42,9 +50,19 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
         RestClient restClient,
         ObjectMapper objectMapper
     ) {
+        this(properties, restClient, objectMapper, AiUsageMetrics.noop());
+    }
+
+    RealEmbeddingProvider(
+        EmbeddingProperties properties,
+        RestClient restClient,
+        ObjectMapper objectMapper,
+        AiUsageMetrics usageMetrics
+    ) {
         this.properties = properties;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
+        this.usageMetrics = usageMetrics == null ? AiUsageMetrics.noop() : usageMetrics;
     }
 
     private static final int MAX_BATCH_SIZE = 10;
@@ -61,20 +79,46 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
 
     @Override
     public List<float[]> embedDocuments(List<String> texts) {
+        return embedDocuments(texts, AnalysisTelemetryContext.unavailable());
+    }
+
+    @Override
+    public List<float[]> embedDocuments(List<String> texts, AnalysisTelemetryContext telemetryContext) {
+        AnalysisTelemetryContext context = telemetryContext == null
+            ? AnalysisTelemetryContext.unavailable()
+            : telemetryContext;
         List<float[]> all = new ArrayList<>();
+        int batchCount = (texts.size() + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE;
         for (int offset = 0; offset < texts.size(); offset += MAX_BATCH_SIZE) {
             List<String> batch = texts.subList(offset, Math.min(texts.size(), offset + MAX_BATCH_SIZE));
-            all.addAll(embed(batch));
+            all.addAll(embed(batch, context, offset / MAX_BATCH_SIZE, batchCount));
         }
         return all;
     }
 
     @Override
     public float[] embedQuery(String text) {
-        return embed(List.of(text)).getFirst();
+        return embed(List.of(text), AnalysisTelemetryContext.unavailable(), 0, 1).getFirst();
     }
 
-    private List<float[]> embed(List<String> texts) {
+    private List<float[]> embed(
+        List<String> texts,
+        AnalysisTelemetryContext telemetryContext,
+        int batchIndex,
+        int batchCount
+    ) {
+        boolean analysisTelemetry = telemetryContext.taskId() != null;
+        long inputChars = texts.stream().mapToLong(text -> text == null ? 0L : text.length()).sum();
+        if (analysisTelemetry) {
+            usageMetrics.recordInputScale("embedding_document", properties.provider(), properties.model(), "document",
+                "document_count", texts.size());
+            usageMetrics.recordInputScale("embedding_document", properties.provider(), properties.model(), "document",
+                "input_chars", inputChars);
+        }
+        long startedAtNanos = System.nanoTime();
+        String outcome = "failure";
+        String errorCategory = ErrorCode.EMBEDDING_REQUEST_FAILED.name();
+        int httpStatus = -1;
         try {
             EmbeddingResponse response = restClient.post()
                 .uri(baseUrl() + "/embeddings")
@@ -93,11 +137,15 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
                 }
                 vectors.add(data.embedding());
             }
+            outcome = "success";
+            errorCategory = "none";
             return vectors;
         } catch (VideoAgentException exception) {
+            errorCategory = exception.errorCode().name();
             throw exception;
         } catch (RestClientResponseException exception) {
-            throw ProviderHttpFailure.forStatus(
+            httpStatus = exception.getStatusCode().value();
+            VideoAgentException failure = ProviderHttpFailure.forStatus(
                 exception.getStatusCode().value(),
                 exception.getResponseHeaders() == null ? null : exception.getResponseHeaders().getFirst("Retry-After"),
                 "Embedding",
@@ -105,12 +153,26 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
                 ErrorCode.EMBEDDING_REQUEST_FAILED,
                 ErrorCode.EMBEDDING_PROVIDER_REJECTED
             );
+            errorCategory = "HTTP_" + httpStatus / 100 + "XX";
+            throw failure;
         } catch (ResourceAccessException exception) {
             log.warn("[embedding] network or timeout failure: {}", exception.getMessage());
+            errorCategory = ErrorCode.EMBEDDING_REQUEST_FAILED.name();
             throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务网络请求失败", exception);
         } catch (RestClientException exception) {
             log.warn("[embedding] real embedding request failed: {}", exception.getMessage(), exception);
+            errorCategory = ErrorCode.EMBEDDING_RESPONSE_INVALID.name();
             throw new VideoAgentException(ErrorCode.EMBEDDING_RESPONSE_INVALID, "Embedding 服务响应无法解析", exception);
+        } finally {
+            if (analysisTelemetry) {
+                long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+                usageMetrics.recordProviderRequest("embedding_document", properties.provider(), properties.model(),
+                    "document", outcome, errorCategory, durationMs);
+                log.info("event=ai.provider_request scope=analysis stage=embedding_document provider={} model={} taskId={} videoId={} generation={} retryCount={} batchIndex={} batchCount={} documentCount={} inputChars={} durationMs={} outcome={} httpStatus={} errorCategory={}",
+                    properties.provider(), properties.model(), telemetryContext.taskId(), telemetryContext.videoId(),
+                    telemetryContext.generation(), telemetryContext.retryCount(), batchIndex, batchCount, texts.size(),
+                    inputChars, durationMs, outcome, httpStatus < 0 ? null : httpStatus, errorCategory);
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 package com.videoagent.rag.embedding;
 
 import com.videoagent.rag.config.EmbeddingProperties;
+import com.videoagent.telemetry.AiUsageMetrics;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -14,18 +15,22 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class EmbeddingProviderConfiguration {
 
+    EmbeddingProvider embeddingProvider(EmbeddingProperties properties) {
+        return embeddingProvider(properties, AiUsageMetrics.noop());
+    }
+
     @Bean
-    public EmbeddingProvider embeddingProvider(EmbeddingProperties properties) {
+    public EmbeddingProvider embeddingProvider(EmbeddingProperties properties, AiUsageMetrics usageMetrics) {
         return switch (properties.provider()) {
             case "mock" -> new MockEmbeddingProvider();
-            case "openai", "dashscope" -> requireRealConfiguration(properties);
+            case "openai", "dashscope" -> requireRealConfiguration(properties, usageMetrics);
             default -> throw new IllegalArgumentException(
                 "Unsupported EMBEDDING_PROVIDER: " + properties.provider()
             );
         };
     }
 
-    private EmbeddingProvider requireRealConfiguration(EmbeddingProperties properties) {
+    private EmbeddingProvider requireRealConfiguration(EmbeddingProperties properties, AiUsageMetrics usageMetrics) {
         if (properties.apiKey().isBlank()) {
             throw new IllegalStateException(
                 "EMBEDDING_PROVIDER=" + properties.provider()
@@ -44,6 +49,6 @@ public class EmbeddingProviderConfiguration {
                     + " requires EMBEDDING_MODEL to be configured"
             );
         }
-        return new RealEmbeddingProvider(properties);
+        return new RealEmbeddingProvider(properties, usageMetrics);
     }
 }

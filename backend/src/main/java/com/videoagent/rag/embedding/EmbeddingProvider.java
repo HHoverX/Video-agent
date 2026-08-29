@@ -1,5 +1,7 @@
 package com.videoagent.rag.embedding;
 
+import com.videoagent.telemetry.AnalysisTelemetryContext;
+
 import java.util.List;
 
 /**
@@ -15,6 +17,10 @@ public interface EmbeddingProvider {
     int dimension();
 
     List<float[]> embedDocuments(List<String> texts);
+
+    default List<float[]> embedDocuments(List<String> texts, AnalysisTelemetryContext telemetryContext) {
+        return embedDocuments(texts);
+    }
 
     float[] embedQuery(String text);
 }

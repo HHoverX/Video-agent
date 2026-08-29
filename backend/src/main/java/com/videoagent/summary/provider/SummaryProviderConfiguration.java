@@ -11,23 +11,32 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import com.videoagent.telemetry.AiUsageMetrics;
+
 @Configuration(proxyBeanMethods = false)
 public class SummaryProviderConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(SummaryProviderConfiguration.class);
 
+    VideoSummaryProvider videoSummaryProvider(SummaryProviderProperties properties) {
+        return videoSummaryProvider(properties, AiUsageMetrics.noop());
+    }
+
     @Bean
-    public VideoSummaryProvider videoSummaryProvider(SummaryProviderProperties properties) {
+    public VideoSummaryProvider videoSummaryProvider(
+        SummaryProviderProperties properties,
+        AiUsageMetrics usageMetrics
+    ) {
         return switch (properties.provider()) {
             case "mock" -> new MockVideoSummaryProvider();
-            case "openai" -> openAiOrMock(properties);
+            case "openai" -> openAiOrMock(properties, usageMetrics);
             default -> throw new IllegalArgumentException(
                 "Unsupported LLM_PROVIDER: " + properties.provider()
             );
         };
     }
 
-    private VideoSummaryProvider openAiOrMock(SummaryProviderProperties properties) {
+    private VideoSummaryProvider openAiOrMock(SummaryProviderProperties properties, AiUsageMetrics usageMetrics) {
         if (!properties.hasRealProviderConfiguration()) {
             log.warn("LLM provider=openai is missing API key or model; using MockVideoSummaryProvider");
             return new MockVideoSummaryProvider();
@@ -56,6 +65,6 @@ public class SummaryProviderConfiguration {
             LangChain4jSummaryAiService.class,
             chatModel
         );
-        return new LangChain4jVideoSummaryProvider(aiService, properties.maxUserPromptChars());
+        return new LangChain4jVideoSummaryProvider(aiService, properties, usageMetrics);
     }
 }

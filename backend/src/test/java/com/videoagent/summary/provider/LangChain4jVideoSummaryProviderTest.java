@@ -12,11 +12,15 @@ import static org.mockito.Mockito.when;
 import com.videoagent.asr.TranscriptSegment;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.telemetry.AiUsageMetrics;
 
 import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.exception.InvalidRequestException;
 
 import org.junit.jupiter.api.Test;
+
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -109,6 +113,56 @@ class LangChain4jVideoSummaryProviderTest {
         verify(aiService).summarize(provider.prompt(below));
         verify(aiService).summarize(provider.prompt(atLimit));
         verify(aiService, never()).summarize(provider.prompt(above));
+    }
+
+    @Test
+    void shouldRecordSummaryLogicalCallAndPromptScaleWithoutClaimingProviderAttempts() {
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        LangChain4jVideoSummaryProvider telemetryProvider = telemetryProvider(new AiUsageMetrics(meterRegistry));
+        when(aiService.summarize(anyString())).thenReturn(draft());
+
+        VideoSummaryRequest request = request();
+        telemetryProvider.summarize(request);
+
+        assertThat(meterRegistry.get("videoagent.ai.logical.calls")
+            .tag("stage", "summary").tag("outcome", "success").counter().count()).isEqualTo(1.0d);
+        assertThat(meterRegistry.get("videoagent.ai.logical.duration")
+            .tag("stage", "summary").tag("outcome", "success").timer().count()).isEqualTo(1L);
+        assertThat(meterRegistry.get("videoagent.ai.input.scale")
+            .tag("stage", "summary").tag("input_type", "prompt_chars").summary().totalAmount())
+            .isEqualTo(telemetryProvider.prompt(request).length());
+        assertThat(meterRegistry.find("videoagent.ai.provider.requests").counter()).isNull();
+    }
+
+    @Test
+    void shouldKeepSummaryResultWhenMetricsRegistryFails() {
+        MeterRegistry failingRegistry = mock(MeterRegistry.class);
+        LangChain4jVideoSummaryProvider telemetryProvider = telemetryProvider(new AiUsageMetrics(failingRegistry));
+        when(aiService.summarize(anyString())).thenReturn(draft());
+
+        assertThat(telemetryProvider.summarize(request())).isEqualTo(draft());
+    }
+
+    @Test
+    void shouldRecordPromptScaleButNoLogicalModelCallWhenCapacityGuardRejects() {
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        LangChain4jVideoSummaryProvider telemetryProvider = telemetryProvider(new AiUsageMetrics(meterRegistry));
+        VideoSummaryRequest rejected = requestWithPromptChars(50_001);
+
+        assertThatThrownBy(() -> telemetryProvider.summarize(rejected))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.SUMMARY_INPUT_TOO_LARGE));
+
+        assertThat(meterRegistry.find("videoagent.ai.logical.calls").counter()).isNull();
+        assertThat(meterRegistry.get("videoagent.ai.input.scale")
+            .tag("stage", "summary").tag("input_type", "prompt_chars").summary().totalAmount())
+            .isEqualTo(50_001.0d);
+    }
+
+    private LangChain4jVideoSummaryProvider telemetryProvider(AiUsageMetrics usageMetrics) {
+        return new LangChain4jVideoSummaryProvider(aiService, new SummaryProviderProperties(
+            "openai", "test-key", "gpt-4.1-mini", "", java.time.Duration.ofSeconds(5), 1, "json_schema"
+        ), usageMetrics);
     }
 
     private VideoSummaryRequest request() {

@@ -11,6 +11,8 @@ import com.videoagent.media.AudioChunk;
 import com.videoagent.media.AudioChunkSet;
 import com.videoagent.media.PcmWavAudioChunker;
 import com.videoagent.provider.ProviderHttpFailure;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.AnalysisTelemetryContext;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
 public class DashScopeAsrProvider implements AsrProvider {
 
@@ -51,12 +54,22 @@ public class DashScopeAsrProvider implements AsrProvider {
     private final ObjectMapper objectMapper;
     private final PcmWavAudioChunker audioChunker;
     private final long targetDataUriChars;
+    private final AiUsageMetrics usageMetrics;
 
     public DashScopeAsrProvider(
         AsrProviderProperties properties,
         AsrResultValidator validator
     ) {
-        this(properties, validator, restClient(properties), new ObjectMapper(), new PcmWavAudioChunker(), TARGET_DATA_URI_CHARS);
+        this(properties, validator, AiUsageMetrics.noop());
+    }
+
+    public DashScopeAsrProvider(
+        AsrProviderProperties properties,
+        AsrResultValidator validator,
+        AiUsageMetrics usageMetrics
+    ) {
+        this(properties, validator, restClient(properties), new ObjectMapper(), new PcmWavAudioChunker(), TARGET_DATA_URI_CHARS,
+            usageMetrics);
     }
 
     DashScopeAsrProvider(
@@ -65,7 +78,8 @@ public class DashScopeAsrProvider implements AsrProvider {
         RestClient restClient,
         ObjectMapper objectMapper
     ) {
-        this(properties, validator, restClient, objectMapper, new PcmWavAudioChunker(), TARGET_DATA_URI_CHARS);
+        this(properties, validator, restClient, objectMapper, new PcmWavAudioChunker(), TARGET_DATA_URI_CHARS,
+            AiUsageMetrics.noop());
     }
 
     DashScopeAsrProvider(
@@ -76,6 +90,18 @@ public class DashScopeAsrProvider implements AsrProvider {
         PcmWavAudioChunker audioChunker,
         long targetDataUriChars
     ) {
+        this(properties, validator, restClient, objectMapper, audioChunker, targetDataUriChars, AiUsageMetrics.noop());
+    }
+
+    DashScopeAsrProvider(
+        AsrProviderProperties properties,
+        AsrResultValidator validator,
+        RestClient restClient,
+        ObjectMapper objectMapper,
+        PcmWavAudioChunker audioChunker,
+        long targetDataUriChars,
+        AiUsageMetrics usageMetrics
+    ) {
         this.properties = properties;
         this.validator = validator;
         this.restClient = restClient;
@@ -85,28 +111,52 @@ public class DashScopeAsrProvider implements AsrProvider {
             throw new IllegalArgumentException("DashScope ASR transport target is invalid");
         }
         this.targetDataUriChars = targetDataUriChars;
+        this.usageMetrics = usageMetrics == null ? AiUsageMetrics.noop() : usageMetrics;
     }
 
     @Override
     public TranscriptionResult transcribe(AudioSource audioSource) {
+        return transcribe(audioSource, AnalysisTelemetryContext.unavailable());
+    }
+
+    @Override
+    public TranscriptionResult transcribe(
+        AudioSource audioSource,
+        AnalysisTelemetryContext telemetryContext
+    ) {
+        telemetryContext = telemetryContext == null ? AnalysisTelemetryContext.unavailable() : telemetryContext;
+        long startedAtNanos = System.nanoTime();
+        String outcome = "failure";
+        String errorCategory = "ASR_RESPONSE_INVALID";
+        Long sourceDurationMs = durationMs(audioSource);
+        if (sourceDurationMs != null) {
+            usageMetrics.recordInputScale("asr", properties.provider(), properties.model(), "audio",
+                "source_duration_ms", sourceDurationMs);
+        }
         try {
             List<TranscriptSegment> segments;
             try (AudioChunkSet chunkSet = audioChunker.chunk(audioSource, maxWavBytesForTarget())) {
                 segments = chunkSet.chunks().size() == 1
-                    ? transcribeSingleChunk(audioSource, chunkSet)
-                    : transcribeMultipleChunks(audioSource, chunkSet);
+                    ? transcribeSingleChunk(audioSource, chunkSet, telemetryContext)
+                    : transcribeMultipleChunks(audioSource, chunkSet, telemetryContext);
             }
             logFinalSegments(segments);
-            return validator.validate(audioSource, segments);
+            TranscriptionResult result = validator.validate(audioSource, segments);
+            outcome = "success";
+            errorCategory = "none";
+            return result;
         } catch (VideoAgentException exception) {
+            errorCategory = exception.errorCode().name();
             throw exception;
         } catch (ResourceAccessException exception) {
             if (isTimeout(exception)) {
+                errorCategory = ErrorCode.ASR_TIMEOUT.name();
                 throw new VideoAgentException(ErrorCode.ASR_TIMEOUT, "DashScope ASR 请求超时");
             }
+            errorCategory = ErrorCode.ASR_REQUEST_FAILED.name();
             throw new VideoAgentException(ErrorCode.ASR_REQUEST_FAILED, "DashScope ASR 请求失败");
         } catch (RestClientResponseException exception) {
-            throw ProviderHttpFailure.forStatus(
+            VideoAgentException failure = ProviderHttpFailure.forStatus(
                 exception.getStatusCode().value(),
                 exception.getResponseHeaders() == null ? null : exception.getResponseHeaders().getFirst("Retry-After"),
                 "DashScope ASR",
@@ -114,36 +164,54 @@ public class DashScopeAsrProvider implements AsrProvider {
                 ErrorCode.ASR_REQUEST_FAILED,
                 ErrorCode.ASR_PROVIDER_REJECTED
             );
+            errorCategory = failure.errorCode().name();
+            throw failure;
         } catch (RestClientException exception) {
             if (isTimeout(exception)) {
+                errorCategory = ErrorCode.ASR_TIMEOUT.name();
                 throw new VideoAgentException(ErrorCode.ASR_TIMEOUT, "DashScope ASR 请求超时");
             }
+            errorCategory = ErrorCode.ASR_RESPONSE_INVALID.name();
             throw new VideoAgentException(
                 ErrorCode.ASR_RESPONSE_INVALID,
                 "DashScope ASR 返回无法解析的响应"
             );
         } catch (IllegalArgumentException exception) {
+            errorCategory = ErrorCode.ASR_RESPONSE_INVALID.name();
             throw new VideoAgentException(
                 ErrorCode.ASR_RESPONSE_INVALID,
                 "DashScope ASR 返回无效字幕片段"
             );
+        } finally {
+            long durationMs = elapsedMs(startedAtNanos);
+            usageMetrics.recordLogicalCall("asr", properties.provider(), properties.model(), "audio",
+                outcome, errorCategory, durationMs);
+            logLogicalCall(telemetryContext, sourceDurationMs, durationMs, outcome, errorCategory);
         }
     }
 
-    private List<TranscriptSegment> transcribeSingleChunk(AudioSource audioSource, AudioChunkSet chunkSet) {
+    private List<TranscriptSegment> transcribeSingleChunk(
+        AudioSource audioSource,
+        AudioChunkSet chunkSet,
+        AnalysisTelemetryContext telemetryContext
+    ) {
         List<TranscriptSegment> segments = new ArrayList<>();
-        DashScopeChunkEvidence evidence = requestChunk(chunkSet.chunks().getFirst(), chunkSet, 1);
+        DashScopeChunkEvidence evidence = requestChunk(chunkSet.chunks().getFirst(), chunkSet, 1, telemetryContext);
         for (FinalSentenceCandidate candidate : evidence.candidates()) {
             refineCandidate(candidate, segments, audioSource.videoDurationSeconds());
         }
         return segments;
     }
 
-    private List<TranscriptSegment> transcribeMultipleChunks(AudioSource audioSource, AudioChunkSet chunkSet) {
+    private List<TranscriptSegment> transcribeMultipleChunks(
+        AudioSource audioSource,
+        AudioChunkSet chunkSet,
+        AnalysisTelemetryContext telemetryContext
+    ) {
         List<TranscriptEvidenceSegmenter.TimedWord> globalWords = new ArrayList<>();
         List<AudioChunk> chunks = chunkSet.chunks();
         for (AudioChunk chunk : chunks) {
-            DashScopeChunkEvidence evidence = requestChunk(chunk, chunkSet, chunks.size());
+            DashScopeChunkEvidence evidence = requestChunk(chunk, chunkSet, chunks.size(), telemetryContext);
             appendGlobalTimedWords(evidence, chunk, chunkSet, globalWords);
         }
         validateGlobalTimeline(globalWords);
@@ -164,12 +232,27 @@ public class DashScopeAsrProvider implements AsrProvider {
         return refinement.segments();
     }
 
-    private DashScopeChunkEvidence requestChunk(AudioChunk chunk, AudioChunkSet chunkSet, int chunkCount) {
+    private DashScopeChunkEvidence requestChunk(
+        AudioChunk chunk,
+        AudioChunkSet chunkSet,
+        int chunkCount,
+        AnalysisTelemetryContext telemetryContext
+    ) {
         String audioDataUri = wavDataUri(chunk.file());
         long chunkDurationMs = durationMs(chunk.frameCount(), chunkSet.frameRate());
+        long inputBytes = fileSize(chunk.file());
         log.debug("DashScope ASR transport chunk index={} chunkCount={} physicalStartMs={} durationMs={} wavBytes={} encodedChars={}",
-            chunk.index(), chunkCount, chunkSet.startMs(chunk), chunkDurationMs, fileSize(chunk.file()), audioDataUri.length());
-        List<FinalSentenceCandidate> candidates = restClient.post()
+            chunk.index(), chunkCount, chunkSet.startMs(chunk), chunkDurationMs, inputBytes, audioDataUri.length());
+        usageMetrics.recordInputScale("asr", properties.provider(), properties.model(), "audio",
+            "chunk_duration_ms", chunkDurationMs);
+        usageMetrics.recordInputScale("asr", properties.provider(), properties.model(), "audio",
+            "payload_bytes", inputBytes);
+        long startedAtNanos = System.nanoTime();
+        String outcome = "failure";
+        String errorCategory = "ASR_REQUEST_FAILED";
+        int[] httpStatus = {-1};
+        try {
+            List<FinalSentenceCandidate> candidates = restClient.post()
                 .uri(properties.generationUrl())
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
@@ -179,6 +262,7 @@ public class DashScopeAsrProvider implements AsrProvider {
                 })
                 .body(request(audioDataUri))
                 .exchange((request, response) -> {
+                    httpStatus[0] = response.getStatusCode().value();
                     String responseContentType = response.getHeaders().getFirst("Content-Type");
                     boolean responseIsSse = responseContentType != null
                         && responseContentType.toLowerCase(Locale.ROOT).startsWith("text/event-stream");
@@ -196,7 +280,19 @@ public class DashScopeAsrProvider implements AsrProvider {
                     }
                     return parseSse(response.getBody());
                 });
-        return new DashScopeChunkEvidence(candidates);
+            outcome = "success";
+            errorCategory = "none";
+            return new DashScopeChunkEvidence(candidates);
+        } catch (RuntimeException exception) {
+            errorCategory = requestErrorCategory(exception);
+            throw exception;
+        } finally {
+            long durationMs = elapsedMs(startedAtNanos);
+            usageMetrics.recordProviderRequest("asr", properties.provider(), properties.model(), "audio",
+                outcome, errorCategory, durationMs);
+            logProviderRequest(telemetryContext, chunk, chunkSet, chunkCount, chunkDurationMs, inputBytes,
+                durationMs, outcome, httpStatus[0], errorCategory);
+        }
     }
 
     private void appendGlobalTimedWords(
@@ -691,6 +787,58 @@ public class DashScopeAsrProvider implements AsrProvider {
             current = current.getCause();
         }
         return false;
+    }
+
+    private Long durationMs(AudioSource audioSource) {
+        Integer durationSeconds = audioSource.videoDurationSeconds();
+        return durationSeconds == null ? null : Math.max(0L, durationSeconds.longValue() * 1_000L);
+    }
+
+    private long elapsedMs(long startedAtNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+    }
+
+    private String requestErrorCategory(RuntimeException exception) {
+        if (exception instanceof VideoAgentException providerFailure) {
+            return providerFailure.errorCode().name();
+        }
+        if (exception instanceof RestClientResponseException responseFailure) {
+            return "HTTP_" + responseFailure.getStatusCode().value() / 100 + "XX";
+        }
+        if (exception instanceof ResourceAccessException accessFailure) {
+            return isTimeout(accessFailure) ? ErrorCode.ASR_TIMEOUT.name() : ErrorCode.ASR_REQUEST_FAILED.name();
+        }
+        return ErrorCode.ASR_RESPONSE_INVALID.name();
+    }
+
+    private void logLogicalCall(
+        AnalysisTelemetryContext context,
+        Long sourceDurationMs,
+        long durationMs,
+        String outcome,
+        String errorCategory
+    ) {
+        log.info("event=ai.logical_call scope=analysis stage=asr provider={} model={} taskId={} videoId={} generation={} retryCount={} sourceDurationMs={} durationMs={} outcome={} errorCategory={}",
+            properties.provider(), properties.model(), context.taskId(), context.videoId(), context.generation(),
+            context.retryCount(), sourceDurationMs, durationMs, outcome, errorCategory);
+    }
+
+    private void logProviderRequest(
+        AnalysisTelemetryContext context,
+        AudioChunk chunk,
+        AudioChunkSet chunkSet,
+        int chunkCount,
+        long chunkDurationMs,
+        long inputBytes,
+        long durationMs,
+        String outcome,
+        int httpStatus,
+        String errorCategory
+    ) {
+        log.info("event=ai.provider_request scope=analysis stage=asr provider={} model={} taskId={} videoId={} generation={} retryCount={} chunkIndex={} chunkCount={} physicalStartMs={} chunkDurationMs={} inputBytes={} durationMs={} outcome={} httpStatus={} errorCategory={}",
+            properties.provider(), properties.model(), context.taskId(), context.videoId(), context.generation(),
+            context.retryCount(), chunk.index(), chunkCount, chunkSet.startMs(chunk), chunkDurationMs, inputBytes,
+            durationMs, outcome, httpStatus < 0 ? null : httpStatus, errorCategory);
     }
 
     private static RestClient restClient(AsrProviderProperties properties) {

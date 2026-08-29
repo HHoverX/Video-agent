@@ -31,6 +31,7 @@ import com.videoagent.transcript.service.TranscriptService;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 import com.videoagent.rag.service.RagIndexService;
+import com.videoagent.telemetry.AnalysisTelemetryContext;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -164,6 +165,9 @@ public class AnalysisTaskProcessor {
             }
             task = current;
             int generation = task.getProcessingGeneration() == null ? 0 : task.getProcessingGeneration();
+            AnalysisTelemetryContext telemetryContext = new AnalysisTelemetryContext(
+                task.getId(), task.getVideoId(), generation, task.getRetryCount()
+            );
             activeLeases.register(task.getId(), task.getVideoId(), generation);
             activeGeneration = generation;
 
@@ -197,7 +201,8 @@ public class AnalysisTaskProcessor {
                     log.debug("[taskId={}][videoId={}] ASR AudioSource videoDurationSeconds={}",
                         task.getId(), task.getVideoId(), video.getDurationSeconds());
                     transcription = asrProvider.transcribe(
-                        new AudioSource(audio.audioFile(), video.getDurationSeconds())
+                        new AudioSource(audio.audioFile(), video.getDurationSeconds()),
+                        telemetryContext
                     );
                 }
                 lastProgress = advance(task, generation, AnalysisStage.TRANSCRIPT_SAVED, 75);
@@ -214,7 +219,8 @@ public class AnalysisTaskProcessor {
                 VideoSummaryRequest summaryRequest = new VideoSummaryRequest(
                     task.getVideoId(),
                     task.getId(),
-                    transcription.segments()
+                    transcription.segments(),
+                    telemetryContext
                 );
                 VideoSummaryDraft summary = summaryProvider.summarize(summaryRequest);
                 lastProgress = advance(task, generation, AnalysisStage.SAVING, 95);

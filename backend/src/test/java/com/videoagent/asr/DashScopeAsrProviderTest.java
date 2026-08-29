@@ -9,11 +9,15 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.AnalysisTelemetryContext;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.web.client.RestClient;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import javax.sound.sampled.AudioFileFormat;
 import javax.sound.sampled.AudioFormat;
@@ -127,9 +131,10 @@ class DashScopeAsrProviderTest {
         });
         long planningTargetChars = 44_000L;
         Path audio = createWav("long-sequential.wav", 2);
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
-        TranscriptionResult result = provider(Duration.ofSeconds(3), planningTargetChars)
-            .transcribe(new AudioSource(audio, 49));
+        TranscriptionResult result = provider(Duration.ofSeconds(3), planningTargetChars, new AiUsageMetrics(meterRegistry))
+            .transcribe(new AudioSource(audio, 49), new AnalysisTelemetryContext(101L, 7L, 2, 1));
 
         assertThat(requestCount.get()).isEqualTo(2);
         for (String payload : payloads) {
@@ -139,6 +144,10 @@ class DashScopeAsrProviderTest {
             assertThat(dataUri.length()).isLessThanOrEqualTo((int) planningTargetChars);
         }
         assertThat(result.segments()).containsExactly(new TranscriptSegment(0, 1_929, "abcd"));
+        assertThat(meterRegistry.get("videoagent.ai.logical.calls")
+            .tag("stage", "asr").tag("outcome", "success").counter().count()).isEqualTo(1.0d);
+        assertThat(meterRegistry.get("videoagent.ai.provider.requests")
+            .tag("stage", "asr").tag("outcome", "success").counter().count()).isEqualTo(2.0d);
         assertNoGeneratedChunkDirectory();
     }
 
@@ -543,13 +552,22 @@ class DashScopeAsrProviderTest {
     }
 
     private DashScopeAsrProvider provider(Duration timeout, long planningTargetChars) {
+        return provider(timeout, planningTargetChars, AiUsageMetrics.noop());
+    }
+
+    private DashScopeAsrProvider provider(
+        Duration timeout,
+        long planningTargetChars,
+        AiUsageMetrics usageMetrics
+    ) {
         return new DashScopeAsrProvider(
             properties(timeout, "http://127.0.0.1:" + server.getAddress().getPort(), List.of()),
             new AsrResultValidator(),
             RestClient.builder().build(),
             objectMapper,
             new com.videoagent.media.PcmWavAudioChunker(),
-            planningTargetChars
+            planningTargetChars,
+            usageMetrics
         );
     }
 
