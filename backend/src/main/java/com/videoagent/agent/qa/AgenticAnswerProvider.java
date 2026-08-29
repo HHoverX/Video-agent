@@ -1,6 +1,7 @@
 package com.videoagent.agent.qa;
 
 import com.videoagent.agent.evidence.EvidenceItem;
+import com.videoagent.telemetry.QaTelemetryContext;
 
 import java.util.List;
 
@@ -12,4 +13,13 @@ import java.util.List;
 public interface AgenticAnswerProvider {
 
     AgenticQaResult synthesize(String question, List<EvidenceItem> evidence);
+
+    default AgenticQaResult synthesize(
+        String question,
+        List<EvidenceItem> evidence,
+        QaTelemetryContext telemetryContext,
+        int toolActionCount
+    ) {
+        return synthesize(question, evidence);
+    }
 }

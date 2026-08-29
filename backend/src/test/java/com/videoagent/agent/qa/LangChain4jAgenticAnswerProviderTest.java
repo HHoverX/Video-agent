@@ -12,9 +12,13 @@ import com.videoagent.agent.evidence.EvidenceItem;
 import com.videoagent.agent.evidence.EvidenceSourceType;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.QaTelemetryContext;
 
 import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.exception.InvalidRequestException;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -59,7 +63,47 @@ class LangChain4jAgenticAnswerProviderTest {
             .when(aiService).synthesize(anyString());
         assertThatThrownBy(() -> provider.synthesize("q", List.of(evidence())))
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
-                assertThat(exception.errorCode()).isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED));
+            assertThat(exception.errorCode()).isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED));
+    }
+
+    @Test
+    void shouldRecordOneAgenticSynthesisLogicalCallWithBoundedTags() {
+        when(aiService.synthesize(anyString())).thenReturn(new AgenticQaAiResponse("answer", List.of("E1")));
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        LangChain4jAgenticAnswerProvider telemetryProvider = new LangChain4jAgenticAnswerProvider(
+            aiService, objectMapper, "openai", "answer-model", 1, new AiUsageMetrics(registry)
+        );
+
+        telemetryProvider.synthesize("question", List.of(evidence()), new QaTelemetryContext("request-1", 7L, 3L), 2);
+
+        assertThat(registry.get("videoagent.ai.logical.calls")
+            .tag("scope", "qa").tag("stage", "qa_synthesis").tag("mode", "agentic")
+            .tag("outcome", "success").counter().count()).isEqualTo(1.0d);
+        assertThat(registry.get("videoagent.ai.input.scale")
+            .tag("scope", "qa").tag("stage", "qa_synthesis").tag("input_type", "evidence_items")
+            .summary().totalAmount()).isEqualTo(1.0d);
+        assertThat(registry.getMeters().stream()
+            .flatMap(meter -> meter.getId().getTags().stream())
+            .map(tag -> tag.getValue())).doesNotContain("request-1", "7", "3", "question");
+    }
+
+    @Test
+    void shouldIgnoreMetricRecordingFailures() {
+        when(aiService.synthesize(anyString())).thenReturn(new AgenticQaAiResponse("answer", List.of("E1")));
+        LangChain4jAgenticAnswerProvider telemetryProvider = new LangChain4jAgenticAnswerProvider(
+            aiService,
+            objectMapper,
+            "openai",
+            "answer-model",
+            1,
+            new AiUsageMetrics(mock(io.micrometer.core.instrument.MeterRegistry.class))
+        );
+
+        AgenticQaResult result = telemetryProvider.synthesize(
+            "question", List.of(evidence()), new QaTelemetryContext("request-1", 7L, 3L), 2
+        );
+
+        assertThat(result.answer()).isEqualTo("answer");
     }
 
     private EvidenceItem evidence() {

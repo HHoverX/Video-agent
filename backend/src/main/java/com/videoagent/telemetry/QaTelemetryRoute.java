@@ -4,6 +4,7 @@ package com.videoagent.telemetry;
 public enum QaTelemetryRoute {
     BASIC_DIRECT("basic_direct"),
     BASIC_RAG("basic_rag"),
+    AGENTIC("agentic"),
     AGENTIC_FALLBACK_BASIC("agentic_fallback_basic");
 
     private final String value;

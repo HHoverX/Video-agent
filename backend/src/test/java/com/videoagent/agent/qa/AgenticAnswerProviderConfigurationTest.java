@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.summary.provider.SummaryProviderProperties;
+import com.videoagent.telemetry.AiUsageMetrics;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +30,17 @@ class AgenticAnswerProviderConfigurationTest {
     void shouldBuildRealProviderWhenConfigured() {
         AgenticAnswerProvider provider = configuration.agenticAnswerProvider(
             properties("openai", "test-key", "model"), objectMapper);
+        assertThat(provider).isInstanceOf(LangChain4jAgenticAnswerProvider.class);
+    }
+
+    @Test
+    void shouldBuildTelemetryAwareRealProviderWhenMetricsAreProvided() {
+        AgenticAnswerProvider provider = configuration.agenticAnswerProvider(
+            properties("openai", "test-key", "model"),
+            objectMapper,
+            new AiUsageMetrics(new SimpleMeterRegistry())
+        );
+
         assertThat(provider).isInstanceOf(LangChain4jAgenticAnswerProvider.class);
     }
 

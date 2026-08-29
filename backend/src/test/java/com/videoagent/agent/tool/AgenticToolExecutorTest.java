@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -23,6 +24,8 @@ import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
 import com.videoagent.rag.service.RagIndexService;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
@@ -225,6 +228,32 @@ class AgenticToolExecutorTest {
     }
 
     @Test
+    void shouldPropagateAgenticTelemetryToRagSearchOnly() {
+        QaTelemetryContext telemetryContext = new QaTelemetryContext("request-1", 7L, 3L);
+        when(transcriptRetriever.retrieve(
+            1L, 7L, "Redis 作用", telemetryContext, QaTelemetryRoute.AGENTIC
+        )).thenReturn(List.of());
+
+        executor.execute(ragContext(), List.of(RetrievalAction.search("Redis 作用")), telemetryContext);
+
+        verify(transcriptRetriever).retrieve(
+            1L, 7L, "Redis 作用", telemetryContext, QaTelemetryRoute.AGENTIC
+        );
+    }
+
+    @Test
+    void shouldKeepDirectSearchLocalWhenTelemetryIsPresent() {
+        QaTelemetryContext telemetryContext = new QaTelemetryContext("request-1", 7L, 3L);
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+
+        executor.execute(directContext(), List.of(RetrievalAction.search("Redis")), telemetryContext);
+
+        verify(transcriptRetriever, never()).retrieve(
+            anyLong(), anyLong(), anyString(), any(QaTelemetryContext.class), any(QaTelemetryRoute.class)
+        );
+    }
+
+    @Test
     void shouldRejectSearchWhenReadySnapshotBecomesBuilding() {
         when(ragIndexService.requireReady(7L, 1L))
             .thenThrow(new VideoAgentException(ErrorCode.RAG_INDEX_NOT_READY));
@@ -258,6 +287,22 @@ class AgenticToolExecutorTest {
 
         verify(ragIndexService, times(1)).requireReady(7L, 1L);
         verify(transcriptRetriever, times(1)).retrieve(1L, 7L, "query");
+    }
+
+    @Test
+    void shouldKeepTelemetryAwareDistinctSearchesSeparate() {
+        QaTelemetryContext telemetryContext = new QaTelemetryContext("request-1", 7L, 3L);
+        when(transcriptRetriever.retrieve(
+            eq(1L), eq(7L), anyString(), eq(telemetryContext), eq(QaTelemetryRoute.AGENTIC)
+        )).thenReturn(List.of());
+
+        executor.execute(ragContext(), List.of(
+            RetrievalAction.search("query-a"),
+            RetrievalAction.search("query-b")
+        ), telemetryContext);
+
+        verify(transcriptRetriever).retrieve(1L, 7L, "query-a", telemetryContext, QaTelemetryRoute.AGENTIC);
+        verify(transcriptRetriever).retrieve(1L, 7L, "query-b", telemetryContext, QaTelemetryRoute.AGENTIC);
     }
 
     @Test

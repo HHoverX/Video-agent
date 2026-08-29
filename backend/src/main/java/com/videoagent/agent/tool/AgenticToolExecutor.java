@@ -12,6 +12,8 @@ import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
 import com.videoagent.rag.service.RagIndexService;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 import com.videoagent.summary.dto.VideoChapterResponse;
 import com.videoagent.summary.dto.VideoKeyPointResponse;
 import com.videoagent.summary.dto.VideoSummaryResponse;
@@ -26,6 +28,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -64,6 +67,14 @@ public class AgenticToolExecutor {
      * request-local evidence ids E1, E2, ...
      */
     public List<EvidenceItem> execute(AgenticQaContext context, List<RetrievalAction> actions) {
+        return execute(context, actions, null);
+    }
+
+    public List<EvidenceItem> execute(
+        AgenticQaContext context,
+        List<RetrievalAction> actions,
+        QaTelemetryContext telemetryContext
+    ) {
         AtomicInteger idCounter = new AtomicInteger(1);
         List<EvidenceItem> evidence = new ArrayList<>();
         List<RetrievalAction> uniqueActions = actions == null
@@ -79,16 +90,44 @@ public class AgenticToolExecutor {
             if (action == null || action.tool() == null) {
                 continue;
             }
-            if (action.tool() == RetrievalTool.GET_VIDEO_SUMMARY) {
-                evidence.addAll(summaryEvidence(context, idCounter));
-            } else if (action.tool() == RetrievalTool.GET_TRANSCRIPT_BY_TIME) {
-                evidence.addAll(timeEvidence(context, action, idCounter));
-            } else if (action.tool() == RetrievalTool.SEARCH_TRANSCRIPT) {
-                evidence.addAll(searchEvidence(
-                    context, action.query(), directSearchSegments, idCounter));
-            }
+            evidence.addAll(executeAction(context, action, directSearchSegments, idCounter, telemetryContext));
         }
         return evidence;
+    }
+
+    private List<EvidenceItem> executeAction(
+        AgenticQaContext context,
+        RetrievalAction action,
+        List<VideoTranscriptSegmentEntity> directSearchSegments,
+        AtomicInteger idCounter,
+        QaTelemetryContext telemetryContext
+    ) {
+        long startedAtNanos = System.nanoTime();
+        String outcome = "failure";
+        String errorCategory = ErrorCode.INTERNAL_ERROR.name();
+        List<EvidenceItem> result = List.of();
+        try {
+            result = switch (action.tool()) {
+                case GET_VIDEO_SUMMARY -> summaryEvidence(context, idCounter);
+                case GET_TRANSCRIPT_BY_TIME -> timeEvidence(context, action, idCounter);
+                case SEARCH_TRANSCRIPT -> searchEvidence(
+                    context, action.query(), directSearchSegments, idCounter, telemetryContext);
+            };
+            outcome = "success";
+            errorCategory = "none";
+            return result;
+        } catch (VideoAgentException exception) {
+            errorCategory = exception.errorCode().name();
+            throw exception;
+        } finally {
+            if (telemetryContext != null) {
+                long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+                log.info("event=ai.qa_tool requestId={} videoId={} analysisTaskId={} mode={} tool={} durationMs={} outcome={} evidenceCount={} errorCategory={}",
+                    telemetryContext.requestId(), telemetryContext.videoId(), telemetryContext.analysisTaskId(),
+                    QaTelemetryRoute.AGENTIC.value(), action.tool().name(), durationMs, outcome, result.size(),
+                    errorCategory);
+            }
+        }
     }
 
     private List<EvidenceItem> summaryEvidence(AgenticQaContext context, AtomicInteger idCounter) {
@@ -177,7 +216,8 @@ public class AgenticToolExecutor {
         AgenticQaContext context,
         String query,
         List<VideoTranscriptSegmentEntity> directSearchSegments,
-        AtomicInteger idCounter
+        AtomicInteger idCounter,
+        QaTelemetryContext telemetryContext
     ) {
         QaContextMode mode = context.contextMode();
 
@@ -205,11 +245,15 @@ public class AgenticToolExecutor {
 
         ragIndexService.requireReady(context.videoId(), context.currentUserId());
 
-        List<RetrievedChunk> chunks = transcriptRetriever.retrieve(
-            context.currentUserId(),
-            context.videoId(),
-            query
-        );
+        List<RetrievedChunk> chunks = telemetryContext == null
+            ? transcriptRetriever.retrieve(context.currentUserId(), context.videoId(), query)
+            : transcriptRetriever.retrieve(
+                context.currentUserId(),
+                context.videoId(),
+                query,
+                telemetryContext,
+                QaTelemetryRoute.AGENTIC
+            );
         List<EvidenceItem> items = new ArrayList<>();
         for (RetrievedChunk chunk : chunks) {
             items.add(new EvidenceItem(

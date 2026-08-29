@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.videoagent.agent.config.AgentProperties;
 import com.videoagent.summary.provider.SummaryProviderProperties;
+import com.videoagent.telemetry.AiUsageMetrics;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +42,18 @@ class PlannerProviderConfigurationTest {
             new SummaryProviderProperties("openai", "test-key", "deepseek-v4-flash", "https://api.deepseek.com",
                 Duration.ofSeconds(30), 0, "json_object")
         );
+        assertThat(provider).isInstanceOf(LangChain4jRetrievalPlanner.class);
+    }
+
+    @Test
+    void shouldBuildTelemetryAwareRealPlannerWhenMetricsAreProvided() {
+        RetrievalPlannerProvider provider = configuration.retrievalPlannerProvider(
+            new AgentProperties("llm", 4, 15_000L, 120_000L, 12, 12_000, ""),
+            new SummaryProviderProperties("openai", "test-key", "deepseek-v4-flash", "https://api.deepseek.com",
+                Duration.ofSeconds(30), 1, "json_object"),
+            new AiUsageMetrics(new SimpleMeterRegistry())
+        );
+
         assertThat(provider).isInstanceOf(LangChain4jRetrievalPlanner.class);
     }
 

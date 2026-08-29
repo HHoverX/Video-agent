@@ -13,10 +13,14 @@ import com.videoagent.agent.plan.RetrievalPlanValidator;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.context.QaContextMode;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.QaTelemetryContext;
 
 import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.exception.InvalidRequestException;
 import dev.langchain4j.exception.TimeoutException;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.Test;
 
@@ -87,5 +91,44 @@ class LangChain4jRetrievalPlannerTest {
                 .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                     assertThat(exception.errorCode()).isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED));
         }
+    }
+
+    @Test
+    void shouldRecordOneAgenticPlannerLogicalCallWithBoundedTags() {
+        when(aiService.plan(anyString())).thenReturn(new PlannerAiResponse(
+            "SEMANTIC_SEARCH", "ignored", List.of(new PlannerAction("SEARCH_TRANSCRIPT", "q", null, null))
+        ));
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        LangChain4jRetrievalPlanner telemetryPlanner = new LangChain4jRetrievalPlanner(
+            aiService, "openai", "planner-model", 1, new AiUsageMetrics(registry)
+        );
+
+        telemetryPlanner.plan(context, "question", new QaTelemetryContext("request-1", 7L, 3L));
+
+        assertThat(registry.get("videoagent.ai.logical.calls")
+            .tag("scope", "qa").tag("stage", "qa_planner").tag("mode", "agentic")
+            .tag("outcome", "success").counter().count()).isEqualTo(1.0d);
+        assertThat(registry.get("videoagent.ai.input.scale")
+            .tag("scope", "qa").tag("stage", "qa_planner").tag("input_type", "question_chars")
+            .summary().totalAmount()).isEqualTo(8.0d);
+        assertThat(registry.getMeters().stream()
+            .flatMap(meter -> meter.getId().getTags().stream())
+            .map(tag -> tag.getValue())).doesNotContain("request-1", "7", "3", "question");
+    }
+
+    @Test
+    void shouldIgnoreMetricRecordingFailures() {
+        when(aiService.plan(anyString())).thenReturn(new PlannerAiResponse(
+            "SEMANTIC_SEARCH", "ignored", List.of(new PlannerAction("SEARCH_TRANSCRIPT", "q", null, null))
+        ));
+        LangChain4jRetrievalPlanner telemetryPlanner = new LangChain4jRetrievalPlanner(
+            aiService, "openai", "planner-model", 1, new AiUsageMetrics(mock(io.micrometer.core.instrument.MeterRegistry.class))
+        );
+
+        RetrievalPlan result = telemetryPlanner.plan(
+            context, "question", new QaTelemetryContext("request-1", 7L, 3L)
+        );
+
+        assertThat(result.actions()).hasSize(1);
     }
 }

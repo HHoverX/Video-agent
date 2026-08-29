@@ -2,6 +2,7 @@ package com.videoagent.agent.qa;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.summary.provider.SummaryProviderProperties;
+import com.videoagent.telemetry.AiUsageMetrics;
 
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
@@ -16,20 +17,29 @@ public class AgenticAnswerProviderConfiguration {
     @Bean
     public AgenticAnswerProvider agenticAnswerProvider(
         SummaryProviderProperties properties,
-        ObjectMapper objectMapper
+        ObjectMapper objectMapper,
+        AiUsageMetrics usageMetrics
     ) {
         return switch (properties.provider()) {
             case "mock" -> new MockAgenticAnswerProvider();
-            case "openai" -> realProvider(properties, objectMapper);
+            case "openai" -> realProvider(properties, objectMapper, usageMetrics);
             default -> throw new IllegalArgumentException(
                 "Unsupported LLM_PROVIDER for Agentic Answer: " + properties.provider()
             );
         };
     }
 
-    private AgenticAnswerProvider realProvider(
+    AgenticAnswerProvider agenticAnswerProvider(
         SummaryProviderProperties properties,
         ObjectMapper objectMapper
+    ) {
+        return agenticAnswerProvider(properties, objectMapper, AiUsageMetrics.noop());
+    }
+
+    private AgenticAnswerProvider realProvider(
+        SummaryProviderProperties properties,
+        ObjectMapper objectMapper,
+        AiUsageMetrics usageMetrics
     ) {
         if (!properties.hasRealProviderConfiguration()) {
             throw new IllegalStateException(
@@ -48,6 +58,6 @@ public class AgenticAnswerProviderConfiguration {
             LangChain4jAgenticAnswerAiService.class,
             chatModel
         );
-        return new LangChain4jAgenticAnswerProvider(aiService, objectMapper);
+        return new LangChain4jAgenticAnswerProvider(aiService, objectMapper, properties, usageMetrics);
     }
 }

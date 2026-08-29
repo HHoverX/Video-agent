@@ -22,6 +22,8 @@ import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.service.RagIndexService;
 import com.videoagent.rag.service.VideoQaService;
 import com.videoagent.summary.service.VideoSummaryService;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.video.service.VideoOwnershipService;
@@ -36,7 +38,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Agentic video QA: plan -> validate -> execute tools -> normalize evidence ->
@@ -90,79 +92,109 @@ public class AgenticVideoQaService {
     }
 
     public AgenticQaResponse answerAgentic(long videoId, long userId, String question) {
-        String requestId = UUID.randomUUID().toString().substring(0, 8);
-        ownershipService.requireOwned(videoId, userId);
-
-        List<VideoTranscriptSegmentEntity> segments = segmentRepository.findLatestSuccessfulByVideoId(videoId);
-        AgenticQaContext context = buildContext(videoId, userId, segments);
-        if (segments.isEmpty()) {
-            return fallbackToBasic(videoId, userId, question, requestId, context);
-        }
-
-        RetrievalPlan plan;
-        List<RetrievalAction> actions;
-        RetrievalStrategy strategy;
+        long startedAtNanos = System.nanoTime();
+        QaTelemetryContext telemetryContext = QaTelemetryContext.newRequest(videoId);
+        boolean completionDelegatedToBasic = false;
+        int toolActionCount = 0;
+        int evidenceCount = 0;
+        String outcome = "failure";
+        String errorCategory = ErrorCode.INTERNAL_ERROR.name();
         try {
-            plan = planner.plan(context, question);
-            planValidator.validate(plan, context);
-            actions = plan.actions().stream().distinct().toList();
-            strategy = RetrievalStrategy.derive(actions);
-        } catch (RuntimeException plannerFailure) {
-            if (!isFallbackEligible(plannerFailure)) {
-                throw plannerFailure;
+            ownershipService.requireOwned(videoId, userId);
+
+            List<VideoTranscriptSegmentEntity> segments = segmentRepository.findLatestSuccessfulByVideoId(videoId);
+            AgenticQaContext context = buildContext(videoId, userId, segments);
+            telemetryContext = telemetryContext.withAnalysisTaskId(context.analysisTaskId());
+            if (segments.isEmpty()) {
+                completionDelegatedToBasic = true;
+                return fallbackToBasic(videoId, userId, question, telemetryContext, context);
             }
-            log.warn("[requestId={}][userId={}][videoId={}] agentic planner failed; using BASIC_FALLBACK: {}",
-                requestId, userId, videoId, safeMessage(plannerFailure));
-            return fallbackToBasic(videoId, userId, question, requestId, context);
-        }
 
-        List<String> toolsUsed = actions.stream()
-            .filter(a -> a != null && a.tool() != null)
-            .map(a -> a.tool().name())
-            .toList();
+            RetrievalPlan plan;
+            List<RetrievalAction> actions;
+            RetrievalStrategy strategy;
+            try {
+                plan = planner.plan(context, question, telemetryContext);
+                planValidator.validate(plan, context);
+                actions = plan.actions().stream().distinct().toList();
+                strategy = RetrievalStrategy.derive(actions);
+            } catch (RuntimeException plannerFailure) {
+                if (!isFallbackEligible(plannerFailure)) {
+                    throw plannerFailure;
+                }
+                log.warn("[requestId={}][userId={}][videoId={}] agentic planner failed; using BASIC_FALLBACK: {}",
+                    telemetryContext.requestId(), userId, videoId, safeMessage(plannerFailure));
+                completionDelegatedToBasic = true;
+                return fallbackToBasic(videoId, userId, question, telemetryContext, context);
+            }
 
-        List<EvidenceItem> rawEvidence = toolExecutor.execute(context, actions);
-        List<EvidenceItem> evidence = evidenceNormalizer.dedupeAndLimit(rawEvidence);
+            List<String> toolsUsed = actions.stream()
+                .filter(a -> a != null && a.tool() != null)
+                .map(a -> a.tool().name())
+                .toList();
+            toolActionCount = toolsUsed.size();
 
-        if (evidence.isEmpty()) {
-            log.info("[requestId={}][userId={}][videoId={}][strategy={}][toolCount={}] no evidence; answering cannot-determine",
-                requestId, userId, videoId, strategy, toolsUsed.size());
+            List<EvidenceItem> rawEvidence = toolExecutor.execute(context, actions, telemetryContext);
+            List<EvidenceItem> evidence = evidenceNormalizer.dedupeAndLimit(rawEvidence);
+            evidenceCount = evidence.size();
+
+            if (evidence.isEmpty()) {
+                log.info("[requestId={}][userId={}][videoId={}][strategy={}][toolCount={}] no evidence; answering cannot-determine",
+                    telemetryContext.requestId(), userId, videoId, strategy, toolsUsed.size());
+                outcome = "success";
+                errorCategory = "none";
+                return new AgenticQaResponse(
+                    "根据当前视频内容无法确定。",
+                    strategy.name(),
+                    context.contextMode() == null ? null : context.contextMode().name(),
+                    toolsUsed,
+                    List.of()
+                );
+            }
+
+            AgenticQaResult result = answerProvider.synthesize(question, evidence, telemetryContext, toolActionCount);
+            Map<String, EvidenceItem> byId = new LinkedHashMap<>();
+            for (EvidenceItem item : evidence) {
+                byId.put(item.evidenceId(), item);
+            }
+            List<AgenticCitation> citations = resolveCitations(result.citationEvidenceIds(), byId);
+            if (citations.isEmpty()) {
+                outcome = "success";
+                errorCategory = "none";
+                return new AgenticQaResponse(
+                    "根据当前视频内容无法确定。",
+                    strategy.name(),
+                    context.contextMode() == null ? null : context.contextMode().name(),
+                    toolsUsed,
+                    List.of()
+                );
+            }
+
+            log.info("[requestId={}][userId={}][videoId={}][strategy={}][contextMode={}][toolCount={}][toolsUsed={}] agentic qa answered",
+                telemetryContext.requestId(), userId, videoId, strategy,
+                context.contextMode() == null ? null : context.contextMode().name(),
+                toolsUsed.size(), toolsUsed);
+            outcome = "success";
+            errorCategory = "none";
             return new AgenticQaResponse(
-                "根据当前视频内容无法确定。",
+                result.answer(),
                 strategy.name(),
                 context.contextMode() == null ? null : context.contextMode().name(),
                 toolsUsed,
-                List.of()
+                citations
             );
+        } catch (VideoAgentException exception) {
+            errorCategory = exception.errorCode().name();
+            throw exception;
+        } finally {
+            if (!completionDelegatedToBasic) {
+                long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+                log.info("event=ai.qa_request requestId={} videoId={} analysisTaskId={} route={} totalDurationMs={} outcome={} errorCategory={} fallback={} toolActionCount={} evidenceCount={}",
+                    telemetryContext.requestId(), telemetryContext.videoId(), telemetryContext.analysisTaskId(),
+                    QaTelemetryRoute.AGENTIC.value(), durationMs, outcome, errorCategory, false,
+                    toolActionCount, evidenceCount);
+            }
         }
-
-        AgenticQaResult result = answerProvider.synthesize(question, evidence);
-        Map<String, EvidenceItem> byId = new LinkedHashMap<>();
-        for (EvidenceItem item : evidence) {
-            byId.put(item.evidenceId(), item);
-        }
-        List<AgenticCitation> citations = resolveCitations(result.citationEvidenceIds(), byId);
-        if (citations.isEmpty()) {
-            return new AgenticQaResponse(
-                "根据当前视频内容无法确定。",
-                strategy.name(),
-                context.contextMode() == null ? null : context.contextMode().name(),
-                toolsUsed,
-                List.of()
-            );
-        }
-
-        log.info("[requestId={}][userId={}][videoId={}][strategy={}][contextMode={}][toolCount={}][toolsUsed={}] agentic qa answered",
-            requestId, userId, videoId, strategy,
-            context.contextMode() == null ? null : context.contextMode().name(),
-            toolsUsed.size(), toolsUsed);
-        return new AgenticQaResponse(
-            result.answer(),
-            strategy.name(),
-            context.contextMode() == null ? null : context.contextMode().name(),
-            toolsUsed,
-            citations
-        );
     }
 
     private AgenticQaContext buildContext(
@@ -194,17 +226,23 @@ public class AgenticVideoQaService {
         long videoId,
         long userId,
         String question,
-        String requestId,
+        QaTelemetryContext telemetryContext,
         AgenticQaContext context
     ) {
-        QaResponse basic = basicQaService.answer(videoId, userId, question);
+        QaResponse basic = basicQaService.answerWithContext(
+            videoId,
+            userId,
+            question,
+            telemetryContext,
+            QaTelemetryRoute.AGENTIC_FALLBACK_BASIC
+        );
         List<AgenticCitation> citations = basic.citations() == null
             ? List.of()
             : basic.citations().stream()
                 .map(c -> new AgenticCitation("TRANSCRIPT_SEARCH", c.startMs(), c.endMs(), c.text()))
                 .toList();
         log.info("[requestId={}][userId={}][videoId={}][strategy=BASIC_FALLBACK][contextMode={}] agentic qa fell back to basic qa",
-            requestId, userId, videoId,
+            telemetryContext.requestId(), userId, videoId,
             context.contextMode() == null ? null : context.contextMode().name());
         return new AgenticQaResponse(
             basic.answer(),

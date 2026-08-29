@@ -6,6 +6,9 @@ import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalTool;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
+import com.videoagent.telemetry.AiUsageMetrics;
+import com.videoagent.telemetry.QaTelemetryContext;
+import com.videoagent.telemetry.QaTelemetryRoute;
 
 import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.exception.NonRetriableException;
@@ -13,6 +16,10 @@ import dev.langchain4j.exception.RetriableException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Real retrieval planner backed by the same LangChain4j ChatModel used for QA
@@ -22,16 +29,80 @@ import java.util.List;
  */
 public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
 
+    private static final Logger log = LoggerFactory.getLogger(LangChain4jRetrievalPlanner.class);
+
     private final LangChain4jPlannerAiService aiService;
+    private final String provider;
+    private final String model;
+    private final int configuredMaxRetries;
+    private final AiUsageMetrics usageMetrics;
 
     public LangChain4jRetrievalPlanner(LangChain4jPlannerAiService aiService) {
+        this(aiService, "unknown", "unknown", 0, AiUsageMetrics.noop());
+    }
+
+    LangChain4jRetrievalPlanner(
+        LangChain4jPlannerAiService aiService,
+        String provider,
+        String model,
+        int configuredMaxRetries,
+        AiUsageMetrics usageMetrics
+    ) {
         this.aiService = aiService;
+        this.provider = provider;
+        this.model = model;
+        this.configuredMaxRetries = configuredMaxRetries;
+        this.usageMetrics = usageMetrics == null ? AiUsageMetrics.noop() : usageMetrics;
     }
 
     @Override
     public RetrievalPlan plan(AgenticQaContext context, String question) {
+        return invoke(prompt(question, compactState(context)));
+    }
+
+    @Override
+    public RetrievalPlan plan(
+        AgenticQaContext context,
+        String question,
+        QaTelemetryContext telemetryContext
+    ) {
+        String compactState = compactState(context);
+        long questionChars = length(question);
+        long compactStateChars = compactState.length();
+        usageMetrics.recordInputScale("qa", "qa_planner", provider, model, QaTelemetryRoute.AGENTIC.value(),
+            "question_chars", questionChars);
+        usageMetrics.recordInputScale("qa", "qa_planner", provider, model, QaTelemetryRoute.AGENTIC.value(),
+            "compact_state_chars", compactStateChars);
+
+        long startedAtNanos = System.nanoTime();
+        String outcome = "failure";
+        String errorCategory = ErrorCode.INTERNAL_ERROR.name();
+        int plannedActionCount = 0;
         try {
-            PlannerAiResponse response = aiService.plan(prompt(context, question));
+            RetrievalPlan plan = invoke(prompt(question, compactState));
+            plannedActionCount = plan.actions() == null ? 0 : plan.actions().size();
+            outcome = "success";
+            errorCategory = "none";
+            return plan;
+        } catch (VideoAgentException exception) {
+            errorCategory = exception.errorCode().name();
+            throw exception;
+        } finally {
+            long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+            usageMetrics.recordLogicalCall("qa", "qa_planner", provider, model, QaTelemetryRoute.AGENTIC.value(),
+                outcome, errorCategory, durationMs);
+            log.info("event=ai.logical_call scope=qa stage=qa_planner provider={} model={} requestId={} videoId={} analysisTaskId={} mode={} questionChars={} compactStateChars={} plannedActionCount={} configuredMaxRetries={} durationMs={} outcome={} errorCategory={}",
+                provider, model, telemetryContext == null ? null : telemetryContext.requestId(),
+                telemetryContext == null ? null : telemetryContext.videoId(),
+                telemetryContext == null ? null : telemetryContext.analysisTaskId(),
+                QaTelemetryRoute.AGENTIC.value(), questionChars, compactStateChars, plannedActionCount,
+                configuredMaxRetries, durationMs, outcome, errorCategory);
+        }
+    }
+
+    private RetrievalPlan invoke(String prompt) {
+        try {
+            PlannerAiResponse response = aiService.plan(prompt);
             if (response == null || response.actions() == null) {
                 throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "Planner 返回空结果");
             }
@@ -95,15 +166,12 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
         throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "Planner 返回未知工具: " + raw);
     }
 
-    private String prompt(AgenticQaContext context, String question) {
+    private String prompt(String question, String compactState) {
         return """
             问题：%s
 
             当前视频状态：
-            - 是否存在字幕：%s
-            - 是否有已生成的摘要：%s
-            - 字幕上下文模式：%s
-            - RAG 索引状态：%s
+            %s
 
             请只规划使用哪些工具来回答该问题，不要直接回答。
             可用的工具：GET_VIDEO_SUMMARY, GET_TRANSCRIPT_BY_TIME, SEARCH_TRANSCRIPT。
@@ -111,10 +179,25 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
             比较类问题可以使用多个 SEARCH_TRANSCRIPT 动作分别检索不同主题。
             """.formatted(
             question,
+            compactState
+        );
+    }
+
+    private String compactState(AgenticQaContext context) {
+        return """
+            - 是否存在字幕：%s
+            - 是否有已生成的摘要：%s
+            - 字幕上下文模式：%s
+            - RAG 索引状态：%s
+            """.formatted(
             context.hasTranscript() ? "是" : "否",
             context.hasSummary() ? "是" : "否",
             context.contextMode() == null ? "未知" : context.contextMode().name(),
             context.ragStatus() == null ? "未知" : context.ragStatus()
         );
+    }
+
+    private static long length(String value) {
+        return value == null ? 0L : value.length();
     }
 }
