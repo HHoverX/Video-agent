@@ -61,7 +61,6 @@ videoagent:
       heartbeat-interval: ${ANALYSIS_HEARTBEAT_INTERVAL:2m}
       max-execution-time: ${ANALYSIS_MAX_EXECUTION_TIME:2h}
     recovery-interval-ms: ${ANALYSIS_RECOVERY_INTERVAL_MS:30000}
-    heartbeat-interval-ms: ${ANALYSIS_HEARTBEAT_INTERVAL_MS:120000}
     sse:
       timeout: ${VIDEO_ANALYSIS_SSE_TIMEOUT:30m}
   outbox:

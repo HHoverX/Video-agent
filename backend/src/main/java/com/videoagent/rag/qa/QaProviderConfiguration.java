@@ -9,15 +9,11 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.service.AiServices;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration(proxyBeanMethods = false)
 public class QaProviderConfiguration {
-
-    private static final Logger log = LoggerFactory.getLogger(QaProviderConfiguration.class);
 
     @Bean
     public VideoQaProvider videoQaProvider(
@@ -26,8 +22,10 @@ public class QaProviderConfiguration {
     ) {
         return switch (properties.provider()) {
             case "mock" -> new MockVideoQaProvider();
-            case "openai" -> realOrMock(properties, usageMetrics);
-            default -> new MockVideoQaProvider();
+            case "openai" -> realProvider(properties, usageMetrics);
+            default -> throw new IllegalArgumentException(
+                "Unsupported LLM_PROVIDER for Basic QA: " + properties.provider()
+            );
         };
     }
 
@@ -35,13 +33,14 @@ public class QaProviderConfiguration {
         return videoQaProvider(properties, AiUsageMetrics.noop());
     }
 
-    private VideoQaProvider realOrMock(
+    private VideoQaProvider realProvider(
         SummaryProviderProperties properties,
         AiUsageMetrics usageMetrics
     ) {
         if (!properties.hasRealProviderConfiguration()) {
-            log.warn("LLM provider=openai is missing API key or model; using MockVideoQaProvider");
-            return new MockVideoQaProvider();
+            throw new IllegalStateException(
+                "LLM_PROVIDER=openai requires LLM_API_KEY and LLM_MODEL for Basic QA"
+            );
         }
         var builder = OpenAiChatModel.builder()
             .apiKey(properties.apiKey())

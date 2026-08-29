@@ -11,10 +11,14 @@ import com.videoagent.analysis.repository.AnalysisTaskRepository;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.scheduling.annotation.Scheduled;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class AnalysisHeartbeatJobTest {
 
@@ -52,6 +56,24 @@ class AnalysisHeartbeatJobTest {
         job.heartbeatStaleEligibleTasks();
 
         verify(taskRepository).heartbeat(eq(202L), eq(2), any(LocalDateTime.class));
+    }
+
+    @Test
+    void shouldScheduleUsingTheValidatedReliabilityHeartbeatProperty() throws NoSuchMethodException {
+        Scheduled scheduled = AnalysisHeartbeatJob.class
+            .getMethod("heartbeatStaleEligibleTasks")
+            .getAnnotation(Scheduled.class);
+
+        assertThat(scheduled.fixedDelayString())
+            .isEqualTo("${videoagent.analysis.reliability.heartbeat-interval:2m}");
+    }
+
+    @Test
+    void shouldRejectHeartbeatIntervalAtOrAboveProcessingLease() {
+        assertThatThrownBy(() -> new AnalysisReliabilityProperties(
+            3, Duration.ofMinutes(2), Duration.ofMinutes(2), Duration.ofHours(2)
+        )).isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("heartbeat interval must be smaller");
     }
 
     private AnalysisTaskEntity processingTask(long id, int generation) {

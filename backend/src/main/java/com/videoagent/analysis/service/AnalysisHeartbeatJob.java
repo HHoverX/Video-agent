@@ -37,7 +37,7 @@ public class AnalysisHeartbeatJob {
         this.activeLeases = activeLeases;
     }
 
-    @Scheduled(fixedDelayString = "${videoagent.analysis.heartbeat-interval-ms:120000}")
+    @Scheduled(fixedDelayString = "${videoagent.analysis.reliability.heartbeat-interval:2m}")
     public void heartbeatStaleEligibleTasks() {
         LocalDateTime now = LocalDateTime.now();
         Instant clock = Instant.now();

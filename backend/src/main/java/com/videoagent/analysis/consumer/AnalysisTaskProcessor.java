@@ -183,6 +183,7 @@ public class AnalysisTaskProcessor {
             TranscriptionResult transcription;
             if (transcriptPersisted) {
                 populateMissingDuration(task, video);
+                validateVideoDuration(task, video.getDurationSeconds());
                 List<TranscriptSegment> segments = transcriptService.loadTaskSegments(task.getId());
                 transcription = new TranscriptionResult(segments);
                 log.info("[taskId={}][videoId={}][generation={}][stage=TRANSCRIPT_SAVED] resuming from persisted transcript",

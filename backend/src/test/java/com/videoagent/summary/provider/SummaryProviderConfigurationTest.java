@@ -13,18 +13,22 @@ class SummaryProviderConfigurationTest {
     private final SummaryProviderConfiguration configuration = new SummaryProviderConfiguration();
 
     @Test
-    void shouldUseMockByDefaultAndWhenOpenAiConfigurationIsIncomplete() {
+    void shouldUseMockOnlyWhenExplicitlyConfigured() {
         VideoSummaryProvider defaultProvider = configuration.videoSummaryProvider(
             new SummaryProviderProperties(null, null, null, null, null, null, null)
         );
-        VideoSummaryProvider incompleteOpenAi = configuration.videoSummaryProvider(
+
+        assertThat(defaultProvider).isInstanceOf(MockVideoSummaryProvider.class);
+    }
+
+    @Test
+    void shouldRejectIncompleteExplicitOpenAiConfiguration() {
+        assertThatThrownBy(() -> configuration.videoSummaryProvider(
             new SummaryProviderProperties(
                 "openai", "", "gpt-4.1-mini", "", Duration.ofSeconds(5), 0, null
             )
-        );
-
-        assertThat(defaultProvider).isInstanceOf(MockVideoSummaryProvider.class);
-        assertThat(incompleteOpenAi).isInstanceOf(MockVideoSummaryProvider.class);
+        )).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("LLM_API_KEY", "LLM_MODEL");
     }
 
     @Test

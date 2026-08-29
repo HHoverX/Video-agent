@@ -228,6 +228,60 @@ class AnalysisTaskProcessorTest {
     }
 
     @Test
+    void shouldRejectPersistedTranscriptAboveConfiguredDurationLimitBeforeSummaryAndRag() {
+        AnalysisTaskEntity task = taskWithStatus("RETRY_WAITING");
+        AnalysisTaskEntity claimed = claimedTask(task);
+        VideoEntity video = video();
+        video.setDurationSeconds(3_601);
+
+        when(repository.selectById(101L)).thenReturn(task, claimed);
+        when(repository.claimPending(eq(101L), eq("PREPARING"), eq(10), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.markFailedForGeneration(
+            eq(101L), eq(1), eq("ANALYSIS_VIDEO_TOO_LONG"), anyString(), any(LocalDateTime.class)
+        )).thenReturn(1);
+        when(videoRepository.selectById(7L)).thenReturn(video);
+        when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(true);
+
+        processor.process(new AnalysisMessage(101L, 7L));
+
+        verify(transcriptService, never()).loadTaskSegments(anyLong());
+        verify(summaryProvider, never()).summarize(any());
+        verify(summaryService, never()).replaceTaskResult(any(), any(), any());
+        verify(ragIndexService, never()).ensureAnalysisIndex(any(), anyLong());
+        verify(repository).markFailedForGeneration(
+            eq(101L), eq(1), eq("ANALYSIS_VIDEO_TOO_LONG"),
+            eq("视频时长超过当前 AI 分析支持范围，请缩短视频后重试"), any(LocalDateTime.class)
+        );
+    }
+
+    @Test
+    void shouldResumePersistedTranscriptAtConfiguredDurationLimit() {
+        AnalysisTaskEntity task = taskWithStatus("RETRY_WAITING");
+        AnalysisTaskEntity claimed = claimedTask(task);
+        VideoEntity video = video();
+        video.setDurationSeconds(3_600);
+
+        when(repository.selectById(101L)).thenReturn(task, claimed);
+        when(repository.claimPending(eq(101L), eq("PREPARING"), eq(10), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.updateProcessingProgress(eq(101L), anyString(), anyInt(), eq(1), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(repository.markSuccess(eq(101L), eq(1), any(LocalDateTime.class))).thenReturn(1);
+        when(videoRepository.selectById(7L)).thenReturn(video);
+        when(transcriptService.taskHasPersistedSegments(101L)).thenReturn(true);
+        when(transcriptService.loadTaskSegments(101L))
+            .thenReturn(List.of(new TranscriptSegment(0, 2_000, "segment one")));
+        when(summaryService.taskHasPersistedSummary(101L)).thenReturn(true);
+
+        processor.process(new AnalysisMessage(101L, 7L));
+
+        verify(summaryProvider, never()).summarize(any());
+        verify(ragIndexService).ensureAnalysisIndex(claimed, 1L);
+        verify(repository).markSuccess(eq(101L), eq(1), any(LocalDateTime.class));
+    }
+
+    @Test
     void shouldRejectNonPositiveAnalysisMaxVideoDuration() {
         assertThatThrownBy(() -> new AnalysisProperties(
             "topic", "consumer", "type", "version", Duration.ofHours(24), Duration.ZERO
