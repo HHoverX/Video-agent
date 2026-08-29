@@ -14,6 +14,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.videoagent.analysis.dto.AnalysisMessage;
 import com.videoagent.analysis.dto.AnalysisProgressSnapshot;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
@@ -48,6 +51,7 @@ import com.videoagent.telemetry.AnalysisTelemetryContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -502,8 +506,9 @@ class AnalysisTaskProcessorTest {
             .thenReturn(1);
         when(repository.updateProcessingProgress(eq(101L), anyString(), anyInt(), eq(1), any(LocalDateTime.class)))
             .thenReturn(1);
+        String sentinel = "TOP_SECRET_PROVIDER_BODY_7F31";
         when(repository.markFailedForGeneration(
-            eq(101L), eq(1), eq("INTERNAL_ANALYSIS_ERROR"), eq("unexpected programming error"), any(LocalDateTime.class)
+            eq(101L), eq(1), eq("INTERNAL_ANALYSIS_ERROR"), eq("分析任务内部处理失败"), any(LocalDateTime.class)
         )).thenReturn(1);
         when(videoRepository.selectById(7L)).thenReturn(video);
         when(workspaceFactory.create(101L)).thenReturn(workspace);
@@ -514,18 +519,29 @@ class AnalysisTaskProcessorTest {
         when(asrProvider.transcribe(eq(new AudioSource(audio, 4)), any(AnalysisTelemetryContext.class)))
             .thenReturn(transcription);
         when(summaryProvider.summarize(any())).thenThrow(
-            new NullPointerException("unexpected programming error")
+            new IllegalStateException(sentinel)
         );
 
-        processor.process(new AnalysisMessage(101L, 7L));
+        Logger logger = (Logger) LoggerFactory.getLogger(AnalysisTaskProcessor.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            processor.process(new AnalysisMessage(101L, 7L));
+        } finally {
+            logger.detachAppender(appender);
+        }
 
         verify(transcriptService).replaceTaskSegments(claimed, transcription);
         verify(repository).markFailedForGeneration(
-            eq(101L), eq(1), eq("INTERNAL_ANALYSIS_ERROR"), eq("unexpected programming error"), any(LocalDateTime.class)
+            eq(101L), eq(1), eq("INTERNAL_ANALYSIS_ERROR"), eq("分析任务内部处理失败"), any(LocalDateTime.class)
         );
         verify(retryCoordinator, never()).handleRetryableFailure(any(), any(), any(), any());
         verify(repository, never()).markSuccess(anyLong(), anyInt(), any());
-        verify(terminalNotifier).failed(eq(101L), eq(7L), anyInt(), eq("INTERNAL_ANALYSIS_ERROR"), eq("unexpected programming error"));
+        verify(terminalNotifier).failed(eq(101L), eq(7L), anyInt(), eq("INTERNAL_ANALYSIS_ERROR"), eq("分析任务内部处理失败"));
+        assertThat(appender.list).anySatisfy(event -> assertThat(event.getFormattedMessage())
+            .contains("INTERNAL_ANALYSIS_ERROR", "IllegalStateException"));
+        assertThat(appender.list).allSatisfy(event -> assertThat(event.getFormattedMessage()).doesNotContain(sentinel));
     }
 
     @Test

@@ -255,7 +255,7 @@ public class AnalysisTaskProcessor {
                 exception.retryAfter()
             );
         } catch (RuntimeException exception) {
-            handleFailure(task, lastProgress, "INTERNAL_ANALYSIS_ERROR", exception.getMessage(), exception);
+            handleFailure(task, lastProgress, "INTERNAL_ANALYSIS_ERROR", "分析任务内部处理失败", exception);
         } finally {
             if (activeGeneration != null) {
                 activeLeases.unregister(task.getId(), activeGeneration);
@@ -380,13 +380,13 @@ public class AnalysisTaskProcessor {
                     progress,
                     AnalysisStage.RETRY_WAITING.message()
                 ), errorCode, safeMessage);
-                log.warn("[taskId={}][videoId={}][generation={}][stage=RETRY_WAITING] retryable failure recorded: {}",
-                    task.getId(), task.getVideoId(), task.getProcessingGeneration(), safeMessage);
+                log.warn("[taskId={}][videoId={}][generation={}][stage=RETRY_WAITING][errorCode={}][exceptionClass={}] retryable failure recorded",
+                    task.getId(), task.getVideoId(), task.getProcessingGeneration(), errorCode, exceptionClass(cause));
             } else if (outcome == AnalysisRetryCoordinator.RetryOutcome.FAILED_TERMINAL) {
                 // MEDIUM #6: budget exhausted inside the retry transition.
                 terminalNotifier.failed(task.getId(), task.getVideoId(), progress, errorCode, safeMessage);
-                log.warn("[taskId={}][videoId={}][generation={}][stage=FAILED] retry budget exhausted: {}",
-                    task.getId(), task.getVideoId(), task.getProcessingGeneration(), safeMessage);
+                log.warn("[taskId={}][videoId={}][generation={}][stage=FAILED][errorCode={}][exceptionClass={}] retry budget exhausted",
+                    task.getId(), task.getVideoId(), task.getProcessingGeneration(), errorCode, exceptionClass(cause));
             } else {
                 log.info("[taskId={}][videoId={}][generation={}] retry transition lost concurrency; stopping",
                     task.getId(), task.getVideoId(), task.getProcessingGeneration());
@@ -407,9 +407,14 @@ public class AnalysisTaskProcessor {
                 log.info("[taskId={}][videoId={}][generation={}] non-retryable FAILED transition lost fencing; stopping",
                     task.getId(), task.getVideoId(), task.getProcessingGeneration());
             }
-            log.error("[taskId={}][videoId={}][stage=FAILED] non-retryable analysis failure: {}",
-                task.getId(), task.getVideoId(), safeMessage, cause);
+            log.error("[taskId={}][videoId={}][generation={}][retryCount={}][stage=FAILED][errorCode={}][exceptionClass={}] non-retryable analysis failure",
+                task.getId(), task.getVideoId(), task.getProcessingGeneration(), task.getRetryCount(), errorCode,
+                exceptionClass(cause));
         }
+    }
+
+    private String exceptionClass(RuntimeException exception) {
+        return exception == null ? "none" : exception.getClass().getSimpleName();
     }
 
     private String checkpointStage(AnalysisTaskEntity task) {

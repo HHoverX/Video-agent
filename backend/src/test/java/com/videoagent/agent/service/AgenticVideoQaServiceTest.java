@@ -242,6 +242,42 @@ class AgenticVideoQaServiceTest {
     }
 
     @Test
+    void shouldNotLogPlannerFailureDetailWhenFallingBackToBasicQa() {
+        String sentinel = "TOP_SECRET_PROVIDER_BODY_7F31\nuser-looking text";
+        when(ownershipService.requireOwned(7L, 1L)).thenReturn(null);
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(shortSegments());
+        when(summaryService.getSummary(7L, 1L)).thenReturn(java.util.Optional.empty());
+        when(ragIndexService.getStatus(eq(7L), eq(1L), anyList())).thenReturn(null);
+        when(planner.plan(any(), anyString(), any(QaTelemetryContext.class))).thenThrow(
+            new VideoAgentException(ErrorCode.AGENT_PLANNER_FAILED, sentinel));
+        when(basicQaService.answerWithContext(
+            eq(7L), eq(1L), eq("问题"), any(QaTelemetryContext.class),
+            eq(QaTelemetryRoute.AGENTIC_FALLBACK_BASIC)
+        )).thenReturn(new QaResponse("DIRECT_CONTEXT", "基础答案", List.of()));
+
+        Logger logger = (Logger) LoggerFactory.getLogger(AgenticVideoQaService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        AgenticQaResponse response;
+        try {
+            response = service.answerAgentic(7L, 1L, "问题");
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertThat(response.strategy()).isEqualTo("BASIC_FALLBACK");
+        var context = org.mockito.ArgumentCaptor.forClass(QaTelemetryContext.class);
+        verify(basicQaService).answerWithContext(
+            eq(7L), eq(1L), eq("问题"), context.capture(), eq(QaTelemetryRoute.AGENTIC_FALLBACK_BASIC)
+        );
+        assertThat(java.util.UUID.fromString(context.getValue().requestId())).isNotNull();
+        assertThat(appender.list).anySatisfy(event -> assertThat(event.getFormattedMessage())
+            .contains("AGENT_PLANNER_FAILED", "VideoAgentException"));
+        assertThat(appender.list).allSatisfy(event -> assertThat(event.getFormattedMessage()).doesNotContain(sentinel));
+    }
+
+    @Test
     void shouldNotFallBackWhenPlannerProviderRejectsAuthenticationOrConfiguration() {
         when(ownershipService.requireOwned(7L, 1L)).thenReturn(null);
         when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(shortSegments());

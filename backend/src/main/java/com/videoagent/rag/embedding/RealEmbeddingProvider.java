@@ -181,11 +181,13 @@ public class RealEmbeddingProvider implements EmbeddingProvider {
             errorCategory = "HTTP_" + httpStatus / 100 + "XX";
             throw failure;
         } catch (ResourceAccessException exception) {
-            log.warn("[embedding] network or timeout failure: {}", exception.getMessage());
+            log.warn("[embedding][errorCode={}][exceptionClass={}] network or timeout failure",
+                ErrorCode.EMBEDDING_REQUEST_FAILED, exception.getClass().getSimpleName());
             errorCategory = ErrorCode.EMBEDDING_REQUEST_FAILED.name();
             throw new VideoAgentException(ErrorCode.EMBEDDING_REQUEST_FAILED, "Embedding 服务网络请求失败", exception);
         } catch (RestClientException exception) {
-            log.warn("[embedding] real embedding request failed: {}", exception.getMessage(), exception);
+            log.warn("[embedding][errorCode={}][exceptionClass={}] real embedding response parsing failed",
+                ErrorCode.EMBEDDING_RESPONSE_INVALID, exception.getClass().getSimpleName());
             errorCategory = ErrorCode.EMBEDDING_RESPONSE_INVALID.name();
             throw new VideoAgentException(ErrorCode.EMBEDDING_RESPONSE_INVALID, "Embedding 服务响应无法解析", exception);
         } finally {

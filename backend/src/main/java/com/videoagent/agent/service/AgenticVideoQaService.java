@@ -122,8 +122,12 @@ public class AgenticVideoQaService {
                 if (!isFallbackEligible(plannerFailure)) {
                     throw plannerFailure;
                 }
-                log.warn("[requestId={}][userId={}][videoId={}] agentic planner failed; using BASIC_FALLBACK: {}",
-                    telemetryContext.requestId(), userId, videoId, safeMessage(plannerFailure));
+                ErrorCode errorCode = plannerFailure instanceof VideoAgentException exception
+                    ? exception.errorCode()
+                    : ErrorCode.INTERNAL_ERROR;
+                log.warn("[requestId={}][userId={}][videoId={}][analysisTaskId={}][errorCode={}][exceptionClass={}] agentic planner failed; using BASIC_FALLBACK",
+                    telemetryContext.requestId(), userId, videoId, telemetryContext.analysisTaskId(), errorCode,
+                    plannerFailure.getClass().getSimpleName());
                 completionDelegatedToBasic = true;
                 return fallbackToBasic(videoId, userId, question, telemetryContext, context);
             }
@@ -278,11 +282,6 @@ public class AgenticVideoQaService {
             ));
         }
         return citations;
-    }
-
-    private String safeMessage(RuntimeException exception) {
-        String message = exception.getMessage();
-        return message == null || message.isBlank() ? "unknown planner failure" : message;
     }
 
     private boolean isFallbackEligible(RuntimeException failure) {

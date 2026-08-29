@@ -86,13 +86,19 @@ class LangChain4jVideoSummaryProviderTest {
 
     @Test
     void shouldMapInvalidRequestAsProviderRejected() {
+        String sentinel = "TOP_SECRET_PROVIDER_BODY_7F31";
         when(aiService.summarize(contains("<transcript>")))
-            .thenThrow(new InvalidRequestException("bad model"));
+            .thenThrow(new InvalidRequestException(sentinel));
 
         assertThatThrownBy(() -> provider.summarize(request()))
             .isInstanceOf(VideoAgentException.class)
-            .satisfies(exception -> assertThat(((VideoAgentException) exception).errorCode().name())
-                .isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED.name()));
+            .satisfies(exception -> {
+                VideoAgentException failure = (VideoAgentException) exception;
+                assertThat(failure.errorCode()).isEqualTo(ErrorCode.LLM_PROVIDER_REJECTED);
+                assertThat(failure.getMessage())
+                    .isEqualTo("LLM 服务拒绝了请求")
+                    .doesNotContain(sentinel);
+            });
     }
 
     @Test

@@ -3,6 +3,9 @@ package com.videoagent.rag.embedding;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -19,6 +22,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -85,6 +89,27 @@ class RealEmbeddingProviderTest {
         assertThat(meterRegistry.get("videoagent.ai.provider.requests")
             .tag("stage", "embedding_document").tag("outcome", "failure")
             .tag("error_category", "HTTP_5XX").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    void shouldNotLogMalformedProviderResponseBody() throws Exception {
+        String sentinel = "TOP_SECRET_PROVIDER_BODY_7F31";
+        startServer(exchange -> respond(exchange, 200, "{" + sentinel));
+        Logger logger = (Logger) LoggerFactory.getLogger(RealEmbeddingProvider.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            assertThatThrownBy(() -> provider(AiUsageMetrics.noop()).embedDocuments(List.of("document")))
+                .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                    assertThat(exception.errorCode()).isEqualTo(ErrorCode.EMBEDDING_RESPONSE_INVALID));
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertThat(appender.list).anySatisfy(event -> assertThat(event.getFormattedMessage())
+            .contains("EMBEDDING_RESPONSE_INVALID", "RestClientException"));
+        assertThat(appender.list).allSatisfy(event -> assertThat(event.getFormattedMessage()).doesNotContain(sentinel));
     }
 
     @Test

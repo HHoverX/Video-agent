@@ -101,7 +101,7 @@ public class LangChain4jVideoSummaryProvider implements VideoSummaryProvider {
             // ModelNotFoundException and ContentFilteredException).
             VideoAgentException failure = new VideoAgentException(
                 ErrorCode.LLM_PROVIDER_REJECTED,
-                "LLM 服务拒绝了请求: " + safeMessage(exception),
+                "LLM 服务拒绝了请求",
                 exception
             );
             errorCategory = failure.errorCode().name();
@@ -130,11 +130,6 @@ public class LangChain4jVideoSummaryProvider implements VideoSummaryProvider {
                 durationMs);
             logLogicalCall(request.telemetryContext(), request, promptChars, durationMs, outcome, errorCategory);
         }
-    }
-
-    private String safeMessage(Exception exception) {
-        String message = exception.getMessage();
-        return message == null || message.isBlank() ? "未知错误" : message;
     }
 
     String prompt(VideoSummaryRequest request) {

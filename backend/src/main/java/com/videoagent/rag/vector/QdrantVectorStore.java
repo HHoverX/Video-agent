@@ -12,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -60,8 +61,9 @@ public class QdrantVectorStore {
                 .retrieve()
                 .toBodilessEntity();
         } catch (RestClientException exception) {
-            log.warn("[collection={}] qdrant collection ensure failed: {}",
-                properties.collection(), safeMessage(exception));
+            log.warn("[collection={}][errorCode={}][exceptionClass={}][httpStatus={}] qdrant collection ensure failed",
+                properties.collection(), ErrorCode.RAG_INDEX_BUILD_FAILED, exception.getClass().getSimpleName(),
+                httpStatus(exception));
             throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
                 "无法初始化向量集合", exception);
         }
@@ -109,8 +111,9 @@ public class QdrantVectorStore {
                 .retrieve()
                 .toBodilessEntity();
         } catch (RestClientException exception) {
-            log.warn("[userId={}][videoId={}][taskId={}][chunkCount={}] qdrant upsert failed: {}",
-                userId, videoId, taskId, points.size(), safeMessage(exception));
+            log.warn("[userId={}][videoId={}][taskId={}][chunkCount={}][errorCode={}][exceptionClass={}][httpStatus={}] qdrant upsert failed",
+                userId, videoId, taskId, points.size(), ErrorCode.RAG_INDEX_BUILD_FAILED,
+                exception.getClass().getSimpleName(), httpStatus(exception));
             throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
                 "向量写入失败", exception);
         }
@@ -120,8 +123,8 @@ public class QdrantVectorStore {
         try {
             deleteByVideoStrict(userId, videoId);
         } catch (VideoAgentException exception) {
-            log.warn("[userId={}][videoId={}] qdrant delete best-effort failed: {}",
-                userId, videoId, safeMessage(exception));
+            log.warn("[userId={}][videoId={}][errorCode={}][exceptionClass={}] qdrant delete best-effort failed",
+                userId, videoId, exception.errorCode(), exception.getClass().getSimpleName());
         }
     }
 
@@ -177,8 +180,9 @@ public class QdrantVectorStore {
             }
             return results;
         } catch (RestClientException exception) {
-            log.warn("[userId={}][videoId={}][topK={}] qdrant search failed: {}",
-                userId, videoId, topK, safeMessage(exception));
+            log.warn("[userId={}][videoId={}][topK={}][errorCode={}][exceptionClass={}][httpStatus={}] qdrant search failed",
+                userId, videoId, topK, ErrorCode.RAG_INDEX_BUILD_FAILED, exception.getClass().getSimpleName(),
+                httpStatus(exception));
             throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
                 "向量检索失败", exception);
         }
@@ -233,9 +237,10 @@ public class QdrantVectorStore {
         return value == null ? "" : value.toString();
     }
 
-    private String safeMessage(RuntimeException exception) {
-        String message = exception.getMessage();
-        return message == null || message.isBlank() ? "qdrant request failed" : message;
+    private Integer httpStatus(RestClientException exception) {
+        return exception instanceof RestClientResponseException responseException
+            ? responseException.getStatusCode().value()
+            : null;
     }
 
     private record SearchResponse(List<ScoredPoint> result) {
