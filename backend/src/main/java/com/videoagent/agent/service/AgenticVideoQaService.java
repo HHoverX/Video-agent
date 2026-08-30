@@ -1,10 +1,14 @@
 package com.videoagent.agent.service;
 
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.config.ConversationMemoryProperties;
 import com.videoagent.agent.dto.AgenticCitation;
 import com.videoagent.agent.dto.AgenticQaResponse;
 import com.videoagent.agent.evidence.EvidenceItem;
 import com.videoagent.agent.evidence.EvidenceNormalizer;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.agent.memory.ConversationMemory;
+import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalPlanValidator;
@@ -64,6 +68,8 @@ public class AgenticVideoQaService {
     private final EvidenceNormalizer evidenceNormalizer;
     private final AgenticAnswerProvider answerProvider;
     private final VideoQaService basicQaService;
+    private final ConversationMemory conversationMemory;
+    private final ConversationMemoryProperties conversationMemoryProperties;
 
     public AgenticVideoQaService(
         VideoOwnershipService ownershipService,
@@ -76,7 +82,9 @@ public class AgenticVideoQaService {
         AgenticToolExecutor toolExecutor,
         EvidenceNormalizer evidenceNormalizer,
         AgenticAnswerProvider answerProvider,
-        VideoQaService basicQaService
+        VideoQaService basicQaService,
+        ConversationMemory conversationMemory,
+        ConversationMemoryProperties conversationMemoryProperties
     ) {
         this.ownershipService = ownershipService;
         this.segmentRepository = segmentRepository;
@@ -89,6 +97,8 @@ public class AgenticVideoQaService {
         this.evidenceNormalizer = evidenceNormalizer;
         this.answerProvider = answerProvider;
         this.basicQaService = basicQaService;
+        this.conversationMemory = conversationMemory;
+        this.conversationMemoryProperties = conversationMemoryProperties;
     }
 
     public AgenticQaResponse answerAgentic(long videoId, long userId, String question) {
@@ -101,20 +111,23 @@ public class AgenticVideoQaService {
         String errorCategory = ErrorCode.INTERNAL_ERROR.name();
         try {
             ownershipService.requireOwned(videoId, userId);
+            ConversationHistory history = loadHistory(userId, videoId);
 
             List<VideoTranscriptSegmentEntity> segments = segmentRepository.findLatestSuccessfulByVideoId(videoId);
             AgenticQaContext context = buildContext(videoId, userId, segments);
             telemetryContext = telemetryContext.withAnalysisTaskId(context.analysisTaskId());
             if (segments.isEmpty()) {
                 completionDelegatedToBasic = true;
-                return fallbackToBasic(videoId, userId, question, telemetryContext, context);
+                AgenticQaResponse response = fallbackToBasic(
+                    videoId, userId, question, telemetryContext, context);
+                return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
             RetrievalPlan plan;
             List<RetrievalAction> actions;
             RetrievalStrategy strategy;
             try {
-                plan = planner.plan(context, question, telemetryContext);
+                plan = planner.plan(context, question, history, telemetryContext);
                 planValidator.validate(plan, context);
                 actions = plan.actions().stream().distinct().toList();
                 strategy = RetrievalStrategy.derive(actions);
@@ -129,7 +142,9 @@ public class AgenticVideoQaService {
                     telemetryContext.requestId(), userId, videoId, telemetryContext.analysisTaskId(), errorCode,
                     plannerFailure.getClass().getSimpleName());
                 completionDelegatedToBasic = true;
-                return fallbackToBasic(videoId, userId, question, telemetryContext, context);
+                AgenticQaResponse response = fallbackToBasic(
+                    videoId, userId, question, telemetryContext, context);
+                return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
             List<String> toolsUsed = actions.stream()
@@ -147,16 +162,18 @@ public class AgenticVideoQaService {
                     telemetryContext.requestId(), userId, videoId, strategy, toolsUsed.size());
                 outcome = "success";
                 errorCategory = "none";
-                return new AgenticQaResponse(
+                AgenticQaResponse response = new AgenticQaResponse(
                     "根据当前视频内容无法确定。",
                     strategy.name(),
                     context.contextMode() == null ? null : context.contextMode().name(),
                     toolsUsed,
                     List.of()
                 );
+                return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
-            AgenticQaResult result = answerProvider.synthesize(question, evidence, telemetryContext, toolActionCount);
+            AgenticQaResult result = answerProvider.synthesize(
+                question, history, evidence, telemetryContext, toolActionCount);
             Map<String, EvidenceItem> byId = new LinkedHashMap<>();
             for (EvidenceItem item : evidence) {
                 byId.put(item.evidenceId(), item);
@@ -165,13 +182,14 @@ public class AgenticVideoQaService {
             if (citations.isEmpty()) {
                 outcome = "success";
                 errorCategory = "none";
-                return new AgenticQaResponse(
+                AgenticQaResponse response = new AgenticQaResponse(
                     "根据当前视频内容无法确定。",
                     strategy.name(),
                     context.contextMode() == null ? null : context.contextMode().name(),
                     toolsUsed,
                     List.of()
                 );
+                return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
             log.info("[requestId={}][userId={}][videoId={}][strategy={}][contextMode={}][toolCount={}][toolsUsed={}] agentic qa answered",
@@ -180,13 +198,14 @@ public class AgenticVideoQaService {
                 toolsUsed.size(), toolsUsed);
             outcome = "success";
             errorCategory = "none";
-            return new AgenticQaResponse(
+            AgenticQaResponse response = new AgenticQaResponse(
                 result.answer(),
                 strategy.name(),
                 context.contextMode() == null ? null : context.contextMode().name(),
                 toolsUsed,
                 citations
             );
+            return rememberSuccessfulTurn(userId, videoId, question, response);
         } catch (VideoAgentException exception) {
             errorCategory = exception.errorCode().name();
             throw exception;
@@ -255,6 +274,28 @@ public class AgenticVideoQaService {
             List.of(),
             citations
         );
+    }
+
+    private ConversationHistory loadHistory(
+        long userId,
+        long videoId
+    ) {
+        return conversationMemory.load(userId, videoId)
+            .boundedTo(conversationMemoryProperties.maxHistoryChars());
+    }
+
+    private AgenticQaResponse rememberSuccessfulTurn(
+        long userId,
+        long videoId,
+        String question,
+        AgenticQaResponse response
+    ) {
+        conversationMemory.appendTurn(
+            userId,
+            videoId,
+            new ConversationTurn(question, response.answer())
+        );
+        return response;
     }
 
     private List<AgenticCitation> resolveCitations(

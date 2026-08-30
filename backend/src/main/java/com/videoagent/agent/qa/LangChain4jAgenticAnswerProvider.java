@@ -3,6 +3,8 @@ package com.videoagent.agent.qa;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.agent.evidence.EvidenceItem;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.summary.provider.SummaryProviderProperties;
@@ -76,13 +78,9 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
     }
 
     @Override
-    public AgenticQaResult synthesize(String question, List<EvidenceItem> evidence) {
-        return invoke(question, evidence);
-    }
-
-    @Override
     public AgenticQaResult synthesize(
         String question,
+        ConversationHistory history,
         List<EvidenceItem> evidence,
         QaTelemetryContext telemetryContext,
         int toolActionCount
@@ -103,7 +101,7 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
         String outcome = "failure";
         String errorCategory = ErrorCode.INTERNAL_ERROR.name();
         try {
-            AgenticQaResult result = invoke(question, evidence);
+            AgenticQaResult result = invoke(question, history, evidence);
             outcome = "success";
             errorCategory = "none";
             return result;
@@ -123,9 +121,13 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
         }
     }
 
-    private AgenticQaResult invoke(String question, List<EvidenceItem> evidence) {
+    private AgenticQaResult invoke(
+        String question,
+        ConversationHistory history,
+        List<EvidenceItem> evidence
+    ) {
         try {
-            AgenticQaAiResponse response = aiService.synthesize(prompt(question, evidence));
+            AgenticQaAiResponse response = aiService.synthesize(prompt(question, history, evidence));
             if (response == null || response.answer() == null || response.answer().isBlank()) {
                 throw new VideoAgentException(ErrorCode.LLM_SUMMARY_INVALID, "问答服务返回空回答");
             }
@@ -158,13 +160,18 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
         return evidence.stream().mapToLong(item -> item == null ? 0L : length(item.text())).sum();
     }
 
-    private String prompt(String question, List<EvidenceItem> evidence) {
+    private String prompt(
+        String question,
+        ConversationHistory history,
+        List<EvidenceItem> evidence
+    ) {
+        List<ConversationTurn> turns = history == null ? List.of() : history.turns();
         List<PromptEvidence> promptEvidence = evidence.stream()
             .map(item -> new PromptEvidence(
                 item.evidenceId(), item.sourceType().name(), item.text(), item.startMs(), item.endMs()))
             .toList();
         try {
-            return objectMapper.writeValueAsString(new AnswerPrompt(question, promptEvidence));
+            return objectMapper.writeValueAsString(new AnswerPrompt(question, turns, promptEvidence));
         } catch (JsonProcessingException exception) {
             throw new VideoAgentException(
                 ErrorCode.INTERNAL_ERROR,
@@ -182,7 +189,11 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
         return new VideoAgentException(ErrorCode.LLM_PROVIDER_REJECTED, message, cause);
     }
 
-    private record AnswerPrompt(String question, List<PromptEvidence> evidence) {
+    private record AnswerPrompt(
+        String currentQuestion,
+        List<ConversationTurn> conversationHistory,
+        List<PromptEvidence> currentEvidence
+    ) {
     }
 
     private record PromptEvidence(

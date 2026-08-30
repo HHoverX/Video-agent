@@ -1,6 +1,7 @@
 package com.videoagent.agent.planner;
 
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.memory.ConversationHistory;
 import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.telemetry.QaTelemetryContext;
 
@@ -11,13 +12,22 @@ import com.videoagent.telemetry.QaTelemetryContext;
  */
 public interface RetrievalPlannerProvider {
 
-    RetrievalPlan plan(AgenticQaContext context, String question);
+    RetrievalPlan plan(
+        AgenticQaContext context,
+        String question,
+        ConversationHistory history,
+        QaTelemetryContext telemetryContext
+    );
+
+    default RetrievalPlan plan(AgenticQaContext context, String question) {
+        return plan(context, question, ConversationHistory.empty(), null);
+    }
 
     default RetrievalPlan plan(
         AgenticQaContext context,
         String question,
         QaTelemetryContext telemetryContext
     ) {
-        return plan(context, question);
+        return plan(context, question, ConversationHistory.empty(), telemetryContext);
     }
 }

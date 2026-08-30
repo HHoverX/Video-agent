@@ -1,8 +1,10 @@
 package com.videoagent.agent.planner;
 
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.memory.ConversationHistory;
 import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalPlan;
+import com.videoagent.telemetry.QaTelemetryContext;
 
 import java.util.List;
 import java.util.Locale;
@@ -22,6 +24,16 @@ public class MockRetrievalPlannerProvider implements RetrievalPlannerProvider {
 
     @Override
     public RetrievalPlan plan(AgenticQaContext context, String question) {
+        return plan(context, question, ConversationHistory.empty(), null);
+    }
+
+    @Override
+    public RetrievalPlan plan(
+        AgenticQaContext context,
+        String question,
+        ConversationHistory history,
+        QaTelemetryContext telemetryContext
+    ) {
         String q = question == null ? "" : question.toLowerCase(Locale.ROOT);
 
         Matcher time = TIME_PATTERN.matcher(q);
@@ -46,7 +58,20 @@ public class MockRetrievalPlannerProvider implements RetrievalPlannerProvider {
         }
 
         return new RetrievalPlan("SEMANTIC_SEARCH", "SEMANTIC_SEARCH",
-            List.of(RetrievalAction.search(question)));
+            List.of(RetrievalAction.search(contextualQuestion(question, history))));
+    }
+
+    private String contextualQuestion(String question, ConversationHistory history) {
+        String current = question == null ? "" : question.toLowerCase(Locale.ROOT);
+        if (history == null || history.turns().isEmpty()
+            || !containsAny(current, "它", "这个", "那个", "刚才", "前面", "上述", "这种", "那")) {
+            return question;
+        }
+        String previousQuestion = history.turns().getLast().question();
+        if (previousQuestion == null || previousQuestion.isBlank()) {
+            return question;
+        }
+        return previousQuestion + " " + question;
     }
 
     private long parseTimeMs(Matcher m) {

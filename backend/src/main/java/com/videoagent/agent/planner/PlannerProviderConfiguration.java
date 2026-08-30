@@ -1,5 +1,6 @@
 package com.videoagent.agent.planner;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.agent.config.AgentProperties;
 import com.videoagent.summary.provider.SummaryProviderProperties;
 import com.videoagent.telemetry.AiUsageMetrics;
@@ -23,11 +24,12 @@ public class PlannerProviderConfiguration {
     public RetrievalPlannerProvider retrievalPlannerProvider(
         AgentProperties agentProperties,
         SummaryProviderProperties llmProperties,
-        AiUsageMetrics usageMetrics
+        AiUsageMetrics usageMetrics,
+        ObjectMapper objectMapper
     ) {
         return switch (agentProperties.plannerProvider()) {
             case "mock" -> new MockRetrievalPlannerProvider();
-            case "llm" -> realPlanner(agentProperties, llmProperties, usageMetrics);
+            case "llm" -> realPlanner(agentProperties, llmProperties, usageMetrics, objectMapper);
             default -> throw new IllegalArgumentException(
                 "Unsupported AGENT_PLANNER_PROVIDER: " + agentProperties.plannerProvider()
             );
@@ -38,13 +40,32 @@ public class PlannerProviderConfiguration {
         AgentProperties agentProperties,
         SummaryProviderProperties llmProperties
     ) {
-        return retrievalPlannerProvider(agentProperties, llmProperties, AiUsageMetrics.noop());
+        return retrievalPlannerProvider(
+            agentProperties,
+            llmProperties,
+            AiUsageMetrics.noop(),
+            new ObjectMapper()
+        );
+    }
+
+    RetrievalPlannerProvider retrievalPlannerProvider(
+        AgentProperties agentProperties,
+        SummaryProviderProperties llmProperties,
+        AiUsageMetrics usageMetrics
+    ) {
+        return retrievalPlannerProvider(
+            agentProperties,
+            llmProperties,
+            usageMetrics,
+            new ObjectMapper()
+        );
     }
 
     private RetrievalPlannerProvider realPlanner(
         AgentProperties agentProperties,
         SummaryProviderProperties llmProperties,
-        AiUsageMetrics usageMetrics
+        AiUsageMetrics usageMetrics,
+        ObjectMapper objectMapper
     ) {
         if (!"openai".equals(llmProperties.provider())) {
             throw new IllegalStateException(
@@ -76,6 +97,7 @@ public class PlannerProviderConfiguration {
         );
         return new LangChain4jRetrievalPlanner(
             aiService,
+            objectMapper,
             llmProperties.provider(),
             model,
             llmProperties.maxRetries(),

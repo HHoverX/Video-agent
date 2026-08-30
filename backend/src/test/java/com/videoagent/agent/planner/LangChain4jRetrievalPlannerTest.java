@@ -6,8 +6,12 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.agent.config.AgentProperties;
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalPlanValidator;
 import com.videoagent.common.exception.ErrorCode;
@@ -23,12 +27,14 @@ import dev.langchain4j.exception.TimeoutException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
 class LangChain4jRetrievalPlannerTest {
 
     private final LangChain4jPlannerAiService aiService = mock(LangChain4jPlannerAiService.class);
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final LangChain4jRetrievalPlanner planner = new LangChain4jRetrievalPlanner(aiService);
     private final AgentProperties properties =
         new AgentProperties("mock", 4, 15_000L, 120_000L, 12, 12_000, "");
@@ -94,13 +100,46 @@ class LangChain4jRetrievalPlannerTest {
     }
 
     @Test
+    void shouldSeparateHistoryCurrentQuestionAndVideoStateInPrompt() throws Exception {
+        when(aiService.plan(anyString())).thenReturn(new PlannerAiResponse(
+            "SEMANTIC_SEARCH", "ignored",
+            List.of(new PlannerAction("SEARCH_TRANSCRIPT", "Redis 缺点", null, null))
+        ));
+        ConversationHistory history = new ConversationHistory(List.of(
+            new ConversationTurn("Redis 在这里做什么？", "历史回答可能不准确")
+        ));
+
+        planner.plan(context, "它有什么缺点？", history, new QaTelemetryContext("request-1", 7L, 3L));
+
+        ArgumentCaptor<String> prompt = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(aiService).plan(prompt.capture());
+        JsonNode document = objectMapper.readTree(prompt.getValue());
+        assertThat(document.get("currentQuestion").asText()).isEqualTo("它有什么缺点？");
+        assertThat(document.get("conversationHistory")).hasSize(1);
+        assertThat(document.get("conversationHistory").get(0).get("question").asText())
+            .isEqualTo("Redis 在这里做什么？");
+        assertThat(document.get("compactVideoState").asText()).contains("RAG");
+        assertThat(document.has("userId")).isFalse();
+        assertThat(document.has("videoId")).isFalse();
+
+        dev.langchain4j.service.SystemMessage annotation = LangChain4jPlannerAiService.class
+            .getMethod("plan", String.class)
+            .getAnnotation(dev.langchain4j.service.SystemMessage.class);
+        String instructions = String.join("\n", annotation.value());
+        assertThat(instructions)
+            .contains("only to resolve references", "not video facts", "never treat an entity or fact",
+                "作者推荐的数据库及其优点", "Always plan tools")
+            .containsIgnoringCase("system instructions");
+    }
+
+    @Test
     void shouldRecordOneAgenticPlannerLogicalCallWithBoundedTags() {
         when(aiService.plan(anyString())).thenReturn(new PlannerAiResponse(
             "SEMANTIC_SEARCH", "ignored", List.of(new PlannerAction("SEARCH_TRANSCRIPT", "q", null, null))
         ));
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         LangChain4jRetrievalPlanner telemetryPlanner = new LangChain4jRetrievalPlanner(
-            aiService, "openai", "planner-model", 1, new AiUsageMetrics(registry)
+            aiService, objectMapper, "openai", "planner-model", 1, new AiUsageMetrics(registry)
         );
 
         telemetryPlanner.plan(context, "question", new QaTelemetryContext("request-1", 7L, 3L));
@@ -122,7 +161,8 @@ class LangChain4jRetrievalPlannerTest {
             "SEMANTIC_SEARCH", "ignored", List.of(new PlannerAction("SEARCH_TRANSCRIPT", "q", null, null))
         ));
         LangChain4jRetrievalPlanner telemetryPlanner = new LangChain4jRetrievalPlanner(
-            aiService, "openai", "planner-model", 1, new AiUsageMetrics(mock(io.micrometer.core.instrument.MeterRegistry.class))
+            aiService, objectMapper, "openai", "planner-model", 1,
+            new AiUsageMetrics(mock(io.micrometer.core.instrument.MeterRegistry.class))
         );
 
         RetrievalPlan result = telemetryPlanner.plan(

@@ -2,6 +2,8 @@ package com.videoagent.agent.qa;
 
 import com.videoagent.agent.evidence.EvidenceItem;
 import com.videoagent.agent.evidence.EvidenceSourceType;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.telemetry.QaTelemetryContext;
 
 import java.util.Comparator;
 import java.util.List;
@@ -18,6 +20,43 @@ public class MockAgenticAnswerProvider implements AgenticAnswerProvider {
 
     @Override
     public AgenticQaResult synthesize(String question, List<EvidenceItem> evidence) {
+        return synthesizeInternal(question, evidence);
+    }
+
+    @Override
+    public AgenticQaResult synthesize(
+        String question,
+        ConversationHistory history,
+        List<EvidenceItem> evidence,
+        QaTelemetryContext telemetryContext,
+        int toolActionCount
+    ) {
+        String contextualQuestion = question;
+        if (history != null && !history.turns().isEmpty() && needsHistory(question)) {
+            String previousQuestion = history.turns().getLast().question();
+            if (previousQuestion != null && !previousQuestion.isBlank()) {
+                contextualQuestion = previousQuestion + " " + question;
+            }
+        }
+        return synthesizeInternal(contextualQuestion, evidence);
+    }
+
+    private boolean needsHistory(String question) {
+        if (question == null) {
+            return false;
+        }
+        String current = question.toLowerCase(Locale.ROOT);
+        return current.contains("它")
+            || current.contains("这个")
+            || current.contains("那个")
+            || current.contains("刚才")
+            || current.contains("前面")
+            || current.contains("上述")
+            || current.contains("这种")
+            || current.contains("那");
+    }
+
+    private AgenticQaResult synthesizeInternal(String question, List<EvidenceItem> evidence) {
         if (evidence == null || evidence.isEmpty()) {
             return new AgenticQaResult(CANNOT_DETERMINE, List.of());
         }

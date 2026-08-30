@@ -3,12 +3,16 @@ package com.videoagent.agent.planner;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalTool;
 import com.videoagent.rag.context.QaContextMode;
 
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 class MockRetrievalPlannerProviderTest {
 
@@ -43,6 +47,19 @@ class MockRetrievalPlannerProviderTest {
         assertThat(plan.actions()).hasSize(1);
         assertThat(plan.actions().getFirst().tool()).isEqualTo(RetrievalTool.SEARCH_TRANSCRIPT);
         assertThat(plan.actions().getFirst().query()).contains("Redis");
+    }
+
+    @Test
+    void shouldUsePreviousQuestionToContextualizeFollowUpSearch() {
+        ConversationHistory history = new ConversationHistory(List.of(
+            new ConversationTurn("Redis 在这里做什么？", "历史回答")
+        ));
+
+        RetrievalPlan plan = planner.plan(context, "它有什么缺点？", history, null);
+
+        assertThat(plan.actions().getFirst().query())
+            .contains("Redis 在这里做什么？", "它有什么缺点？")
+            .doesNotContain("历史回答");
     }
 
     @Test

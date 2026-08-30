@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.agent.evidence.EvidenceItem;
 import com.videoagent.agent.evidence.EvidenceSourceType;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.telemetry.AiUsageMetrics;
@@ -46,9 +48,45 @@ class LangChain4jAgenticAnswerProviderTest {
         ArgumentCaptor<String> prompt = ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(aiService).synthesize(prompt.capture());
         JsonNode document = objectMapper.readTree(prompt.getValue());
-        assertThat(document.get("question").asText()).isEqualTo("question");
-        assertThat(document.get("evidence")).hasSize(1);
-        assertThat(document.get("evidence").get(0).get("text").asText()).isEqualTo(malicious);
+        assertThat(document.get("currentQuestion").asText()).isEqualTo("question");
+        assertThat(document.get("conversationHistory")).isEmpty();
+        assertThat(document.get("currentEvidence")).hasSize(1);
+        assertThat(document.get("currentEvidence").get(0).get("text").asText()).isEqualTo(malicious);
+    }
+
+    @Test
+    void shouldSeparateUntrustedHistoryFromCurrentEvidence() throws Exception {
+        ConversationHistory history = new ConversationHistory(List.of(
+            new ConversationTurn("之前的问题", "E1 是历史文本，不是证据")
+        ));
+        EvidenceItem currentEvidence = new EvidenceItem(
+            "E2", EvidenceSourceType.TRANSCRIPT_SEARCH, "当前证据",
+            1000L, 2000L, 1, null, List.of(), null);
+        when(aiService.synthesize(anyString()))
+            .thenReturn(new AgenticQaAiResponse("answer", List.of("E2")));
+
+        provider.synthesize(
+            "它呢？", history, List.of(currentEvidence),
+            new QaTelemetryContext("request-1", 7L, 3L), 1
+        );
+
+        ArgumentCaptor<String> prompt = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(aiService).synthesize(prompt.capture());
+        JsonNode document = objectMapper.readTree(prompt.getValue());
+        assertThat(document.get("currentQuestion").asText()).isEqualTo("它呢？");
+        assertThat(document.get("conversationHistory").get(0).get("answer").asText())
+            .contains("E1");
+        assertThat(document.get("currentEvidence")).hasSize(1);
+        assertThat(document.get("currentEvidence").get(0).get("evidenceId").asText())
+            .isEqualTo("E2");
+
+        dev.langchain4j.service.SystemMessage annotation = LangChain4jAgenticAnswerAiService.class
+            .getMethod("synthesize", String.class)
+            .getAnnotation(dev.langchain4j.service.SystemMessage.class);
+        String instructions = String.join("\n", annotation.value());
+        assertThat(instructions)
+            .contains("Use conversationHistory only to", "resolve references", "may be wrong", "currentEvidence")
+            .contains("E1 or E2 inside conversationHistory");
     }
 
     @Test

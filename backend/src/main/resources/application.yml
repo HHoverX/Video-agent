@@ -94,6 +94,10 @@ videoagent:
     max-evidence-items: ${AGENT_MAX_EVIDENCE_ITEMS:12}
     max-evidence-chars: ${AGENT_MAX_EVIDENCE_CHARS:12000}
     planner-model: ${AGENT_PLANNER_MODEL:}
+    memory:
+      ttl: ${AGENT_MEMORY_TTL:24h}
+      max-turns: ${AGENT_MEMORY_MAX_TURNS:6}
+      max-history-chars: ${AGENT_MEMORY_MAX_HISTORY_CHARS:6000}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffprobe-path: ${FFPROBE_PATH:ffprobe}

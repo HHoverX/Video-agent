@@ -1,6 +1,10 @@
 package com.videoagent.agent.planner;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.agent.context.AgenticQaContext;
+import com.videoagent.agent.memory.ConversationHistory;
+import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalTool;
@@ -23,32 +27,35 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Real retrieval planner backed by the same LangChain4j ChatModel used for QA
- * and summaries. It receives only the question plus a compact metadata summary
- * (has summary, transcript mode, rag status) — never the full transcript — and
- * returns a strict structured plan.
+ * and summaries. It receives the current question, bounded conversation
+ * history, and a compact metadata summary (has summary, transcript mode, rag
+ * status) — never the full transcript — and returns a strict structured plan.
  */
 public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
 
     private static final Logger log = LoggerFactory.getLogger(LangChain4jRetrievalPlanner.class);
 
     private final LangChain4jPlannerAiService aiService;
+    private final ObjectMapper objectMapper;
     private final String provider;
     private final String model;
     private final int configuredMaxRetries;
     private final AiUsageMetrics usageMetrics;
 
     public LangChain4jRetrievalPlanner(LangChain4jPlannerAiService aiService) {
-        this(aiService, "unknown", "unknown", 0, AiUsageMetrics.noop());
+        this(aiService, new ObjectMapper(), "unknown", "unknown", 0, AiUsageMetrics.noop());
     }
 
     LangChain4jRetrievalPlanner(
         LangChain4jPlannerAiService aiService,
+        ObjectMapper objectMapper,
         String provider,
         String model,
         int configuredMaxRetries,
         AiUsageMetrics usageMetrics
     ) {
         this.aiService = aiService;
+        this.objectMapper = objectMapper;
         this.provider = provider;
         this.model = model;
         this.configuredMaxRetries = configuredMaxRetries;
@@ -56,14 +63,10 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
     }
 
     @Override
-    public RetrievalPlan plan(AgenticQaContext context, String question) {
-        return invoke(prompt(question, compactState(context)));
-    }
-
-    @Override
     public RetrievalPlan plan(
         AgenticQaContext context,
         String question,
+        ConversationHistory history,
         QaTelemetryContext telemetryContext
     ) {
         String compactState = compactState(context);
@@ -79,7 +82,7 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
         String errorCategory = ErrorCode.INTERNAL_ERROR.name();
         int plannedActionCount = 0;
         try {
-            RetrievalPlan plan = invoke(prompt(question, compactState));
+            RetrievalPlan plan = invoke(prompt(question, history, compactState));
             plannedActionCount = plan.actions() == null ? 0 : plan.actions().size();
             outcome = "success";
             errorCategory = "none";
@@ -166,21 +169,17 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
         throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "Planner 返回未知工具: " + raw);
     }
 
-    private String prompt(String question, String compactState) {
-        return """
-            问题：%s
-
-            当前视频状态：
-            %s
-
-            请只规划使用哪些工具来回答该问题，不要直接回答。
-            可用的工具：GET_VIDEO_SUMMARY, GET_TRANSCRIPT_BY_TIME, SEARCH_TRANSCRIPT。
-            时间问题请把“3分20秒”转换为毫秒 timeMs=200000，并给出合理的 windowMs（默认 15000）。
-            比较类问题可以使用多个 SEARCH_TRANSCRIPT 动作分别检索不同主题。
-            """.formatted(
-            question,
-            compactState
-        );
+    private String prompt(String question, ConversationHistory history, String compactState) {
+        List<ConversationTurn> turns = history == null ? List.of() : history.turns();
+        try {
+            return objectMapper.writeValueAsString(new PlannerPrompt(question, turns, compactState));
+        } catch (JsonProcessingException exception) {
+            throw new VideoAgentException(
+                ErrorCode.INTERNAL_ERROR,
+                "检索规划上下文序列化失败",
+                exception
+            );
+        }
     }
 
     private String compactState(AgenticQaContext context) {
@@ -199,5 +198,12 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
 
     private static long length(String value) {
         return value == null ? 0L : value.length();
+    }
+
+    private record PlannerPrompt(
+        String currentQuestion,
+        List<ConversationTurn> conversationHistory,
+        String compactVideoState
+    ) {
     }
 }
