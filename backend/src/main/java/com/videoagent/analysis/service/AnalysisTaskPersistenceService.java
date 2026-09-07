@@ -4,6 +4,8 @@ import com.videoagent.analysis.entity.AnalysisStage;
 import com.videoagent.analysis.entity.AnalysisStatus;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
+import com.videoagent.common.exception.ErrorCode;
+import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.video.service.VideoOwnershipService;
 
 import org.springframework.dao.DuplicateKeyException;
@@ -27,26 +29,39 @@ public class AnalysisTaskPersistenceService {
     private final VideoOwnershipService ownershipService;
     private final AnalysisTaskRepository analysisTaskRepository;
     private final AnalysisProperties properties;
+    private final AnalysisProtectionProperties protectionProperties;
 
     public AnalysisTaskPersistenceService(
         VideoOwnershipService ownershipService,
         AnalysisTaskRepository analysisTaskRepository,
-        AnalysisProperties properties
+        AnalysisProperties properties,
+        AnalysisProtectionProperties protectionProperties
     ) {
         this.ownershipService = ownershipService;
         this.analysisTaskRepository = analysisTaskRepository;
         this.properties = properties;
+        this.protectionProperties = protectionProperties;
     }
 
     @Transactional
     public StartDecision prepareStart(long videoId, long userId) {
         ownershipService.requireOwned(videoId, userId);
 
-        AnalysisTaskEntity existing = analysisTaskRepository.findByBusinessKeyForUpdate(
+        AnalysisTaskEntity existing = analysisTaskRepository.findByBusinessKey(
             videoId,
             properties.analysisType(),
             properties.modelVersion()
         );
+        if (existing != null && !AnalysisStatus.FAILED.name().equals(existing.getStatus())) {
+            return prepareExisting(existing);
+        }
+
+        if (analysisTaskRepository.countActiveByUserId(userId) >= protectionProperties.maxActivePerUser()) {
+            throw new VideoAgentException(
+                ErrorCode.ANALYSIS_ACTIVE_LIMIT_EXCEEDED,
+                "当前进行中的分析任务过多，请稍后再试"
+            );
+        }
         if (existing != null) {
             return prepareExisting(existing);
         }
@@ -72,7 +87,7 @@ public class AnalysisTaskPersistenceService {
             }
             return new StartDecision(task, StartAction.INITIAL_DISPATCH);
         } catch (DuplicateKeyException exception) {
-            AnalysisTaskEntity concurrent = analysisTaskRepository.findByBusinessKey(
+            AnalysisTaskEntity concurrent = analysisTaskRepository.findByBusinessKeyForUpdate(
                 videoId,
                 properties.analysisType(),
                 properties.modelVersion()
@@ -97,6 +112,10 @@ public class AnalysisTaskPersistenceService {
             now
         );
         if (updated != 1) {
+            AnalysisTaskEntity concurrent = analysisTaskRepository.selectById(task.getId());
+            if (concurrent != null && !AnalysisStatus.FAILED.name().equals(concurrent.getStatus())) {
+                return new StartDecision(concurrent, StartAction.NONE);
+            }
             throw new IllegalStateException("Failed analysis task could not be restarted, taskId=" + task.getId());
         }
 

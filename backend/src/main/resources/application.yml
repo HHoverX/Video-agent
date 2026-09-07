@@ -55,6 +55,13 @@ videoagent:
     model-version: ${VIDEO_ANALYSIS_MODEL_VERSION:m5-langchain4j-structured-v1}
     progress-ttl: ${VIDEO_ANALYSIS_PROGRESS_TTL:24h}
     max-video-duration: ${ANALYSIS_MAX_VIDEO_DURATION:60m}
+    protection:
+      max-active-per-user: ${ANALYSIS_MAX_ACTIVE_PER_USER:3}
+      rate-limit:
+        capacity: ${ANALYSIS_RATE_LIMIT_CAPACITY:5}
+        refill-tokens: ${ANALYSIS_RATE_LIMIT_REFILL_TOKENS:1}
+        refill-period: ${ANALYSIS_RATE_LIMIT_REFILL_PERIOD:30s}
+        cost-per-request: ${ANALYSIS_RATE_LIMIT_COST_PER_REQUEST:1}
     reliability:
       max-attempts: ${ANALYSIS_MAX_ATTEMPTS:3}
       processing-lease: ${ANALYSIS_PROCESSING_LEASE:15m}
@@ -73,8 +80,18 @@ videoagent:
     direct-context-max-chars: ${RAG_DIRECT_CONTEXT_MAX_CHARS:8000}
     chunk-max-chars: ${RAG_CHUNK_MAX_CHARS:2000}
     chunk-overlap-segments: ${RAG_CHUNK_OVERLAP_SEGMENTS:1}
-    top-k: ${RAG_TOP_K:5}
-    minimum-score: ${RAG_MINIMUM_SCORE:0.45}
+    dense-top-k: ${RAG_DENSE_TOP_K:15}
+    dense-minimum-score: ${RAG_DENSE_MINIMUM_SCORE:0.0}
+    lexical-top-k: ${RAG_LEXICAL_TOP_K:15}
+    rrf-k: ${RAG_RRF_K:60}
+    rrf-candidate-limit: ${RAG_RRF_CANDIDATE_LIMIT:15}
+    final-evidence-limit: ${RAG_FINAL_EVIDENCE_LIMIT:5}
+    reranker:
+      enabled: ${RAG_RERANKER_ENABLED:false}
+      base-url: ${RAG_RERANKER_BASE_URL:}
+      api-key: ${RAG_RERANKER_API_KEY:}
+      model: ${RAG_RERANKER_MODEL:}
+      timeout: ${RAG_RERANKER_TIMEOUT:3s}
     qdrant:
       host: ${QDRANT_HOST:localhost}
       port: ${QDRANT_REST_PORT:6333}
@@ -113,6 +130,8 @@ videoagent:
     session-ttl: ${VIDEO_UPLOAD_SESSION_TTL:24h}
     presign-ttl: ${VIDEO_UPLOAD_PRESIGN_TTL:15m}
     max-client-concurrency: ${VIDEO_UPLOAD_MAX_CONCURRENCY:3}
+    completion-timeout: ${VIDEO_UPLOAD_COMPLETION_TIMEOUT:30m}
+    completion-recovery-interval-ms: ${VIDEO_UPLOAD_COMPLETION_RECOVERY_INTERVAL_MS:30000}
     cleanup-interval-ms: ${VIDEO_UPLOAD_CLEANUP_INTERVAL_MS:300000}
   playback:
     presign-ttl: ${VIDEO_PLAYBACK_PRESIGN_TTL:60m}

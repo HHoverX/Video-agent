@@ -32,7 +32,7 @@ public interface VideoRepository extends BaseMapper<VideoEntity> {
         SELECT * FROM video
         WHERE user_id = #{userId}
           AND file_hash = #{fileHash}
-        LIMIT 1 FOR UPDATE
+        LIMIT 1
         """)
     VideoEntity findByUserIdAndFileHash(
         @Param("userId") long userId,

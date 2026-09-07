@@ -16,6 +16,7 @@ import com.videoagent.upload.dto.UploadSessionResponse;
 import com.videoagent.upload.entity.VideoUploadSessionEntity;
 import com.videoagent.upload.repository.VideoUploadPartRepository;
 import com.videoagent.upload.repository.VideoUploadSessionRepository;
+import com.videoagent.upload.service.UploadPartBitmapStore;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 import io.minio.MinioClient;
@@ -35,6 +36,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.security.MessageDigest;
 import java.net.URI;
@@ -42,10 +44,12 @@ import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.time.LocalDateTime;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Real MySQL + MinIO coverage for the resumable upload protocol. This test uses
@@ -81,6 +85,12 @@ class ResumableUploadInfrastructureIntegrationTest {
 
     @Autowired
     private VideoUploadPartRepository partRepository;
+
+    @Autowired
+    private UploadPartBitmapStore bitmapStore;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     @Autowired
     private AnalysisTaskRepository taskRepository;
@@ -121,9 +131,11 @@ class ResumableUploadInfrastructureIntegrationTest {
                 .build());
         }
         if (uploadId != null) {
+            bitmapStore.delete(uploadId);
             sessionRepository.deleteById(uploadId);
         }
         if (secondaryUploadId != null) {
+            bitmapStore.delete(secondaryUploadId);
             sessionRepository.deleteById(secondaryUploadId);
         }
         if (videoId != null) {
@@ -170,9 +182,11 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(created.getBody()).isNotNull();
         uploadId = created.getBody().uploadId();
         assertThat(created.getBody().totalParts()).isEqualTo(2);
+        assertThat(created.getBody().partNumberBase()).isZero();
         VideoUploadSessionEntity persistedSession = sessionRepository.selectById(uploadId);
         objectKey = persistedSession.getObjectKey();
         assertThat(objectKey).startsWith("videos/").doesNotContain(uploadId);
+        assertThat(persistedSession.getTempPrefix()).isEqualTo("uploads/" + uploadId + "/parts");
 
         ResponseEntity<String> crossUserRead = restTemplate.exchange(
             baseUrl("/api/uploads/" + uploadId),
@@ -182,9 +196,14 @@ class ResumableUploadInfrastructureIntegrationTest {
         );
         assertThat(crossUserRead.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 
-        UploadPartResponse firstConfirmation = uploadAndConfirm(owner, uploadId, 1, partOne);
+        UploadPartResponse firstConfirmation = uploadAndConfirm(owner, uploadId, 0, partOne);
+        assertThat(bitmapStore.exists(uploadId)).isTrue();
+        assertThat(bitmapStore.count(uploadId)).isEqualTo(1);
+        long firstTtl = redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS);
+        long expectedTtl = java.time.Duration.between(LocalDateTime.now(), persistedSession.getExpiresAt()).toMillis();
+        assertThat(firstTtl).isPositive().isBetween(expectedTtl - 5_000, expectedTtl + 1_000);
         ResponseEntity<UploadPartResponse> duplicateConfirmation = restTemplate.exchange(
-            baseUrl("/api/uploads/" + uploadId + "/parts/1/complete"),
+            baseUrl("/api/uploads/" + uploadId + "/parts/0/complete"),
             HttpMethod.POST,
             jsonEntity(owner, Map.of()),
             UploadPartResponse.class
@@ -192,6 +211,11 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(duplicateConfirmation.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(duplicateConfirmation.getBody()).isNotNull();
         assertThat(duplicateConfirmation.getBody().etag()).isEqualTo(firstConfirmation.etag());
+        long secondTtl = redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS);
+        assertThat(secondTtl).isLessThanOrEqualTo(firstTtl);
+
+        bitmapStore.delete(uploadId);
+        assertThat(bitmapStore.exists(uploadId)).isFalse();
 
         ResponseEntity<UploadSessionResponse> resumed = restTemplate.exchange(
             baseUrl("/api/uploads/" + uploadId),
@@ -201,8 +225,16 @@ class ResumableUploadInfrastructureIntegrationTest {
         );
         assertThat(resumed.getBody()).isNotNull();
         assertThat(resumed.getBody().completedParts()).extracting(UploadPartResponse::partNumber)
-            .containsExactly(1);
+            .containsExactly(0);
         assertThat(resumed.getBody().uploadedBytes()).isEqualTo(partOne.length);
+        assertThat(bitmapStore.exists(uploadId)).isTrue();
+        assertThat(bitmapStore.count(uploadId)).isEqualTo(1);
+        long rebuiltTtl = redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS);
+        long remainingSessionTtl = java.time.Duration.between(
+            LocalDateTime.now(), persistedSession.getExpiresAt()
+        ).toMillis();
+        assertThat(rebuiltTtl).isPositive().isBetween(remainingSessionTtl - 5_000, remainingSessionTtl + 1_000);
+        assertThat(partRepository.findByUploadId(uploadId)).isEmpty();
 
         ResponseEntity<String> missingPartCompletion = restTemplate.exchange(
             baseUrl("/api/uploads/" + uploadId + "/complete"),
@@ -213,14 +245,10 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(missingPartCompletion.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
         assertThat(sessionRepository.selectById(uploadId).getStatus()).isEqualTo("FAILED");
 
-        uploadAndConfirm(owner, uploadId, 2, partTwo);
+        uploadAndConfirm(owner, uploadId, 1, partTwo);
 
-        List<CompleteUploadResponse> concurrent = completeConcurrently(owner, uploadId);
-        assertThat(concurrent).hasSize(2);
-        assertThat(concurrent).extracting(CompleteUploadResponse::videoId).doesNotContainNull().containsOnly(
-            concurrent.getFirst().videoId()
-        );
-        videoId = concurrent.getFirst().videoId();
+        CompleteUploadResponse completedResponse = complete(owner, uploadId);
+        videoId = completedResponse.videoId();
 
         ResponseEntity<CompleteUploadResponse> repeated = restTemplate.exchange(
             baseUrl("/api/uploads/" + uploadId + "/complete"),
@@ -228,7 +256,7 @@ class ResumableUploadInfrastructureIntegrationTest {
             new HttpEntity<>(owner.headers()),
             CompleteUploadResponse.class
         );
-        assertThat(repeated.getBody()).isEqualTo(concurrent.getFirst());
+        assertThat(repeated.getBody()).isEqualTo(completedResponse);
 
         VideoEntity video = videoRepository.selectById(videoId);
         VideoUploadSessionEntity completed = sessionRepository.selectById(uploadId);
@@ -239,6 +267,8 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(completed.getStatus()).isEqualTo("COMPLETED");
         assertThat(completed.getVideoId()).isEqualTo(videoId);
         assertThat(completed.getAnalysisTaskId()).isNull();
+        assertThat(bitmapStore.exists(uploadId)).isFalse();
+        assertThat(partRepository.findByUploadId(uploadId)).isEmpty();
         assertThat(minioClient.statObject(StatObjectArgs.builder()
             .bucket(storageProperties.bucket())
             .object(objectKey)
@@ -246,20 +276,21 @@ class ResumableUploadInfrastructureIntegrationTest {
     }
 
     @Test
-    void shouldConfirmConcurrentDistinctAndDuplicatePartsWithoutDeadlock() {
+    void shouldConfirmConcurrentDistinctAndDuplicatePartsWithoutDeadlock() throws Exception {
         owner = TestAuthClient.registerAndLogin(
             restTemplate, baseUrl(""), "upload-confirm-owner-" + System.nanoTime()
         );
         byte[] partOne = new byte[CHUNK_SIZE];
         System.arraycopy(MP4_HEADER, 0, partOne, 0, MP4_HEADER.length);
         byte[] partTwo = "tail-of-concurrent-confirm-video".getBytes();
+        String primaryHash = sha256(partOne, partTwo);
 
         ResponseEntity<UploadSessionResponse> created = restTemplate.exchange(
             baseUrl("/api/uploads"),
             HttpMethod.POST,
             jsonEntity(owner, new CreateUploadSessionRequest(
                 "concurrent-confirm.mp4", "Concurrent confirm",
-                (long) partOne.length + partTwo.length, "video/mp4", (long) CHUNK_SIZE, null
+                (long) partOne.length + partTwo.length, "video/mp4", (long) CHUNK_SIZE, primaryHash
             )),
             UploadSessionResponse.class
         );
@@ -267,36 +298,36 @@ class ResumableUploadInfrastructureIntegrationTest {
         assertThat(created.getBody()).isNotNull();
         uploadId = created.getBody().uploadId();
 
-        uploadPartWithoutConfirmation(owner, uploadId, 1, partOne);
-        uploadPartWithoutConfirmation(owner, uploadId, 2, partTwo);
+        uploadPartWithoutConfirmation(owner, uploadId, 0, partOne);
+        uploadPartWithoutConfirmation(owner, uploadId, 1, partTwo);
 
         ResponseEntity<UploadSessionResponse> secondaryCreated = restTemplate.exchange(
             baseUrl("/api/uploads"),
             HttpMethod.POST,
             jsonEntity(owner, new CreateUploadSessionRequest(
                 "separate-session.mp4", "Separate session",
-                (long) partOne.length, "video/mp4", (long) CHUNK_SIZE, null
+                (long) partOne.length, "video/mp4", (long) CHUNK_SIZE, sha256(partOne)
             )),
             UploadSessionResponse.class
         );
         assertThat(secondaryCreated.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(secondaryCreated.getBody()).isNotNull();
         secondaryUploadId = secondaryCreated.getBody().uploadId();
-        uploadPartWithoutConfirmation(owner, secondaryUploadId, 1, partOne);
+        uploadPartWithoutConfirmation(owner, secondaryUploadId, 0, partOne);
 
         List<UploadPartResponse> confirmations = confirmConcurrently(owner, List.of(
+            new PartConfirmation(uploadId, 0),
+            new PartConfirmation(uploadId, 0),
             new PartConfirmation(uploadId, 1),
-            new PartConfirmation(uploadId, 1),
-            new PartConfirmation(uploadId, 2),
-            new PartConfirmation(secondaryUploadId, 1)
+            new PartConfirmation(secondaryUploadId, 0)
         ));
 
         assertThat(confirmations).extracting(UploadPartResponse::partNumber)
-            .containsExactlyInAnyOrder(1, 1, 1, 2);
-        assertThat(partRepository.findByUploadId(uploadId)).extracting(part -> part.getPartNumber())
-            .containsExactlyInAnyOrder(1, 2);
-        assertThat(partRepository.findByUploadId(secondaryUploadId)).extracting(part -> part.getPartNumber())
-            .containsExactly(1);
+            .containsExactlyInAnyOrder(0, 0, 0, 1);
+        assertThat(bitmapStore.readCompleted(uploadId, 0, 2)).containsExactly(0, 1);
+        assertThat(bitmapStore.readCompleted(secondaryUploadId, 0, 1)).containsExactly(0);
+        assertThat(partRepository.findByUploadId(uploadId)).isEmpty();
+        assertThat(partRepository.findByUploadId(secondaryUploadId)).isEmpty();
         VideoUploadSessionEntity session = sessionRepository.selectById(uploadId);
         assertThat(session.getStatus()).isEqualTo("UPLOADING");
         assertThat(session.getVideoId()).isNull();
@@ -304,18 +335,70 @@ class ResumableUploadInfrastructureIntegrationTest {
     }
 
     @Test
-    void shouldReuseOneCanonicalVideoForConcurrentSameUserCompletionsWithoutClientHash() throws Exception {
+    void shouldApplyBitmapCommandsAtomicallyWithAbsoluteExpiryAndMonotonicRebuild() throws Exception {
+        uploadId = "bitmap-" + System.nanoTime();
+        LocalDateTime expiresAt = LocalDateTime.now().plusMinutes(10);
+
+        assertThat(bitmapStore.exists(uploadId)).isFalse();
+        assertThat(bitmapStore.markCompleted(uploadId, 0, expiresAt)).isFalse();
+        assertThat(bitmapStore.markCompleted(uploadId, 0, expiresAt.plusHours(1))).isTrue();
+        assertThat(bitmapStore.markCompleted(uploadId, 4, expiresAt.plusHours(1))).isFalse();
+        assertThat(bitmapStore.exists(uploadId)).isTrue();
+        assertThat(bitmapStore.count(uploadId)).isEqualTo(2);
+        assertThat(bitmapStore.readCompleted(uploadId, 0, 6)).containsExactly(0, 4);
+
+        long ttlBeforeRebuild = redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS);
+        bitmapStore.rebuild(uploadId, List.of(0, 2), expiresAt.plusHours(2));
+        long ttlAfterRebuild = redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS);
+        assertThat(ttlAfterRebuild).isLessThanOrEqualTo(ttlBeforeRebuild);
+        assertThat(bitmapStore.readCompleted(uploadId, 0, 6)).containsExactly(0, 2, 4);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> confirm = executor.submit(() -> {
+                ready.countDown();
+                await(start);
+                bitmapStore.markCompleted(uploadId, 3, expiresAt);
+            });
+            Future<?> rebuild = executor.submit(() -> {
+                ready.countDown();
+                await(start);
+                bitmapStore.rebuild(uploadId, List.of(0, 2), expiresAt);
+            });
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            confirm.get(5, TimeUnit.SECONDS);
+            rebuild.get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+        assertThat(bitmapStore.readCompleted(uploadId, 0, 6)).containsExactly(0, 2, 3, 4);
+
+        assertThat(redisTemplate.persist(bitmapKey(uploadId))).isTrue();
+        assertThat(redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS)).isEqualTo(-1);
+        assertThat(bitmapStore.markCompleted(uploadId, 5, expiresAt)).isFalse();
+        assertThat(redisTemplate.getExpire(bitmapKey(uploadId), TimeUnit.MILLISECONDS)).isPositive();
+
+        bitmapStore.delete(uploadId);
+        assertThat(bitmapStore.exists(uploadId)).isFalse();
+        bitmapStore.delete(uploadId);
+    }
+
+    @Test
+    void shouldReuseOneCanonicalVideoForConcurrentSameUserCompletionsWithClientHash() throws Exception {
         owner = TestAuthClient.registerAndLogin(
             restTemplate, baseUrl(""), "upload-dedup-owner-" + System.nanoTime()
         );
         byte[] content = mp4Part();
         String sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
-        uploadId = createSession(owner, "same-content-a.mp4", content.length);
-        secondaryUploadId = createSession(owner, "same-content-b.mp4", content.length);
+        uploadId = createSession(owner, "same-content-a.mp4", content);
+        secondaryUploadId = createSession(owner, "same-content-b.mp4", content);
         objectKey = sessionRepository.selectById(uploadId).getObjectKey();
         secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
-        uploadAndConfirm(owner, uploadId, 1, content);
-        uploadAndConfirm(owner, secondaryUploadId, 1, content);
+        uploadAndConfirm(owner, uploadId, 0, content);
+        uploadAndConfirm(owner, secondaryUploadId, 0, content);
 
         List<CompleteUploadResponse> responses = completeSessionsConcurrently(owner, uploadId, secondaryUploadId);
 
@@ -366,10 +449,10 @@ class ResumableUploadInfrastructureIntegrationTest {
             restTemplate, baseUrl(""), "upload-dedup-sequential-" + System.nanoTime()
         );
         byte[] content = mp4Part();
-        uploadId = createSession(owner, "same-content-first.mp4", content.length);
-        secondaryUploadId = createSession(owner, "same-content-second.mp4", content.length);
-        uploadAndConfirm(owner, uploadId, 1, content);
-        uploadAndConfirm(owner, secondaryUploadId, 1, content);
+        uploadId = createSession(owner, "same-content-first.mp4", content);
+        secondaryUploadId = createSession(owner, "same-content-second.mp4", content);
+        uploadAndConfirm(owner, uploadId, 0, content);
+        uploadAndConfirm(owner, secondaryUploadId, 0, content);
 
         CompleteUploadResponse first = complete(owner, uploadId);
         CompleteUploadResponse second = complete(owner, secondaryUploadId);
@@ -391,12 +474,12 @@ class ResumableUploadInfrastructureIntegrationTest {
             restTemplate, baseUrl(""), "upload-dedup-second-" + System.nanoTime()
         );
         byte[] content = mp4Part();
-        uploadId = createSession(owner, "same-content-owner.mp4", content.length);
-        secondaryUploadId = createSession(stranger, "same-content-stranger.mp4", content.length);
+        uploadId = createSession(owner, "same-content-owner.mp4", content);
+        secondaryUploadId = createSession(stranger, "same-content-stranger.mp4", content);
         objectKey = sessionRepository.selectById(uploadId).getObjectKey();
         secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
-        uploadAndConfirm(owner, uploadId, 1, content);
-        uploadAndConfirm(stranger, secondaryUploadId, 1, content);
+        uploadAndConfirm(owner, uploadId, 0, content);
+        uploadAndConfirm(stranger, secondaryUploadId, 0, content);
 
         CompleteUploadResponse first = complete(owner, uploadId);
         CompleteUploadResponse second = complete(stranger, secondaryUploadId);
@@ -414,9 +497,9 @@ class ResumableUploadInfrastructureIntegrationTest {
             restTemplate, baseUrl(""), "upload-dedup-delete-" + System.nanoTime()
         );
         byte[] content = mp4Part();
-        uploadId = createSession(owner, "deleted-source.mp4", content.length);
+        uploadId = createSession(owner, "deleted-source.mp4", content);
         objectKey = sessionRepository.selectById(uploadId).getObjectKey();
-        uploadAndConfirm(owner, uploadId, 1, content);
+        uploadAndConfirm(owner, uploadId, 0, content);
         CompleteUploadResponse first = complete(owner, uploadId);
         videoId = first.videoId();
 
@@ -428,9 +511,9 @@ class ResumableUploadInfrastructureIntegrationTest {
         );
         assertThat(deleted.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
 
-        secondaryUploadId = createSession(owner, "reuploaded-source.mp4", content.length);
+        secondaryUploadId = createSession(owner, "reuploaded-source.mp4", content);
         secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
-        uploadAndConfirm(owner, secondaryUploadId, 1, content);
+        uploadAndConfirm(owner, secondaryUploadId, 0, content);
         CompleteUploadResponse reuploaded = complete(owner, secondaryUploadId);
 
         assertThat(reuploaded.reusedExistingVideo()).isFalse();
@@ -527,21 +610,6 @@ class ResumableUploadInfrastructureIntegrationTest {
         return response.getBody();
     }
 
-    private List<CompleteUploadResponse> completeConcurrently(Session session, String id) throws Exception {
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        CountDownLatch ready = new CountDownLatch(2);
-        CountDownLatch start = new CountDownLatch(1);
-        try {
-            Future<CompleteUploadResponse> first = executor.submit(() -> completeAfterBarrier(session, id, ready, start));
-            Future<CompleteUploadResponse> second = executor.submit(() -> completeAfterBarrier(session, id, ready, start));
-            ready.await();
-            start.countDown();
-            return Arrays.asList(first.get(), second.get());
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
     private List<CompleteUploadResponse> completeSessionsConcurrently(
         Session session,
         String firstUploadId,
@@ -606,18 +674,39 @@ class ResumableUploadInfrastructureIntegrationTest {
         return "http://127.0.0.1:" + port + path;
     }
 
-    private String createSession(Session session, String fileName, int fileSize) {
+    private String bitmapKey(String id) {
+        return "videoagent:upload:parts:" + id;
+    }
+
+    private void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private String createSession(Session session, String fileName, byte[] content) throws Exception {
         ResponseEntity<UploadSessionResponse> created = restTemplate.exchange(
             baseUrl("/api/uploads"),
             HttpMethod.POST,
             jsonEntity(session, new CreateUploadSessionRequest(
-                fileName, fileName, (long) fileSize, "video/mp4", (long) CHUNK_SIZE, null
+                fileName, fileName, (long) content.length, "video/mp4", (long) CHUNK_SIZE, sha256(content)
             )),
             UploadSessionResponse.class
         );
         assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(created.getBody()).isNotNull();
         return created.getBody().uploadId();
+    }
+
+    private String sha256(byte[]... parts) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        for (byte[] part : parts) {
+            digest.update(part);
+        }
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private byte[] mp4Part() {

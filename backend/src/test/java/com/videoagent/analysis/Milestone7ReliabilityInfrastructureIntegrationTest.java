@@ -327,7 +327,7 @@ class Milestone7ReliabilityInfrastructureIntegrationTest {
 
         doAnswer(invocation -> {
             throw new VideoAgentException(ErrorCode.ASR_TIMEOUT, "always timing out");
-        }).when(asrProvider).transcribe(any());
+        }).when(asrProvider).transcribe(any(), any());
 
         processor.process(new AnalysisMessage(taskId, videoId));
         assertThat(taskRepository.selectById(taskId).getStatus()).isEqualTo("RETRY_WAITING");
@@ -387,7 +387,9 @@ class Milestone7ReliabilityInfrastructureIntegrationTest {
             Files.write(audio, new byte[] {4, 5, 6});
             return new AudioExtractResult(audio, 3L);
         });
-        when(asrProvider.transcribe(any())).thenAnswer(invocation -> {
+        when(mediaProcessor.probeDurationSeconds(any(Path.class)))
+            .thenReturn(java.util.OptionalInt.of(4));
+        when(asrProvider.transcribe(any(), any())).thenAnswer(invocation -> {
             int call = asrCalls.incrementAndGet();
             if (call <= asrFailuresBeforeSuccess) {
                 throw new VideoAgentException(ErrorCode.ASR_TIMEOUT, "ASR temporarily unavailable");

@@ -4,6 +4,7 @@ import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.service.AnalysisCommandService;
 import com.videoagent.analysis.service.AnalysisQueryService;
+import com.videoagent.analysis.service.AnalysisRateLimiter;
 import com.videoagent.security.CurrentUserAccessor;
 
 import org.springframework.http.ResponseEntity;
@@ -20,15 +21,18 @@ public class AnalysisCommandController {
     private final AnalysisCommandService analysisCommandService;
     private final AnalysisQueryService analysisQueryService;
     private final CurrentUserAccessor currentUser;
+    private final AnalysisRateLimiter rateLimiter;
 
     public AnalysisCommandController(
         AnalysisCommandService analysisCommandService,
         AnalysisQueryService analysisQueryService,
-        CurrentUserAccessor currentUser
+        CurrentUserAccessor currentUser,
+        AnalysisRateLimiter rateLimiter
     ) {
         this.analysisCommandService = analysisCommandService;
         this.analysisQueryService = analysisQueryService;
         this.currentUser = currentUser;
+        this.rateLimiter = rateLimiter;
     }
 
     @GetMapping
@@ -40,8 +44,10 @@ public class AnalysisCommandController {
 
     @PostMapping
     public ResponseEntity<StartAnalysisResponse> start(@PathVariable long videoId) {
+        long userId = currentUser.userId();
+        rateLimiter.checkAllowed(userId);
         return ResponseEntity.accepted().body(
-            analysisCommandService.start(videoId, currentUser.userId())
+            analysisCommandService.start(videoId, userId)
         );
     }
 }

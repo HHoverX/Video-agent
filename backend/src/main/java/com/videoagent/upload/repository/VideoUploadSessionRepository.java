@@ -22,6 +22,64 @@ public interface VideoUploadSessionRepository extends BaseMapper<VideoUploadSess
 
     @Update("""
         UPDATE video_upload_session
+        SET status = 'COMPLETING', completing_at = #{completingAt},
+            completion_token = #{completionToken}, expected_sha256 = #{expectedSha256},
+            last_error = NULL, updated_at = #{completingAt}
+        WHERE id = #{uploadId}
+          AND status = #{previousStatus}
+        """)
+    int markCompletionStarted(
+        @Param("uploadId") String uploadId,
+        @Param("previousStatus") String previousStatus,
+        @Param("completionToken") String completionToken,
+        @Param("completingAt") LocalDateTime completingAt,
+        @Param("expectedSha256") String expectedSha256
+    );
+
+    @Select("""
+        SELECT * FROM video_upload_session
+        WHERE status = 'COMPLETING'
+          AND completing_at < #{cutoff}
+        ORDER BY completing_at ASC
+        LIMIT #{limit}
+        """)
+    List<VideoUploadSessionEntity> findTimedOutCompletions(
+        @Param("cutoff") LocalDateTime cutoff,
+        @Param("limit") int limit
+    );
+
+    @Update("""
+        UPDATE video_upload_session
+        SET status = 'COMPLETED', video_id = #{videoId}, completed_at = #{now},
+            completing_at = NULL, completion_token = NULL, last_error = NULL, updated_at = #{now}
+        WHERE id = #{uploadId}
+          AND status = 'COMPLETING'
+          AND completion_token = #{completionToken}
+        """)
+    int markCompletionCompleted(
+        @Param("uploadId") String uploadId,
+        @Param("completionToken") String completionToken,
+        @Param("videoId") long videoId,
+        @Param("now") LocalDateTime now
+    );
+
+    @Update("""
+        UPDATE video_upload_session
+        SET status = 'FAILED', completing_at = NULL, completion_token = NULL,
+            last_error = #{message}, updated_at = #{now}
+        WHERE id = #{uploadId}
+          AND status = 'COMPLETING'
+          AND completion_token = #{completionToken}
+        """)
+    int markCompletionFailed(
+        @Param("uploadId") String uploadId,
+        @Param("completionToken") String completionToken,
+        @Param("message") String message,
+        @Param("now") LocalDateTime now
+    );
+
+    @Update("""
+        UPDATE video_upload_session
         SET status = 'UPLOADING', last_error = NULL, updated_at = #{now}
         WHERE id = #{uploadId}
           AND status IN ('CREATED', 'FAILED')

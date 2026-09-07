@@ -14,7 +14,8 @@ public record VideoUploadProperties(
     int maxParts,
     Duration sessionTtl,
     Duration presignTtl,
-    int maxClientConcurrency
+    int maxClientConcurrency,
+    Duration completionTimeout
 ) {
 
     public VideoUploadProperties {
@@ -28,6 +29,7 @@ public record VideoUploadProperties(
         sessionTtl = sessionTtl == null ? Duration.ofHours(24) : sessionTtl;
         presignTtl = presignTtl == null ? Duration.ofMinutes(15) : presignTtl;
         maxClientConcurrency = maxClientConcurrency <= 0 ? 3 : maxClientConcurrency;
+        completionTimeout = completionTimeout == null ? Duration.ofMinutes(30) : completionTimeout;
         if (maxFileSize.toBytes() <= 0) {
             throw new IllegalArgumentException("upload max file size must be positive");
         }
@@ -41,8 +43,9 @@ public record VideoUploadProperties(
             throw new IllegalArgumentException("upload max parts cannot exceed MinIO Compose limit 10000");
         }
         if (sessionTtl.isZero() || sessionTtl.isNegative()
-            || presignTtl.isZero() || presignTtl.isNegative()) {
-            throw new IllegalArgumentException("upload session and presign TTL must be positive");
+            || presignTtl.isZero() || presignTtl.isNegative()
+            || completionTimeout.isZero() || completionTimeout.isNegative()) {
+            throw new IllegalArgumentException("upload session, presign and completion timeouts must be positive");
         }
     }
 }

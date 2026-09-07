@@ -43,6 +43,15 @@ public interface AnalysisTaskRepository extends BaseMapper<AnalysisTaskEntity> {
         @Param("modelVersion") String modelVersion
     );
 
+    @Select("""
+        SELECT COUNT(*)
+        FROM analysis_task task
+        INNER JOIN video ON video.id = task.video_id
+        WHERE video.user_id = #{userId}
+          AND task.status IN ('PENDING', 'PROCESSING', 'RETRY_WAITING')
+        """)
+    long countActiveByUserId(@Param("userId") long userId);
+
     @Update("""
         UPDATE analysis_task
         SET status = 'RETRY_WAITING',

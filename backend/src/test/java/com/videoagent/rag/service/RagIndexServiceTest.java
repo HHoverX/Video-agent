@@ -23,6 +23,7 @@ import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.entity.RagIndexStatus;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
+import com.videoagent.rag.retrieval.LexicalTranscriptStore;
 import com.videoagent.rag.vector.QdrantVectorStore;
 import com.videoagent.rag.vector.VectorPoint;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
@@ -48,6 +49,7 @@ class RagIndexServiceTest {
     private final VideoOwnershipService ownershipService = mock(VideoOwnershipService.class);
     private final EmbeddingProvider embeddingProvider = mock(EmbeddingProvider.class);
     private final QdrantVectorStore vectorStore = mock(QdrantVectorStore.class);
+    private final LexicalTranscriptStore lexicalStore = mock(LexicalTranscriptStore.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
     private final RagProperties ragProperties = new RagProperties(1000, 200, 1, 5, 0.0f);
     private final EmbeddingProperties embeddingProperties = new EmbeddingProperties("mock", "", "", "", 384, java.time.Duration.ofSeconds(30));
@@ -65,6 +67,7 @@ class RagIndexServiceTest {
             new TranscriptChunker(ragProperties),
             embeddingProvider,
             vectorStore,
+            lexicalStore,
             ragProperties,
             embeddingProperties,
             java.util.Optional.of(transactionManager)
@@ -84,6 +87,7 @@ class RagIndexServiceTest {
         verify(embeddingProvider, never()).embedDocuments(any());
         verify(vectorStore, never()).upsertPoints(anyLong(), anyLong(), anyLong(), any());
         verify(vectorStore, never()).ensureCollection(anyInt());
+        verify(lexicalStore, never()).replace(anyLong(), anyLong(), anyLong(), any());
     }
 
     @Test
@@ -106,6 +110,7 @@ class RagIndexServiceTest {
         verify(vectorStore).ensureCollection(384);
         verify(vectorStore).deleteByVideoStrict(1L, videoId);
         verify(vectorStore).upsertPoints(eq(1L), eq(7L), eq(3L), any());
+        verify(lexicalStore).replace(eq(1L), eq(7L), eq(3L), any());
 
         InOrder order = inOrder(indexRepository, transactionManager, embeddingProvider);
         order.verify(indexRepository).claimBuilding(
@@ -179,6 +184,29 @@ class RagIndexServiceTest {
 
         assertThat(result.getStatus()).isEqualTo(RagIndexStatus.FAILED.name());
         verify(vectorStore, never()).upsertPoints(anyLong(), anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void shouldMarkFailedWhenLexicalMirrorWriteFails() {
+        long videoId = 7L;
+        when(segmentRepository.findLatestSuccessfulByVideoId(videoId)).thenReturn(segments(20));
+        VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.NOT_BUILT.name());
+        VideoRagIndexEntity failed = indexEntity(videoId, 3L, RagIndexStatus.FAILED.name());
+        when(indexRepository.findByVideoId(videoId)).thenReturn(index);
+        when(indexRepository.claimBuilding(anyLong(), anyString(), any(LocalDateTime.class), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(embeddingProvider.embedDocuments(any())).thenReturn(
+            java.util.stream.IntStream.range(0, 20).mapToObj(i -> new float[384]).toList());
+        org.mockito.Mockito.doThrow(new IllegalStateException("lexical unavailable"))
+            .when(lexicalStore).replace(eq(1L), eq(videoId), eq(3L), any());
+        when(indexRepository.markFailed(anyLong(), anyString(), anyString(), anyString(), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(indexRepository.selectById(99L)).thenReturn(failed);
+
+        VideoRagIndexEntity result = service.buildIndex(videoId, 1L);
+
+        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.FAILED.name());
+        verify(indexRepository, never()).markReady(anyLong(), anyString(), anyInt(), any(LocalDateTime.class));
     }
 
     @Test

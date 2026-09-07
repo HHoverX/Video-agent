@@ -22,6 +22,8 @@ public class VideoUploadSessionEntity {
     private String tempPrefix;
     private String expectedSha256;
     private String status;
+    private LocalDateTime completingAt;
+    private String completionToken;
     private String lastError;
     private LocalDateTime expiresAt;
     private Long videoId;
@@ -56,6 +58,10 @@ public class VideoUploadSessionEntity {
     public void setExpectedSha256(String expectedSha256) { this.expectedSha256 = expectedSha256; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+    public LocalDateTime getCompletingAt() { return completingAt; }
+    public void setCompletingAt(LocalDateTime completingAt) { this.completingAt = completingAt; }
+    public String getCompletionToken() { return completionToken; }
+    public void setCompletionToken(String completionToken) { this.completionToken = completionToken; }
     public String getLastError() { return lastError; }
     public void setLastError(String lastError) { this.lastError = lastError; }
     public LocalDateTime getExpiresAt() { return expiresAt; }

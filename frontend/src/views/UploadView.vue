@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { UploadFile, UploadFiles } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { apiErrorMessage } from '@/services/video'
@@ -15,12 +15,15 @@ import {
   uploadPartDirect,
 } from '@/services/upload'
 import type { UploadSession } from '@/types/upload'
+import { startFileHash, type FileHashTask } from '@/utils/fileSha256Worker'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024
 const MAX_PART_RETRIES = 3
 
 const router = useRouter()
 const selectedFile = ref<File | null>(null)
+const selectedFileSha256 = ref('')
+const hashing = ref(false)
 const title = ref('')
 const session = ref<UploadSession | null>(null)
 const uploading = ref(false)
@@ -32,6 +35,8 @@ const statusMessage = ref('')
 const activeControllers = new Map<number, AbortController>()
 const activeLoaded = new Map<number, number>()
 const completedBytes = new Map<number, number>()
+let activeHashTask: FileHashTask | null = null
+let fileSelectionGeneration = 0
 
 const selectedFileSize = computed(() => {
   if (!selectedFile.value) return ''
@@ -50,10 +55,14 @@ function storageKey(file: File): string {
 }
 
 async function handleFileChange(uploadFile: UploadFile, uploadFiles: UploadFiles) {
+  const generation = ++fileSelectionGeneration
+  activeHashTask?.cancel()
+  activeHashTask = null
   const rawFile = uploadFile.raw
   validationMessage.value = ''
   statusMessage.value = ''
   selectedFile.value = null
+  selectedFileSha256.value = ''
   session.value = null
   progress.value = 0
   completedBytes.clear()
@@ -74,14 +83,34 @@ async function handleFileChange(uploadFile: UploadFile, uploadFiles: UploadFiles
 
   selectedFile.value = rawFile
   if (!title.value.trim()) title.value = rawFile.name.replace(/\.mp4$/i, '')
-  await restoreSession(rawFile)
+  hashing.value = true
+  statusMessage.value = '正在分块计算文件 SHA-256…'
+  const task = startFileHash(rawFile)
+  activeHashTask = task
+  try {
+    const sha256 = await task.promise
+    if (generation !== fileSelectionGeneration) return
+    selectedFileSha256.value = sha256
+    statusMessage.value = '文件校验完成。'
+    await restoreSession(rawFile, generation)
+  } catch (error) {
+    if (generation !== fileSelectionGeneration || (error instanceof DOMException && error.name === 'AbortError')) return
+    validationMessage.value = apiErrorMessage(error, '文件 SHA-256 计算失败，请重新选择文件。')
+    statusMessage.value = ''
+  } finally {
+    if (generation === fileSelectionGeneration) {
+      hashing.value = false
+      activeHashTask = null
+    }
+  }
 }
 
-async function restoreSession(file: File) {
+async function restoreSession(file: File, generation: number) {
   const uploadId = localStorage.getItem(storageKey(file))
   if (!uploadId) return
   try {
     const restored = await getUploadSession(uploadId)
+    if (generation !== fileSelectionGeneration) return
     if (restored.fileName !== file.name || restored.fileSize !== file.size) {
       localStorage.removeItem(storageKey(file))
       return
@@ -106,8 +135,13 @@ async function restoreSession(file: File) {
 }
 
 function handleRemove() {
+  fileSelectionGeneration++
+  activeHashTask?.cancel()
+  activeHashTask = null
+  hashing.value = false
   pauseUpload()
   selectedFile.value = null
+  selectedFileSha256.value = ''
   session.value = null
   progress.value = 0
   statusMessage.value = ''
@@ -118,6 +152,10 @@ async function submitUpload() {
   const file = selectedFile.value
   if (!file) {
     validationMessage.value = '请先选择一个 MP4 视频。'
+    return
+  }
+  if (!selectedFileSha256.value) {
+    validationMessage.value = '文件 SHA-256 尚未计算完成，请稍候。'
     return
   }
   if (!title.value.trim() || title.value.trim().length > 255) {
@@ -140,7 +178,15 @@ async function submitUpload() {
         title: title.value.trim(),
         fileSize: file.size,
         contentType: file.type || 'video/mp4',
+        sha256: selectedFileSha256.value,
       })
+      if (created.deduplicated) {
+        localStorage.removeItem(storageKey(file))
+        progress.value = 100
+        ElMessage.success('已存在相同视频，已为你打开现有视频。')
+        await router.push(`/videos/${created.videoId}`)
+        return
+      }
       session.value = created
       localStorage.setItem(storageKey(file), created.uploadId)
     } else {
@@ -151,7 +197,7 @@ async function submitUpload() {
     if (paused.value) return
 
     statusMessage.value = '全部分片已上传，正在服务端合并视频…'
-    const completed = await completeUpload(session.value.uploadId)
+    const completed = await completeUpload(session.value.uploadId, selectedFileSha256.value)
     localStorage.removeItem(storageKey(file))
     progress.value = 100
     ElMessage.success(
@@ -175,9 +221,18 @@ async function submitUpload() {
   }
 }
 
+onBeforeUnmount(() => {
+  fileSelectionGeneration++
+  activeHashTask?.cancel()
+  activeHashTask = null
+})
+
 async function uploadMissingParts(file: File, current: UploadSession) {
   const done = new Set(current.completedParts.map((part) => part.partNumber))
-  const missing = Array.from({ length: current.totalParts }, (_, index) => index + 1)
+  const missing = Array.from(
+    { length: current.totalParts },
+    (_, index) => index + current.partNumberBase,
+  )
     .filter((partNumber) => !done.has(partNumber))
   if (missing.length === 0) return
 
@@ -195,7 +250,7 @@ async function uploadMissingParts(file: File, current: UploadSession) {
 }
 
 async function uploadOnePart(file: File, current: UploadSession, partNumber: number) {
-  const start = (partNumber - 1) * current.chunkSize
+  const start = (partNumber - current.partNumberBase) * current.chunkSize
   const end = Math.min(start + current.chunkSize, file.size)
   const blob = file.slice(start, end)
 
@@ -330,7 +385,7 @@ function updateProgress() {
             class="submit-button"
             type="primary"
             size="large"
-            :disabled="!selectedFile || uploading"
+            :disabled="!selectedFile || hashing || uploading"
             @click="submitUpload"
           >
             {{ submitLabel }}

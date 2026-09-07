@@ -15,6 +15,8 @@ import com.videoagent.outbox.OutboxService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class AnalysisCommandServiceTest {
 
@@ -64,16 +66,17 @@ class AnalysisCommandServiceTest {
         ));
     }
 
-    @Test
-    void shouldReturnExistingActiveTaskWithoutEnqueueingAnotherEvent() {
+    @ParameterizedTest
+    @ValueSource(strings = {"PENDING", "PROCESSING", "RETRY_WAITING", "SUCCESS"})
+    void shouldReturnExistingTaskWithoutEnqueueingAnotherEvent(String status) {
         AnalysisTaskEntity task = pendingTask();
-        task.setStatus("PROCESSING");
+        task.setStatus(status);
         when(persistenceService.prepareStart(7L, 5L))
             .thenReturn(new StartDecision(task, StartAction.NONE));
 
         StartAnalysisResponse response = service.start(7L, 5L);
 
-        assertThat(response).isEqualTo(new StartAnalysisResponse(101L, 7L, "PROCESSING"));
+        assertThat(response).isEqualTo(new StartAnalysisResponse(101L, 7L, status));
         verify(outboxService, never()).enqueueDispatch(task);
         verify(outboxService, never()).enqueueRetry(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.any());
         verify(progressUpdateService, never()).update(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any());

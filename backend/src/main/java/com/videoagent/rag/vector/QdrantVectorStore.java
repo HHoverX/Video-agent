@@ -171,10 +171,12 @@ public class QdrantVectorStore {
             List<VectorPoint> results = new ArrayList<>();
             for (ScoredPoint point : response.result()) {
                 results.add(VectorPoint.retrieved(
+                    payloadLong(point.payload(), "analysisTaskId"),
                     payloadInt(point.payload(), "chunkIndex"),
                     payloadString(point.payload(), "text"),
                     payloadLong(point.payload(), "startMs"),
                     payloadLong(point.payload(), "endMs"),
+                    payloadIntList(point.payload(), "sourceSegmentIndexes"),
                     point.score()
                 ));
             }
@@ -235,6 +237,18 @@ public class QdrantVectorStore {
     private String payloadString(Map<String, Object> payload, String key) {
         Object value = payload == null ? null : payload.get(key);
         return value == null ? "" : value.toString();
+    }
+
+    private List<Integer> payloadIntList(Map<String, Object> payload, String key) {
+        Object value = payload == null ? null : payload.get(key);
+        if (!(value instanceof List<?> values)) {
+            return List.of();
+        }
+        return values.stream()
+            .filter(Number.class::isInstance)
+            .map(Number.class::cast)
+            .map(Number::intValue)
+            .toList();
     }
 
     private Integer httpStatus(RestClientException exception) {

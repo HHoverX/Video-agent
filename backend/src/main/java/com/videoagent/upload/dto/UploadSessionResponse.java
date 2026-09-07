@@ -5,12 +5,14 @@ import java.util.List;
 
 public record UploadSessionResponse(
     String uploadId,
+    boolean deduplicated,
     String fileName,
     String title,
     long fileSize,
     String contentType,
     long chunkSize,
     int totalParts,
+    int partNumberBase,
     String status,
     LocalDateTime expiresAt,
     long uploadedBytes,

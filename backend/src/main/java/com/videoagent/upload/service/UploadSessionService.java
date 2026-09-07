@@ -10,20 +10,20 @@ import com.videoagent.upload.dto.UploadPartResponse;
 import com.videoagent.upload.dto.UploadPartUrlResponse;
 import com.videoagent.upload.dto.UploadSessionResponse;
 import com.videoagent.upload.entity.UploadSessionStatus;
-import com.videoagent.upload.entity.VideoUploadPartEntity;
 import com.videoagent.upload.entity.VideoUploadSessionEntity;
-import com.videoagent.upload.repository.VideoUploadPartRepository;
 import com.videoagent.upload.repository.VideoUploadSessionRepository;
 import com.videoagent.video.service.VideoUploadProperties;
+import com.videoagent.video.entity.VideoEntity;
+import com.videoagent.video.repository.VideoRepository;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DataAccessException;
 
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -37,23 +37,26 @@ public class UploadSessionService {
     private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
 
     private final VideoUploadSessionRepository sessionRepository;
-    private final VideoUploadPartRepository partRepository;
     private final ObjectStorageService storageService;
+    private final UploadPartStateService partStateService;
     private final VideoUploadProperties properties;
     private final UploadTemporaryObjectCleaner temporaryObjectCleaner;
+    private final VideoRepository videoRepository;
 
     public UploadSessionService(
         VideoUploadSessionRepository sessionRepository,
-        VideoUploadPartRepository partRepository,
         ObjectStorageService storageService,
+        UploadPartStateService partStateService,
         VideoUploadProperties properties,
-        UploadTemporaryObjectCleaner temporaryObjectCleaner
+        UploadTemporaryObjectCleaner temporaryObjectCleaner,
+        VideoRepository videoRepository
     ) {
         this.sessionRepository = sessionRepository;
-        this.partRepository = partRepository;
         this.storageService = storageService;
+        this.partStateService = partStateService;
         this.properties = properties;
         this.temporaryObjectCleaner = temporaryObjectCleaner;
+        this.videoRepository = videoRepository;
     }
 
     @Transactional
@@ -86,7 +89,16 @@ public class UploadSessionService {
         if (title.isBlank() || title.length() > 255) {
             throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "视频标题长度必须为 1 至 255 个字符");
         }
-        String sha256 = normalizeSha256(request.sha256());
+        String sha256 = requireSha256(request.sha256());
+
+        VideoEntity existingVideo = videoRepository.findByUserIdAndFileHash(userId, sha256);
+        if (existingVideo != null && existingVideo.getId() != null) {
+            return new UploadSessionResponse(
+                null, true, fileName, title, fileSize, contentType, chunkSize,
+                Math.toIntExact(totalPartsLong), 0, UploadSessionStatus.COMPLETED.name(), null,
+                fileSize, List.of(), properties.maxClientConcurrency(), existingVideo.getId(), null, null
+            );
+        }
 
         String uploadId = UUID.randomUUID().toString();
         LocalDateTime now = LocalDateTime.now();
@@ -112,22 +124,16 @@ public class UploadSessionService {
         return response(session, List.of());
     }
 
-    @Transactional(readOnly = true)
     public UploadSessionResponse get(long userId, String uploadId) {
         VideoUploadSessionEntity session = requireOwned(uploadId, userId);
-        return response(session, partRepository.findByUploadId(uploadId));
+        return response(session, partStateService.completedPartNumbers(session));
     }
 
-    @Transactional
     public UploadPartUrlResponse createPartUrl(long userId, String uploadId, int partNumber) {
         VideoUploadSessionEntity session = requireOwned(uploadId, userId);
         requireResumable(session);
         validatePartNumber(session, partNumber);
-        VideoUploadPartEntity existing = partRepository.findPart(uploadId, partNumber);
         long expectedSize = expectedPartSize(session, partNumber);
-        if (existing != null && "COMPLETED".equals(existing.getStatus())) {
-            return new UploadPartUrlResponse(partNumber, expectedSize, true, null, null);
-        }
         String objectKey = UploadKeyPolicy.partObjectKey(session.getTempPrefix(), partNumber);
         String url = storageService.presignPutObject(objectKey, properties.presignTtl());
         if (UploadSessionStatus.CREATED.name().equals(session.getStatus())
@@ -138,7 +144,6 @@ public class UploadSessionService {
         return new UploadPartUrlResponse(partNumber, expectedSize, false, url, expiresAt);
     }
 
-    @Transactional
     public UploadPartResponse confirmPart(
         long userId,
         String uploadId,
@@ -158,15 +163,15 @@ public class UploadSessionService {
             );
         }
         String checksum = normalizeSha256(request == null ? null : request.sha256());
-        VideoUploadPartEntity existing = partRepository.findPart(uploadId, partNumber);
-        if (existing != null && (!stored.etag().equals(existing.getEtag())
-            || stored.size() != existing.getActualSize())) {
-            throw new VideoAgentException(ErrorCode.UPLOAD_PART_INVALID, "已确认分片被不同内容覆盖，请取消后重新上传");
+        try {
+            partStateService.markCompleted(session, partNumber);
+        } catch (DataAccessException exception) {
+            throw new VideoAgentException(
+                ErrorCode.VIDEO_UPLOAD_FAILED,
+                "分片已上传，但状态暂时无法确认，请重试",
+                exception
+            );
         }
-        LocalDateTime now = LocalDateTime.now();
-        partRepository.upsertCompleted(
-            uploadId, partNumber, objectKey, expectedSize, stored.size(), stored.etag(), checksum, now
-        );
         return new UploadPartResponse(partNumber, stored.size(), stored.etag(), checksum);
     }
 
@@ -174,8 +179,9 @@ public class UploadSessionService {
     public void cancel(long userId, String uploadId) {
         VideoUploadSessionEntity session = sessionRepository.lockById(uploadId);
         requireOwnership(session, userId);
-        if (UploadSessionStatus.COMPLETED.name().equals(session.getStatus())) {
-            throw new VideoAgentException(ErrorCode.UPLOAD_SESSION_STATE_CONFLICT, "已完成的上传不能取消");
+        if (UploadSessionStatus.COMPLETED.name().equals(session.getStatus())
+            || UploadSessionStatus.COMPLETING.name().equals(session.getStatus())) {
+            throw new VideoAgentException(ErrorCode.UPLOAD_SESSION_STATE_CONFLICT, "完成中或已完成的上传不能取消");
         }
         if (UploadSessionStatus.CANCELLED.name().equals(session.getStatus())) {
             return;
@@ -203,7 +209,8 @@ public class UploadSessionService {
     }
 
     static long expectedPartSize(VideoUploadSessionEntity session, int partNumber) {
-        long offset = (long) (partNumber - 1) * session.getChunkSize();
+        int firstPartNumber = UploadKeyPolicy.firstPartNumber(session.getTempPrefix());
+        long offset = (long) (partNumber - firstPartNumber) * session.getChunkSize();
         return Math.min(session.getChunkSize(), session.getFileSize() - offset);
     }
 
@@ -219,25 +226,26 @@ public class UploadSessionService {
     }
 
     private void validatePartNumber(VideoUploadSessionEntity session, int partNumber) {
-        if (partNumber < 1 || partNumber > session.getTotalParts()) {
+        int firstPartNumber = UploadKeyPolicy.firstPartNumber(session.getTempPrefix());
+        if (partNumber < firstPartNumber || partNumber >= firstPartNumber + session.getTotalParts()) {
             throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "partNumber 超出上传会话范围");
         }
     }
 
     private UploadSessionResponse response(
         VideoUploadSessionEntity session,
-        List<VideoUploadPartEntity> parts
+        List<Integer> completedPartNumbers
     ) {
-        List<UploadPartResponse> completed = parts.stream()
-            .filter(part -> "COMPLETED".equals(part.getStatus()))
-            .map(part -> new UploadPartResponse(
-                part.getPartNumber(), part.getActualSize(), part.getEtag(), part.getChecksumSha256()
+        List<UploadPartResponse> completed = completedPartNumbers.stream()
+            .map(partNumber -> new UploadPartResponse(
+                partNumber, expectedPartSize(session, partNumber), null, null
             ))
             .toList();
         long uploadedBytes = completed.stream().mapToLong(UploadPartResponse::size).sum();
         return new UploadSessionResponse(
-            session.getId(), session.getFileName(), session.getTitle(), session.getFileSize(),
-            session.getContentType(), session.getChunkSize(), session.getTotalParts(), session.getStatus(),
+            session.getId(), false, session.getFileName(), session.getTitle(), session.getFileSize(),
+            session.getContentType(), session.getChunkSize(), session.getTotalParts(),
+            UploadKeyPolicy.firstPartNumber(session.getTempPrefix()), session.getStatus(),
             session.getExpiresAt(), uploadedBytes, completed, properties.maxClientConcurrency(),
             session.getVideoId(), session.getAnalysisTaskId(), session.getLastError()
         );
@@ -256,7 +264,7 @@ public class UploadSessionService {
         }
     }
 
-    private String normalizeSha256(String value) {
+    static String normalizeSha256(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
@@ -264,5 +272,13 @@ public class UploadSessionService {
             throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "SHA-256 必须是 64 位十六进制字符串");
         }
         return value.toLowerCase(Locale.ROOT);
+    }
+
+    private static String requireSha256(String value) {
+        String normalized = normalizeSha256(value);
+        if (normalized == null) {
+            throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "创建上传会话必须提供 SHA-256");
+        }
+        return normalized;
     }
 }

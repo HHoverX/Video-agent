@@ -1,16 +1,23 @@
 import axios from 'axios'
 
 import { api } from './api'
-import type { CompleteUploadResult, UploadPart, UploadPartUrl, UploadSession } from '@/types/upload'
+import type {
+  CompleteUploadResult,
+  CreateUploadSessionResult,
+  UploadPart,
+  UploadPartUrl,
+  UploadSession,
+} from '@/types/upload'
 
 export async function createUploadSession(input: {
   fileName: string
   title: string
   fileSize: number
   contentType: string
+  sha256: string
   chunkSize?: number
-}): Promise<UploadSession> {
-  const { data } = await api.post<UploadSession>('/uploads', input)
+}): Promise<CreateUploadSessionResult> {
+  const { data } = await api.post<CreateUploadSessionResult>('/uploads', input)
   return data
 }
 
@@ -45,8 +52,8 @@ export async function confirmUploadPart(uploadId: string, partNumber: number): P
   return data
 }
 
-export async function completeUpload(uploadId: string): Promise<CompleteUploadResult> {
-  const { data } = await api.post<CompleteUploadResult>(`/uploads/${uploadId}/complete`, undefined, {
+export async function completeUpload(uploadId: string, sha256: string): Promise<CompleteUploadResult> {
+  const { data } = await api.post<CompleteUploadResult>(`/uploads/${uploadId}/complete`, { sha256 }, {
     timeout: 5 * 60_000,
   })
   return data

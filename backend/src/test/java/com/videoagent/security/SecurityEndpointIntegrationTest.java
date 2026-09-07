@@ -19,12 +19,14 @@ import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisEventService;
 import com.videoagent.analysis.service.AnalysisQueryService;
+import com.videoagent.agent.memory.ConversationTurnRepository;
 import com.videoagent.auth.entity.AppUserEntity;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
+import com.videoagent.rag.repository.VideoRagChunkRepository;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
@@ -80,6 +82,9 @@ class SecurityEndpointIntegrationTest {
     private VideoUploadPartRepository uploadPartRepository;
 
     @MockitoBean
+    private ConversationTurnRepository conversationTurnRepository;
+
+    @MockitoBean
     private AnalysisTaskRepository taskRepository;
 
     @MockitoBean
@@ -87,6 +92,9 @@ class SecurityEndpointIntegrationTest {
 
     @MockitoBean
     private VideoRagIndexRepository ragIndexRepository;
+
+    @MockitoBean
+    private VideoRagChunkRepository ragChunkRepository;
 
     @MockitoBean
     private VideoTranscriptSegmentRepository transcriptRepository;

@@ -82,7 +82,8 @@ class VideoFileValidatorTest {
             10_000,
             java.time.Duration.ofHours(24),
             java.time.Duration.ofMinutes(15),
-            3
+            3,
+            java.time.Duration.ofMinutes(30)
         );
     }
 }

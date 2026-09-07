@@ -19,9 +19,10 @@ public interface ObjectStorageService {
 
     StoredObject statObject(String objectKey);
 
+    StoredObject statObjectIfExists(String objectKey);
+
     byte[] readObjectRange(String objectKey, long offset, int length);
 
     void composeObject(String objectKey, List<ComposeObjectSource> sources, String contentType);
 
-    String sha256Object(String objectKey);
 }

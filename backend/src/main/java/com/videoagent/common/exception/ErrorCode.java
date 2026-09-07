@@ -19,6 +19,8 @@ public enum ErrorCode {
     UPLOAD_PART_INVALID(HttpStatus.UNPROCESSABLE_ENTITY, "上传分片不完整或校验失败"),
     VIDEO_ANALYSIS_IN_PROGRESS(HttpStatus.CONFLICT, "视频正在分析中，暂时无法删除"),
     ANALYSIS_ALREADY_RUNNING(HttpStatus.CONFLICT, "该视频当前分析版本已有任务"),
+    ANALYSIS_RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS, "分析请求过于频繁"),
+    ANALYSIS_ACTIVE_LIMIT_EXCEEDED(HttpStatus.TOO_MANY_REQUESTS, "当前进行中的分析任务过多"),
     ANALYSIS_NOT_FOUND(HttpStatus.NOT_FOUND, "分析任务不存在"),
     ANALYSIS_DISPATCH_FAILED(HttpStatus.SERVICE_UNAVAILABLE, "分析任务投递失败"),
     ANALYSIS_DISPATCH_EXHAUSTED(HttpStatus.INTERNAL_SERVER_ERROR, "分析任务投递重试耗尽"),

@@ -45,13 +45,18 @@ class AnalysisTaskPersistenceServiceTest {
             "m3-simulation-v1",
             Duration.ofHours(24)
         );
-        service = new AnalysisTaskPersistenceService(ownershipService, taskRepository, properties);
+        service = new AnalysisTaskPersistenceService(
+            ownershipService,
+            taskRepository,
+            properties,
+            new AnalysisProtectionProperties(null, 3)
+        );
     }
 
     @Test
     void shouldCreatePendingTaskForExistingVideo() {
         when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
-        when(taskRepository.findByBusinessKeyForUpdate(7L, "FRAMEWORK", "m3-simulation-v1"))
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
             .thenReturn(null);
         when(taskRepository.insert(any(AnalysisTaskEntity.class))).thenAnswer(invocation -> {
             AnalysisTaskEntity task = invocation.getArgument(0);
@@ -88,7 +93,7 @@ class AnalysisTaskPersistenceServiceTest {
         AnalysisTaskEntity existing = new AnalysisTaskEntity();
         existing.setId(88L);
         existing.setStatus(status.name());
-        when(taskRepository.findByBusinessKeyForUpdate(7L, "FRAMEWORK", "m3-simulation-v1"))
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
             .thenReturn(existing);
 
         StartDecision decision = service.prepareStart(7L, 5L);
@@ -97,6 +102,51 @@ class AnalysisTaskPersistenceServiceTest {
         assertThat(decision.action()).isEqualTo(StartAction.NONE);
         verify(taskRepository, never()).restartFailedForGeneration(anyLong(), anyInt(), any());
         verify(taskRepository, never()).insert(any(AnalysisTaskEntity.class));
+        verify(taskRepository, never()).countActiveByUserId(anyLong());
+    }
+
+    @Test
+    void shouldRejectNewTaskWhenUserReachedActiveLimit() {
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
+            .thenReturn(null);
+        when(taskRepository.countActiveByUserId(5L)).thenReturn(3L);
+
+        assertThatThrownBy(() -> service.prepareStart(7L, 5L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_ACTIVE_LIMIT_EXCEEDED)
+            );
+
+        verify(taskRepository, never()).insert(any(AnalysisTaskEntity.class));
+    }
+
+    @Test
+    void shouldReturnExistingProcessingTaskBeforeCheckingActiveLimit() {
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
+        AnalysisTaskEntity existing = existingTask(AnalysisStatus.PROCESSING, 2);
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
+            .thenReturn(existing);
+
+        StartDecision decision = service.prepareStart(7L, 5L);
+
+        assertThat(decision.task()).isSameAs(existing);
+        verify(taskRepository, never()).countActiveByUserId(anyLong());
+    }
+
+    @Test
+    void shouldApplyActiveLimitBeforeRestartingFailedTask() {
+        when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
+        AnalysisTaskEntity failed = existingTask(AnalysisStatus.FAILED, 4);
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
+            .thenReturn(failed);
+        when(taskRepository.countActiveByUserId(5L)).thenReturn(3L);
+
+        assertThatThrownBy(() -> service.prepareStart(7L, 5L))
+            .isInstanceOfSatisfying(VideoAgentException.class, exception ->
+                assertThat(exception.errorCode()).isEqualTo(ErrorCode.ANALYSIS_ACTIVE_LIMIT_EXCEEDED)
+            );
+
+        verify(taskRepository, never()).restartFailedForGeneration(anyLong(), anyInt(), any());
     }
 
     @Test
@@ -112,7 +162,7 @@ class AnalysisTaskPersistenceServiceTest {
         failed.setLastFailureStage("SUMMARIZING");
         failed.setStartedAt(previousStartedAt);
         failed.setFinishedAt(LocalDateTime.now().minusMinutes(1));
-        when(taskRepository.findByBusinessKeyForUpdate(7L, "FRAMEWORK", "m3-simulation-v1"))
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
             .thenReturn(failed);
         when(taskRepository.restartFailedForGeneration(anyLong(), anyInt(), any()))
             .thenReturn(1);
@@ -138,24 +188,24 @@ class AnalysisTaskPersistenceServiceTest {
     }
 
     @Test
-    void shouldCheckOwnershipBeforeLockingTask() {
+    void shouldCheckOwnershipBeforeLookingUpTask() {
         when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
         AnalysisTaskEntity existing = existingTask(AnalysisStatus.PROCESSING, 2);
-        when(taskRepository.findByBusinessKeyForUpdate(7L, "FRAMEWORK", "m3-simulation-v1"))
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
             .thenReturn(existing);
 
         service.prepareStart(7L, 5L);
 
         InOrder order = inOrder(ownershipService, taskRepository);
         order.verify(ownershipService).requireOwned(7L, 5L);
-        order.verify(taskRepository).findByBusinessKeyForUpdate(7L, "FRAMEWORK", "m3-simulation-v1");
+        order.verify(taskRepository).findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1");
     }
 
     @Test
     void shouldOnlyRestartFailedTaskOnceAcrossRepeatedStarts() {
         when(ownershipService.requireOwned(7L, 5L)).thenReturn(new VideoEntity());
         AnalysisTaskEntity failed = existingTask(AnalysisStatus.FAILED, 4);
-        when(taskRepository.findByBusinessKeyForUpdate(7L, "FRAMEWORK", "m3-simulation-v1"))
+        when(taskRepository.findByBusinessKey(7L, "FRAMEWORK", "m3-simulation-v1"))
             .thenReturn(failed);
         when(taskRepository.restartFailedForGeneration(anyLong(), anyInt(), any()))
             .thenReturn(1);

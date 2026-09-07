@@ -24,15 +24,18 @@ public class UploadTemporaryObjectCleaner {
     private final VideoUploadSessionRepository sessionRepository;
     private final ObjectStorageService storageService;
     private final VideoRepository videoRepository;
+    private final UploadPartStateService partStateService;
 
     public UploadTemporaryObjectCleaner(
         VideoUploadSessionRepository sessionRepository,
         ObjectStorageService storageService,
-        VideoRepository videoRepository
+        VideoRepository videoRepository,
+        UploadPartStateService partStateService
     ) {
         this.sessionRepository = sessionRepository;
         this.storageService = storageService;
         this.videoRepository = videoRepository;
+        this.partStateService = partStateService;
     }
 
     @Scheduled(fixedDelayString = "${videoagent.upload.cleanup-interval-ms:300000}")
@@ -60,8 +63,11 @@ public class UploadTemporaryObjectCleaner {
     }
 
     void cleanupNow(VideoUploadSessionEntity session) {
+        partStateService.deleteBestEffort(session.getId());
         try {
-            for (int partNumber = 1; partNumber <= session.getTotalParts(); partNumber++) {
+            int firstPartNumber = UploadKeyPolicy.firstPartNumber(session.getTempPrefix());
+            for (int offset = 0; offset < session.getTotalParts(); offset++) {
+                int partNumber = firstPartNumber + offset;
                 storageService.removeObject(UploadKeyPolicy.partObjectKey(session.getTempPrefix(), partNumber));
             }
             if (shouldRemoveFinalObject(session)) {

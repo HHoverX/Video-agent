@@ -18,7 +18,10 @@ class UploadTemporaryObjectCleanerTest {
     private final VideoUploadSessionRepository sessions = mock(VideoUploadSessionRepository.class);
     private final ObjectStorageService storage = mock(ObjectStorageService.class);
     private final VideoRepository videos = mock(VideoRepository.class);
-    private final UploadTemporaryObjectCleaner cleaner = new UploadTemporaryObjectCleaner(sessions, storage, videos);
+    private final UploadPartStateService partState = mock(UploadPartStateService.class);
+    private final UploadTemporaryObjectCleaner cleaner = new UploadTemporaryObjectCleaner(
+        sessions, storage, videos, partState
+    );
 
     @Test
     void shouldCleanExpiredPartsAndUncommittedComposedObject() {
@@ -26,6 +29,7 @@ class UploadTemporaryObjectCleanerTest {
 
         cleaner.cleanupNow(expired);
 
+        verify(partState).deleteBestEffort("u1");
         verify(storage).removeObject("upload-parts/u1/part-00001");
         verify(storage).removeObject("upload-parts/u1/part-00002");
         verify(storage).removeObject("videos/final.mp4");

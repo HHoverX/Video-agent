@@ -13,6 +13,7 @@ import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
 import io.minio.StatObjectArgs;
 import io.minio.StatObjectResponse;
+import io.minio.errors.ErrorResponseException;
 import io.minio.http.Method;
 
 import org.springframework.beans.factory.ObjectProvider;
@@ -24,9 +25,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -132,12 +130,27 @@ public class MinioStorageService implements ObjectStorageService {
 
     @Override
     public StoredObject statObject(String objectKey) {
+        StoredObject storedObject = statObjectIfExists(objectKey);
+        if (storedObject == null) {
+            throw new VideoAgentException(ErrorCode.STORAGE_ERROR, "对象存储中不存在指定对象");
+        }
+        return storedObject;
+    }
+
+    @Override
+    public StoredObject statObjectIfExists(String objectKey) {
         try {
             StatObjectResponse response = internalClientProvider.getObject().statObject(StatObjectArgs.builder()
                 .bucket(properties.bucket())
                 .object(objectKey)
                 .build());
             return new StoredObject(objectKey, response.size(), response.etag(), response.contentType());
+        } catch (ErrorResponseException exception) {
+            String code = exception.errorResponse().code();
+            if ("NoSuchKey".equals(code) || "NoSuchObject".equals(code)) {
+                return null;
+            }
+            throw storageFailure("无法读取对象信息", exception);
         } catch (Exception exception) {
             throw storageFailure("无法读取对象信息", exception);
         }
@@ -180,26 +193,6 @@ public class MinioStorageService implements ObjectStorageService {
                 .build());
         } catch (Exception exception) {
             throw storageFailure("视频分片合并失败", exception);
-        }
-    }
-
-    @Override
-    public String sha256Object(String objectKey) {
-        try (InputStream inputStream = internalClientProvider.getObject().getObject(GetObjectArgs.builder()
-            .bucket(properties.bucket())
-            .object(objectKey)
-            .build())) {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] buffer = new byte[64 * 1024];
-            int read;
-            while ((read = inputStream.read(buffer)) != -1) {
-                digest.update(buffer, 0, read);
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException exception) {
-            throw new VideoAgentException(ErrorCode.INTERNAL_ERROR, "运行环境不支持 SHA-256", exception);
-        } catch (Exception exception) {
-            throw storageFailure("无法校验合并文件摘要", exception);
         }
     }
 

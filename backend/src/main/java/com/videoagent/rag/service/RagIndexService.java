@@ -13,6 +13,7 @@ import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.entity.RagIndexStatus;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
+import com.videoagent.rag.retrieval.LexicalTranscriptStore;
 import com.videoagent.rag.vector.QdrantVectorStore;
 import com.videoagent.rag.vector.VectorPoint;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
@@ -57,6 +58,7 @@ public class RagIndexService {
     private final TranscriptChunker chunker;
     private final EmbeddingProvider embeddingProvider;
     private final QdrantVectorStore vectorStore;
+    private final LexicalTranscriptStore lexicalStore;
     private final RagProperties ragProperties;
     private final EmbeddingProperties embeddingProperties;
     private final TransactionTemplate transactionTemplate;
@@ -71,6 +73,7 @@ public class RagIndexService {
         TranscriptChunker chunker,
         EmbeddingProvider embeddingProvider,
         QdrantVectorStore vectorStore,
+        LexicalTranscriptStore lexicalStore,
         RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
         Optional<PlatformTransactionManager> transactionManager,
@@ -83,6 +86,7 @@ public class RagIndexService {
         this.chunker = chunker;
         this.embeddingProvider = embeddingProvider;
         this.vectorStore = vectorStore;
+        this.lexicalStore = lexicalStore;
         this.ragProperties = ragProperties;
         this.embeddingProperties = embeddingProperties;
         this.transactionTemplate = transactionManager.map(TransactionTemplate::new).orElse(null);
@@ -97,12 +101,13 @@ public class RagIndexService {
         TranscriptChunker chunker,
         EmbeddingProvider embeddingProvider,
         QdrantVectorStore vectorStore,
+        LexicalTranscriptStore lexicalStore,
         RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
         Optional<PlatformTransactionManager> transactionManager
     ) {
         this(indexRepository, segmentRepository, ownershipService, strategyResolver, chunker, embeddingProvider,
-            vectorStore, ragProperties, embeddingProperties, transactionManager, AiUsageMetrics.noop());
+            vectorStore, lexicalStore, ragProperties, embeddingProperties, transactionManager, AiUsageMetrics.noop());
     }
 
     @Transactional(readOnly = true)
@@ -242,6 +247,7 @@ public class RagIndexService {
             // Idempotent rebuild: clear old vectors for this video, then write.
             vectorStore.deleteByVideoStrict(userId, videoId);
             vectorStore.upsertPoints(userId, videoId, index.getAnalysisTaskId(), points);
+            lexicalStore.replace(userId, videoId, index.getAnalysisTaskId(), chunks);
 
             int ready = transactions().execute(status ->
                 indexRepository.markReady(index.getId(), buildToken, chunks.size(), LocalDateTime.now()));

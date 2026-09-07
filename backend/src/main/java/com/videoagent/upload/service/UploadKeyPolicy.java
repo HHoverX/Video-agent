@@ -17,10 +17,21 @@ final class UploadKeyPolicy {
     }
 
     static String tempPrefix(String uploadId) {
-        return "upload-parts/" + uploadId;
+        return "uploads/" + uploadId + "/parts";
     }
 
     static String partObjectKey(String tempPrefix, int partNumber) {
-        return tempPrefix + "/part-%05d".formatted(partNumber);
+        if (isLegacy(tempPrefix)) {
+            return tempPrefix + "/part-%05d".formatted(partNumber);
+        }
+        return tempPrefix + "/" + partNumber;
+    }
+
+    static int firstPartNumber(String tempPrefix) {
+        return isLegacy(tempPrefix) ? 1 : 0;
+    }
+
+    private static boolean isLegacy(String tempPrefix) {
+        return tempPrefix.startsWith("upload-parts/");
     }
 }

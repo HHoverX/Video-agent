@@ -20,20 +20,40 @@ public class UploadFailureRecorder {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void recordRetryableCompletionFailure(long userId, String uploadId, String message) {
+    public void recordRetryableCompletionFailure(
+        long userId,
+        String uploadId,
+        String completionToken,
+        String message
+    ) {
         VideoUploadSessionEntity session = sessionRepository.lockById(uploadId);
         if (session == null || session.getUserId() == null || session.getUserId() != userId) {
             return;
         }
-        if (UploadSessionStatus.COMPLETED.name().equals(session.getStatus())
-            || UploadSessionStatus.CANCELLED.name().equals(session.getStatus())
-            || UploadSessionStatus.EXPIRED.name().equals(session.getStatus())) {
+        if (!UploadSessionStatus.COMPLETING.name().equals(session.getStatus())
+            || completionToken == null
+            || !completionToken.equals(session.getCompletionToken())) {
             return;
         }
-        session.setStatus(UploadSessionStatus.FAILED.name());
-        session.setLastError(safeMessage(message));
-        session.setUpdatedAt(LocalDateTime.now());
-        sessionRepository.updateById(session);
+        sessionRepository.markCompletionFailed(
+            uploadId, completionToken, safeMessage(message), LocalDateTime.now()
+        );
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordTimedOutCompletion(String uploadId, String completionToken, LocalDateTime cutoff) {
+        VideoUploadSessionEntity session = sessionRepository.lockById(uploadId);
+        if (session == null
+            || !UploadSessionStatus.COMPLETING.name().equals(session.getStatus())
+            || completionToken == null
+            || !completionToken.equals(session.getCompletionToken())
+            || session.getCompletingAt() == null
+            || !session.getCompletingAt().isBefore(cutoff)) {
+            return;
+        }
+        sessionRepository.markCompletionFailed(
+            uploadId, completionToken, "COMPLETING_TIMEOUT", LocalDateTime.now()
+        );
     }
 
     private String safeMessage(String message) {

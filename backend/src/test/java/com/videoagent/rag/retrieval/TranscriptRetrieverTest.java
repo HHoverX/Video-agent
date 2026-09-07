@@ -11,6 +11,7 @@ import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.vector.QdrantVectorStore;
 import com.videoagent.rag.vector.VectorPoint;
+import com.videoagent.rag.rerank.TranscriptReranker;
 import com.videoagent.telemetry.QaTelemetryContext;
 import com.videoagent.telemetry.QaTelemetryRoute;
 
@@ -23,12 +24,15 @@ class TranscriptRetrieverTest {
 
     private final EmbeddingProvider embeddingProvider = mock(EmbeddingProvider.class);
     private final QdrantVectorStore vectorStore = mock(QdrantVectorStore.class);
+    private final LexicalTranscriptStore lexicalStore = mock(LexicalTranscriptStore.class);
+    private final TranscriptReranker reranker = mock(TranscriptReranker.class);
     private final RagProperties properties = new RagProperties(1000, 200, 1, 5, 0.0f);
     private TranscriptRetriever retriever;
 
     @BeforeEach
     void setUp() {
-        retriever = new TranscriptRetriever(embeddingProvider, vectorStore, properties);
+        retriever = new TranscriptRetriever(
+            embeddingProvider, vectorStore, lexicalStore, new ReciprocalRankFusion(), reranker, properties);
     }
 
     @Test
@@ -72,7 +76,8 @@ class TranscriptRetrieverTest {
     @Test
     void shouldDropHitsBelowConfiguredEvidenceScore() {
         TranscriptRetriever thresholdRetriever = new TranscriptRetriever(
-            embeddingProvider, vectorStore, new RagProperties(1000, 200, 1, 5, 0.75f)
+            embeddingProvider, vectorStore, lexicalStore, new ReciprocalRankFusion(), reranker,
+            new RagProperties(1000, 200, 1, 5, 0.75f)
         );
         when(embeddingProvider.embedQuery("question")).thenReturn(new float[384]);
         when(vectorStore.search(1L, 7L, new float[384], 5)).thenReturn(List.of(
@@ -83,5 +88,28 @@ class TranscriptRetrieverTest {
         List<RetrievedChunk> chunks = thresholdRetriever.retrieve(1L, 7L, "question");
 
         assertThat(chunks).extracting(RetrievedChunk::text).containsExactly("strong");
+    }
+
+    @Test
+    void shouldFallbackToRrfOrderWhenRerankerFailsAndKeepLexicalOnlyCandidate() {
+        RagProperties hybrid = new RagProperties(1000, 200, 1, 15, 0.0f, 15, 60, 15, 3,
+            new RagProperties.Reranker(true, "http://reranker", "", "model", java.time.Duration.ofSeconds(1)));
+        TranscriptRetriever hybridRetriever = new TranscriptRetriever(
+            embeddingProvider, vectorStore, lexicalStore, new ReciprocalRankFusion(), reranker, hybrid);
+        when(embeddingProvider.embedQuery("exact term")).thenReturn(new float[384]);
+        when(vectorStore.search(1L, 7L, new float[384], 15)).thenReturn(List.of(
+            VectorPoint.retrieved(9L, 0, "A", 0, 1000, List.of(0), 0.9f),
+            VectorPoint.retrieved(9L, 1, "B", 1000, 2000, List.of(1), 0.8f)
+        ));
+        when(lexicalStore.search(1L, 7L, "exact term", 15)).thenReturn(List.of(
+            new LexicalChunk(ChunkIdentity.of(7L, 9L, 0), 0, "A", 0, 1000, List.of(0), 8.0),
+            new LexicalChunk(ChunkIdentity.of(7L, 9L, 2), 2, "D", 2000, 3000, List.of(2), 7.0)
+        ));
+        when(reranker.enabled()).thenReturn(true);
+        when(reranker.rerank(any(), any())).thenThrow(new IllegalStateException("unavailable"));
+
+        List<RetrievedChunk> result = hybridRetriever.retrieve(1L, 7L, "exact term");
+
+        assertThat(result).extracting(RetrievedChunk::text).containsExactly("A", "B", "D");
     }
 }

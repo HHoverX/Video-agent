@@ -3,6 +3,7 @@ package com.videoagent.upload.controller;
 import com.videoagent.security.CurrentUserAccessor;
 import com.videoagent.upload.dto.CompleteUploadPartRequest;
 import com.videoagent.upload.dto.CompleteUploadResponse;
+import com.videoagent.upload.dto.CompleteUploadRequest;
 import com.videoagent.upload.dto.CreateUploadSessionRequest;
 import com.videoagent.upload.dto.UploadPartResponse;
 import com.videoagent.upload.dto.UploadPartUrlResponse;
@@ -58,7 +59,7 @@ public class UploadSessionController {
     @PostMapping("/{uploadId}/parts/{partNumber}/url")
     public UploadPartUrlResponse createPartUrl(
         @PathVariable String uploadId,
-        @PathVariable @Min(1) @Max(10_000) int partNumber
+        @PathVariable @Min(0) @Max(10_000) int partNumber
     ) {
         return uploadSessionService.createPartUrl(currentUser.userId(), uploadId, partNumber);
     }
@@ -66,15 +67,18 @@ public class UploadSessionController {
     @PostMapping("/{uploadId}/parts/{partNumber}/complete")
     public UploadPartResponse completePart(
         @PathVariable String uploadId,
-        @PathVariable @Min(1) @Max(10_000) int partNumber,
+        @PathVariable @Min(0) @Max(10_000) int partNumber,
         @Valid @RequestBody(required = false) CompleteUploadPartRequest request
     ) {
         return uploadSessionService.confirmPart(currentUser.userId(), uploadId, partNumber, request);
     }
 
     @PostMapping("/{uploadId}/complete")
-    public CompleteUploadResponse complete(@PathVariable String uploadId) {
-        return uploadCompletionService.complete(currentUser.userId(), uploadId);
+    public CompleteUploadResponse complete(
+        @PathVariable String uploadId,
+        @Valid @RequestBody(required = false) CompleteUploadRequest request
+    ) {
+        return uploadCompletionService.complete(currentUser.userId(), uploadId, request);
     }
 
     @DeleteMapping("/{uploadId}")

@@ -1,6 +1,7 @@
 package com.videoagent.analysis.controller;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -12,6 +13,7 @@ import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.dto.StartAnalysisResponse;
 import com.videoagent.analysis.service.AnalysisCommandService;
 import com.videoagent.analysis.service.AnalysisQueryService;
+import com.videoagent.analysis.service.AnalysisRateLimiter;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.GlobalExceptionHandler;
 import com.videoagent.common.exception.VideoAgentException;
@@ -30,13 +32,14 @@ class AnalysisControllerTest {
     private final AnalysisCommandService commandService = mock(AnalysisCommandService.class);
     private final AnalysisQueryService queryService = mock(AnalysisQueryService.class);
     private final CurrentUserAccessor currentUser = mock(CurrentUserAccessor.class);
+    private final AnalysisRateLimiter rateLimiter = mock(AnalysisRateLimiter.class);
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         when(currentUser.userId()).thenReturn(5L);
         mockMvc = MockMvcBuilders.standaloneSetup(
-                new AnalysisCommandController(commandService, queryService, currentUser),
+                new AnalysisCommandController(commandService, queryService, currentUser, rateLimiter),
                 new AnalysisQueryController(queryService, currentUser)
             )
             .setControllerAdvice(new GlobalExceptionHandler())
@@ -52,6 +55,19 @@ class AnalysisControllerTest {
             .andExpect(jsonPath("$.taskId").value(101))
             .andExpect(jsonPath("$.videoId").value(7))
             .andExpect(jsonPath("$.status").value("PENDING"));
+        verify(rateLimiter).checkAllowed(5L);
+    }
+
+    @Test
+    void shouldReturnDistinctRateLimitErrorBeforeCommandExecution() throws Exception {
+        org.mockito.Mockito.doThrow(new VideoAgentException(ErrorCode.ANALYSIS_RATE_LIMITED))
+            .when(rateLimiter).checkAllowed(5L);
+
+        mockMvc.perform(post("/api/videos/7/analysis"))
+            .andExpect(status().isTooManyRequests())
+            .andExpect(jsonPath("$.code").value("ANALYSIS_RATE_LIMITED"));
+
+        verifyNoInteractions(commandService);
     }
 
     @Test
