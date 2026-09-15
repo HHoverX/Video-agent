@@ -1,0 +1,42 @@
+map $request_method $upload_ip_key {
+    default "";
+    PUT $binary_remote_addr;
+}
+
+map $request_method $upload_global_key {
+    default "";
+    PUT upload;
+}
+
+limit_conn_zone $upload_ip_key zone=upload_per_ip:10m;
+limit_conn_zone $upload_global_key zone=upload_global:1m;
+limit_req_zone $upload_ip_key zone=upload_rate_per_ip:10m rate=${UPLOAD_REQUEST_RATE_PER_IP};
+
+server {
+    listen 9000;
+    server_name _;
+
+    client_max_body_size 0;
+    limit_conn_status 429;
+    limit_req_status 429;
+
+    location = /gateway-health {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    location / {
+        limit_conn upload_per_ip ${UPLOAD_MAX_CONNECTIONS_PER_IP};
+        limit_conn upload_global ${UPLOAD_MAX_CONNECTIONS_GLOBAL};
+        limit_req zone=upload_rate_per_ip burst=${UPLOAD_REQUEST_BURST} nodelay;
+
+        proxy_http_version 1.1;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_pass http://minio:9000;
+    }
+}

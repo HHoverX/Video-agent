@@ -115,21 +115,94 @@ services:
     networks:
       - videoagent-network
 
-  qdrant:
-    image: qdrant/qdrant:v1.12.4
-    container_name: videoagent-qdrant
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: videoagent-milvus-etcd
     restart: unless-stopped
-    ports:
-      - "${QDRANT_REST_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     volumes:
-      - qdrant-data:/qdrant/storage
+      - milvus-etcd-data:/etcd
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && echo -e \"GET /livez HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && cat <&3 | head -n 1 | grep -q \"200\"'"]
+      test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 10s
+    networks:
+      - videoagent-network
+
+  upload-gateway:
+    image: nginx:1.28-alpine
+    container_name: videoagent-upload-gateway
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      UPLOAD_MAX_CONNECTIONS_PER_IP: ${UPLOAD_MAX_CONNECTIONS_PER_IP:-6}
+      UPLOAD_MAX_CONNECTIONS_GLOBAL: ${UPLOAD_MAX_CONNECTIONS_GLOBAL:-100}
+      UPLOAD_REQUEST_RATE_PER_IP: ${UPLOAD_REQUEST_RATE_PER_IP:-20r/s}
+      UPLOAD_REQUEST_BURST: ${UPLOAD_REQUEST_BURST:-40}
+    ports:
+      - "${MINIO_UPLOAD_GATEWAY_PORT:-9002}:9000"
+    volumes:
+      - ./infra/nginx/upload-gateway.conf.template:/etc/nginx/templates/upload-gateway.conf.template:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9000/gateway-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - videoagent-network
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: videoagent-milvus-minio
+    restart: unless-stopped
+    command: minio server /minio_data
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - milvus-object-data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - videoagent-network
+
+  milvus:
+    image: milvusdb/milvus:v2.6.22
+    container_name: videoagent-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_WEBUI_PORT:-9091}:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
     networks:
       - videoagent-network
 
@@ -138,7 +211,9 @@ volumes:
   redis-data:
   minio-data:
   rocketmq-store:
-  qdrant-data:
+  milvus-etcd-data:
+  milvus-object-data:
+  milvus-data:
 
 networks:
   videoagent-network:

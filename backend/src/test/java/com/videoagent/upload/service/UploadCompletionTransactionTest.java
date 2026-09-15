@@ -115,6 +115,17 @@ class UploadCompletionTransactionTest {
     }
 
     @Test
+    void shouldUseSessionHashWhenFinalizeRequestOmitsRepeatedDeclaration() {
+        VideoUploadSessionEntity session = session("UPLOADING");
+        when(sessions.lockById("u1")).thenReturn(session);
+        when(sessions.markCompletionStarted(any(), any(), any(), any(LocalDateTime.class), any())).thenReturn(1);
+
+        UploadCompletionAttempt attempt = transaction.beginCompletion(7L, "u1", null).attempt();
+
+        assertThat(attempt.expectedSha256()).isEqualTo(hash());
+    }
+
+    @Test
     void shouldFinalizeOnlyTheMatchingAttemptAndUseExpectedHash() {
         VideoUploadSessionEntity session = session("COMPLETING");
         session.setCompletionToken("attempt-b");

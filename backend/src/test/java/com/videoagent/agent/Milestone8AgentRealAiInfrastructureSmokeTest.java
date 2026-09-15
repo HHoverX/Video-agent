@@ -34,7 +34,7 @@ import java.util.UUID;
 /**
  * Real-AI agentic retrieval acceptance. Gated by
  * VIDEOAGENT_M8_AGENT_REAL_AI_TEST=true (default OFF). Uses the real DeepSeek
- * planner + real embedding + Qdrant + real DeepSeek synthesizer. Never runs as
+ * planner + real embedding + Milvus + real DeepSeek synthesizer. Never runs as
  * part of the default test suite.
  */
 @EnabledIfEnvironmentVariable(named = "VIDEOAGENT_M8_AGENT_REAL_AI_TEST", matches = "true")
@@ -97,7 +97,7 @@ class Milestone8AgentRealAiInfrastructureSmokeTest {
         long videoId = insertVideo(session, "Real Agent RAG");
         insertTranscript(videoId, session.userId(), longSegments(300));
 
-        // Build the real embedding + Qdrant index.
+        // Build the real embedding + Milvus index.
         ResponseEntity<String> built = restTemplate.exchange(
             baseUrl("/api/videos/" + videoId + "/rag/index"),
             HttpMethod.POST,

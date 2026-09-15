@@ -76,6 +76,20 @@ class UploadCompletionServiceTest {
     }
 
     @Test
+    void shouldNotTreatComposedObjectEtagAsTrustedSha256() {
+        UploadCompletionAttempt attempt = attempt();
+        when(transaction.beginCompletion(7L, "u1", request())).thenReturn(BeginCompletionResult.started(attempt));
+        when(storage.statObjectIfExists("videos/final.mp4"))
+            .thenReturn(new StoredObject("videos/final.mp4", 24, "multipart-etag-3", "video/mp4"));
+        when(storage.readObjectRange("videos/final.mp4", 0, 12)).thenReturn(mp4Header());
+        when(transaction.finalizeCompletion(attempt)).thenReturn(completed());
+
+        assertThat(service.complete(7L, "u1", request())).isEqualTo(completed());
+
+        verify(transaction).finalizeCompletion(attempt);
+    }
+
+    @Test
     void shouldRecordOwnedAttemptFailureWhenChunkStatOrComposeFails() {
         UploadCompletionAttempt attempt = attempt();
         VideoAgentException statFailure = new VideoAgentException(ErrorCode.STORAGE_ERROR, "stat unavailable");

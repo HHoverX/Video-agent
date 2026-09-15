@@ -6,7 +6,7 @@ import java.util.List;
  * Normalized evidence passed to the answer synthesizer. Every item has a
  * request-local evidenceId (E1, E2, ...) assigned by the executor; the LLM can
  * only cite these IDs, and the backend maps them back to real persisted data.
- * Timestamps always come from MySQL transcript rows or Qdrant metadata.
+ * Timestamps always come from MySQL transcript rows or Milvus metadata.
  */
 public record EvidenceItem(
     String evidenceId,

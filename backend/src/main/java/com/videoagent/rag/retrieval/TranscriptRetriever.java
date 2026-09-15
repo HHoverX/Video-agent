@@ -2,7 +2,7 @@ package com.videoagent.rag.retrieval;
 
 import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
-import com.videoagent.rag.vector.QdrantVectorStore;
+import com.videoagent.rag.vector.MilvusTranscriptStore;
 import com.videoagent.rag.vector.VectorPoint;
 import com.videoagent.rag.rerank.TranscriptReranker;
 import com.videoagent.telemetry.QaTelemetryContext;
@@ -25,23 +25,20 @@ public class TranscriptRetriever {
     private static final Logger log = LoggerFactory.getLogger(TranscriptRetriever.class);
 
     private final EmbeddingProvider embeddingProvider;
-    private final QdrantVectorStore vectorStore;
-    private final LexicalTranscriptStore lexicalStore;
+    private final MilvusTranscriptStore transcriptStore;
     private final ReciprocalRankFusion fusion;
     private final TranscriptReranker reranker;
     private final RagProperties properties;
 
     public TranscriptRetriever(
         EmbeddingProvider embeddingProvider,
-        QdrantVectorStore vectorStore,
-        LexicalTranscriptStore lexicalStore,
+        MilvusTranscriptStore transcriptStore,
         ReciprocalRankFusion fusion,
         TranscriptReranker reranker,
         RagProperties properties
     ) {
         this.embeddingProvider = embeddingProvider;
-        this.vectorStore = vectorStore;
-        this.lexicalStore = lexicalStore;
+        this.transcriptStore = transcriptStore;
         this.fusion = fusion;
         this.reranker = reranker;
         this.properties = properties;
@@ -67,7 +64,7 @@ public class TranscriptRetriever {
     }
 
     private List<RetrievedChunk> retrieve(long userId, long videoId, String query, float[] queryVector) {
-        List<VectorPoint> dense = vectorStore.search(
+        List<VectorPoint> dense = transcriptStore.searchDense(
             userId,
             videoId,
             queryVector,
@@ -75,7 +72,8 @@ public class TranscriptRetriever {
         ).stream()
             .filter(hit -> hit.score() >= properties.denseMinimumScore())
             .toList();
-        List<LexicalChunk> lexical = lexicalStore.search(userId, videoId, query, properties.lexicalTopK());
+        List<LexicalChunk> lexical = transcriptStore.searchLexical(
+            userId, videoId, query, properties.lexicalTopK());
         List<HybridCandidate> fused = fusion.fuse(
             videoId, dense, lexical, properties.rrfK(), properties.rrfCandidateLimit());
         List<HybridCandidate> ordered = fused;

@@ -28,4 +28,13 @@ public class StorageConfiguration {
             .credentials(properties.accessKey(), properties.secretKey())
             .build();
     }
+
+    @Bean
+    @Lazy
+    public MinioClient uploadPresignMinioClient(StorageProperties properties) {
+        return MinioClient.builder()
+            .endpoint(properties.uploadEndpoint())
+            .credentials(properties.accessKey(), properties.secretKey())
+            .build();
+    }
 }

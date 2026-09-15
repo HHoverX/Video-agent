@@ -26,7 +26,6 @@ import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
-import com.videoagent.rag.repository.VideoRagChunkRepository;
 import com.videoagent.summary.repository.VideoChapterRepository;
 import com.videoagent.summary.repository.VideoKeyPointRepository;
 import com.videoagent.summary.repository.VideoSummaryRepository;
@@ -92,9 +91,6 @@ class SecurityEndpointIntegrationTest {
 
     @MockitoBean
     private VideoRagIndexRepository ragIndexRepository;
-
-    @MockitoBean
-    private VideoRagChunkRepository ragChunkRepository;
 
     @MockitoBean
     private VideoTranscriptSegmentRepository transcriptRepository;

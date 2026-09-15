@@ -72,7 +72,17 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Fail 'Docker was not found. The backend depends on the local infrastructure in docker-compose.yml.'
 }
 
-$requiredServices = @('mysql', 'redis', 'minio', 'rocketmq-namesrv', 'rocketmq-broker', 'qdrant')
+$requiredServices = @(
+    'mysql',
+    'redis',
+    'minio',
+    'upload-gateway',
+    'rocketmq-namesrv',
+    'rocketmq-broker',
+    'milvus-etcd',
+    'milvus-minio',
+    'milvus'
+)
 $runningServices = @(docker compose -f $composeFile ps --services --status running)
 if ($LASTEXITCODE -ne 0) {
     Fail 'Unable to check Docker Compose services. Ensure Docker Desktop is running.'

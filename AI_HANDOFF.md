@@ -1,5 +1,7 @@
 # VideoAgent v1.0.0 FINAL AI Handoff
 
+> 历史说明：本文记录冻结的 v1.0.0 基线。当前工作区已将 Qdrant / MySQL FULLTEXT RAG 迁移为 Milvus Dense + BM25，并加入上传会话幂等和 Nginx 上传网关；当前行为以源码与 `README.md` 为准。
+>
 > 最后更新：2026-08-13
 > 最终基线：`v1.0.0` / `0d04a7fe73baf6f7309f31214687c78be736b0c4`
 > 最终提交：`fix: close milestone 8.2 audit findings`

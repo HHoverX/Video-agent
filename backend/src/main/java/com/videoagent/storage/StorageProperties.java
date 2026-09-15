@@ -6,6 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record StorageProperties(
     String endpoint,
     String publicEndpoint,
+    String uploadEndpoint,
     String accessKey,
     String secretKey,
     String bucket
@@ -13,6 +14,9 @@ public record StorageProperties(
     public StorageProperties {
         if (publicEndpoint == null || publicEndpoint.isBlank()) {
             publicEndpoint = endpoint;
+        }
+        if (uploadEndpoint == null || uploadEndpoint.isBlank()) {
+            uploadEndpoint = publicEndpoint;
         }
     }
 }

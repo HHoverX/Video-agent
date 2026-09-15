@@ -58,9 +58,9 @@ videoagent:
     protection:
       max-active-per-user: ${ANALYSIS_MAX_ACTIVE_PER_USER:3}
       rate-limit:
-        capacity: ${ANALYSIS_RATE_LIMIT_CAPACITY:5}
-        refill-tokens: ${ANALYSIS_RATE_LIMIT_REFILL_TOKENS:1}
-        refill-period: ${ANALYSIS_RATE_LIMIT_REFILL_PERIOD:30s}
+        capacity: ${ANALYSIS_RATE_LIMIT_CAPACITY:60}
+        refill-tokens: ${ANALYSIS_RATE_LIMIT_REFILL_TOKENS:10}
+        refill-period: ${ANALYSIS_RATE_LIMIT_REFILL_PERIOD:1s}
         cost-per-request: ${ANALYSIS_RATE_LIMIT_COST_PER_REQUEST:1}
     reliability:
       max-attempts: ${ANALYSIS_MAX_ATTEMPTS:3}
@@ -92,10 +92,11 @@ videoagent:
       api-key: ${RAG_RERANKER_API_KEY:}
       model: ${RAG_RERANKER_MODEL:}
       timeout: ${RAG_RERANKER_TIMEOUT:3s}
-    qdrant:
-      host: ${QDRANT_HOST:localhost}
-      port: ${QDRANT_REST_PORT:6333}
-      collection: ${QDRANT_COLLECTION:video_transcript_chunks}
+    milvus:
+      uri: ${MILVUS_URI:http://localhost:19530}
+      token: ${MILVUS_TOKEN:}
+      collection: ${MILVUS_COLLECTION:video_transcript_chunks}
+      timeout: ${MILVUS_TIMEOUT:10s}
     embedding:
       provider: ${EMBEDDING_PROVIDER:mock}
       api-key: ${EMBEDDING_API_KEY:}
@@ -138,6 +139,7 @@ videoagent:
   storage:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
     public-endpoint: ${MINIO_PUBLIC_ENDPOINT:${MINIO_ENDPOINT:http://localhost:9000}}
+    upload-endpoint: ${MINIO_UPLOAD_ENDPOINT:${MINIO_PUBLIC_ENDPOINT:${MINIO_ENDPOINT:http://localhost:9000}}}
     access-key: ${MINIO_ACCESS_KEY:}
     secret-key: ${MINIO_SECRET_KEY:}
     bucket: ${MINIO_BUCKET:videoagent}

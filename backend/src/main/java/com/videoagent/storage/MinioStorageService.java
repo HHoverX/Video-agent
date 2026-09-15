@@ -34,16 +34,19 @@ public class MinioStorageService implements ObjectStorageService {
 
     private final ObjectProvider<MinioClient> internalClientProvider;
     private final ObjectProvider<MinioClient> publicPresignClientProvider;
+    private final ObjectProvider<MinioClient> uploadPresignClientProvider;
     private final StorageProperties properties;
     private final AtomicBoolean bucketReady = new AtomicBoolean(false);
 
     public MinioStorageService(
         @Qualifier("minioClient") ObjectProvider<MinioClient> internalClientProvider,
         @Qualifier("publicPresignMinioClient") ObjectProvider<MinioClient> publicPresignClientProvider,
+        @Qualifier("uploadPresignMinioClient") ObjectProvider<MinioClient> uploadPresignClientProvider,
         StorageProperties properties
     ) {
         this.internalClientProvider = internalClientProvider;
         this.publicPresignClientProvider = publicPresignClientProvider;
+        this.uploadPresignClientProvider = uploadPresignClientProvider;
         this.properties = properties;
     }
 
@@ -103,7 +106,7 @@ public class MinioStorageService implements ObjectStorageService {
     public String presignPutObject(String objectKey, Duration expiry) {
         try {
             ensureBucket(internalClientProvider.getObject());
-            return publicPresignClientProvider.getObject().getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
+            return uploadPresignClientProvider.getObject().getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                 .method(Method.PUT)
                 .bucket(properties.bucket())
                 .object(objectKey)

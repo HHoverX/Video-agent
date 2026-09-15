@@ -8,7 +8,7 @@ import com.videoagent.rag.dto.QaResponse;
 import com.videoagent.rag.dto.RagIndexStatusResponse;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
-import com.videoagent.rag.vector.QdrantVectorStore;
+import com.videoagent.rag.vector.MilvusTranscriptStore;
 import com.videoagent.testsupport.TestAuthClient;
 import com.videoagent.testsupport.TestAuthClient.Session;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
@@ -40,14 +40,14 @@ import java.util.UUID;
 
 /**
  * M8.1 RAG infrastructure acceptance. Uses real MySQL, Redis, RocketMQ, MinIO,
- * FFmpeg and Qdrant with Mock ASR / Mock Summary / Mock Embedding / Mock QA.
+ * FFmpeg and Milvus with Mock ASR / Mock Summary / Mock Embedding / Mock QA.
  *
  * PATH A (short transcript): DIRECT_CONTEXT, rag/status = NOT_REQUIRED, no
- * Qdrant vectors, QA answers from the full transcript with timestamp citations.
+ * Milvus chunks, QA answers from the full transcript with timestamp citations.
  *
  * PATH B (long transcript): RAG, NOT_BUILT -> build -> READY -> retrieval ->
  * grounded QA with chunk citations. Also verifies user isolation (A cannot
- * reach B's index / QA and Qdrant never returns B's chunks for A's query).
+ * reach B's index / QA and Milvus never returns B's chunks for A's query).
  */
 @EnabledIfEnvironmentVariable(named = "VIDEOAGENT_M8_RAG_INFRA_TEST", matches = "true")
 @SpringBootTest(
@@ -87,7 +87,7 @@ class Milestone8RagInfrastructureIntegrationTest {
     private VideoRagIndexRepository ragIndexRepository;
 
     @Autowired
-    private QdrantVectorStore vectorStore;
+    private MilvusTranscriptStore vectorStore;
 
     private final List<Long> videoIds = new ArrayList<>();
     private final List<Long> taskIds = new ArrayList<>();
@@ -189,8 +189,8 @@ class Milestone8RagInfrastructureIntegrationTest {
         );
         assertThat(foreignQa.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 
-        // A's Qdrant search must not return B's chunks (vector isolation).
-        java.util.List<com.videoagent.rag.vector.VectorPoint> aHits = vectorStore.search(
+        // A's Milvus search must not return B's chunks (vector isolation).
+        java.util.List<com.videoagent.rag.vector.VectorPoint> aHits = vectorStore.searchDense(
             userA.userId(), videoA, new float[384], 5
         );
         // A's video has its own chunks; nothing from B should appear because the

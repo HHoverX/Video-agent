@@ -8,7 +8,7 @@ import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
-import com.videoagent.rag.vector.QdrantVectorStore;
+import com.videoagent.rag.vector.MilvusTranscriptStore;
 import com.videoagent.summary.entity.VideoChapterEntity;
 import com.videoagent.summary.entity.VideoKeyPointEntity;
 import com.videoagent.summary.entity.VideoSummaryEntity;
@@ -44,10 +44,10 @@ import java.util.UUID;
 
 /**
  * M8.2 Agentic Retrieval infrastructure acceptance. Real MySQL/Redis/RocketMQ/
- * MinIO/FFmpeg/Qdrant with Mock ASR/Summary/Embedding/Planner/Answer.
+ * MinIO/FFmpeg/Milvus with Mock ASR/Summary/Embedding/Planner/Answer.
  *
  * PATH A — summary question: GET_VIDEO_SUMMARY works even when RAG is NOT_BUILT
- *          and does not touch Qdrant/embedding.
+ *          and does not touch Milvus/embedding.
  * PATH B — time question: GET_TRANSCRIPT_BY_TIME returns the real segment.
  * PATH C — semantic question (RAG READY): SEARCH_TRANSCRIPT returns evidence.
  * PATH D — multi-search: two SEARCH_TRANSCRIPT actions, both executed.
@@ -101,7 +101,7 @@ class Milestone8AgentInfrastructureIntegrationTest {
     private VideoRagIndexRepository ragIndexRepository;
 
     @Autowired
-    private QdrantVectorStore vectorStore;
+    private MilvusTranscriptStore vectorStore;
 
     private final List<Long> videoIds = new ArrayList<>();
     private final List<Long> taskIds = new ArrayList<>();
@@ -135,7 +135,7 @@ class Milestone8AgentInfrastructureIntegrationTest {
     }
 
     @Test
-    void pathASummaryQuestionWorksWithoutRagOrQdrant() {
+    void pathASummaryQuestionWorksWithoutRagOrMilvus() {
         long videoId = insertVideo(userA, "Long A");
         insertTranscript(videoId, userA.userId(), longSegments(300, "Redis"));
         insertSummary(videoId, userA.userId());
@@ -152,7 +152,7 @@ class Milestone8AgentInfrastructureIntegrationTest {
         assertThat(response.citations().getFirst().startMs()).isNull();
         assertThat(response.citations().getFirst().endMs()).isNull();
         // The summary path must not build a RAG index; the RAG status stays
-        // NOT_BUILT (no Qdrant vectors were created for this video).
+        // NOT_BUILT (no Milvus vectors were created for this video).
         VideoRagIndexEntity index = ragIndexRepository.findByVideoId(videoId);
         if (index != null) {
             assertThat(index.getStatus()).isEqualTo("NOT_BUILT");
@@ -179,7 +179,7 @@ class Milestone8AgentInfrastructureIntegrationTest {
     void pathCSemanticQuestionUsesSearchWhenRagReady() {
         long videoId = insertVideo(userA, "Long C");
         insertTranscript(videoId, userA.userId(), longSegments(300, "Redis"));
-        // Build the RAG index so SEARCH_TRANSCRIPT can use Qdrant.
+        // Build the RAG index so SEARCH_TRANSCRIPT can use Milvus.
         buildRagIndex(videoId, userA);
 
         AgenticQaResponse response = askAgentic(videoId, userA, "为什么使用 Redis 保存进度？");

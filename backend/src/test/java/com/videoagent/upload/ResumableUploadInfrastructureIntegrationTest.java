@@ -40,7 +40,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.security.MessageDigest;
 import java.net.URI;
-import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -387,79 +386,120 @@ class ResumableUploadInfrastructureIntegrationTest {
     }
 
     @Test
-    void shouldReuseOneCanonicalVideoForConcurrentSameUserCompletionsWithClientHash() throws Exception {
+    void shouldCreateOnlyOneActiveSessionForConcurrentSameUserAndHash() throws Exception {
         owner = TestAuthClient.registerAndLogin(
             restTemplate, baseUrl(""), "upload-dedup-owner-" + System.nanoTime()
         );
         byte[] content = mp4Part();
-        String sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
-        uploadId = createSession(owner, "same-content-a.mp4", content);
-        secondaryUploadId = createSession(owner, "same-content-b.mp4", content);
-        objectKey = sessionRepository.selectById(uploadId).getObjectKey();
-        secondaryObjectKey = sessionRepository.selectById(secondaryUploadId).getObjectKey();
-        uploadAndConfirm(owner, uploadId, 0, content);
-        uploadAndConfirm(owner, secondaryUploadId, 0, content);
-
-        List<CompleteUploadResponse> responses = completeSessionsConcurrently(owner, uploadId, secondaryUploadId);
-
-        assertThat(responses).extracting(CompleteUploadResponse::videoId).containsOnly(responses.getFirst().videoId());
-        assertThat(responses).extracting(CompleteUploadResponse::reusedExistingVideo)
-            .containsExactlyInAnyOrder(false, true);
-        videoId = responses.getFirst().videoId();
-        List<VideoEntity> canonicalVideos = videoRepository.selectList(null).stream()
-            .filter(video -> Long.valueOf(owner.userId()).equals(video.getUserId()))
-            .filter(video -> sha256.equals(video.getFileHash()))
-            .toList();
-        assertThat(canonicalVideos).hasSize(1);
-        assertThat(canonicalVideos.getFirst().getId()).isEqualTo(videoId);
-        assertThat(canonicalVideos.getFirst().getFileHash()).hasSize(64).isEqualTo(sha256);
-        assertThat(sessionRepository.selectById(uploadId).getVideoId()).isEqualTo(videoId);
-        assertThat(sessionRepository.selectById(secondaryUploadId).getVideoId()).isEqualTo(videoId);
-        assertThat(taskRepository.selectList(null)).noneMatch(task -> task.getVideoId().equals(videoId));
-        assertThat(minioClient.statObject(StatObjectArgs.builder()
-            .bucket(storageProperties.bucket())
-            .object(canonicalVideos.getFirst().getObjectKey())
-            .build()).size()).isEqualTo(content.length);
-        String loserObjectKey = canonicalVideos.getFirst().getObjectKey().equals(objectKey)
-            ? secondaryObjectKey
-            : objectKey;
-        String loserUploadId = canonicalVideos.getFirst().getObjectKey().equals(objectKey)
-            ? secondaryUploadId
-            : uploadId;
-        assertThatThrownBy(() -> minioClient.statObject(StatObjectArgs.builder()
-            .bucket(storageProperties.bucket())
-            .object(loserObjectKey)
-            .build())).isInstanceOf(Exception.class);
-
-        ResponseEntity<CompleteUploadResponse> repeated = restTemplate.exchange(
-            baseUrl("/api/uploads/" + loserUploadId + "/complete"),
-            HttpMethod.POST,
-            new HttpEntity<>(owner.headers()),
-            CompleteUploadResponse.class
+        String hash = sha256(content);
+        CreateUploadSessionRequest request = new CreateUploadSessionRequest(
+            "same-content.mp4", "same-content", (long) content.length,
+            "video/mp4", (long) CHUNK_SIZE, hash
         );
-        assertThat(repeated.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(repeated.getBody()).isNotNull();
-        assertThat(repeated.getBody().videoId()).isEqualTo(videoId);
-        assertThat(repeated.getBody().reusedExistingVideo()).isTrue();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<ResponseEntity<UploadSessionResponse>> first = executor.submit(
+                () -> createAfterBarrier(owner, request, ready, start)
+            );
+            Future<ResponseEntity<UploadSessionResponse>> second = executor.submit(
+                () -> createAfterBarrier(owner, request, ready, start)
+            );
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            List<ResponseEntity<UploadSessionResponse>> responses = List.of(first.get(), second.get());
+            assertThat(responses).extracting(ResponseEntity::getStatusCode)
+                .containsOnly(HttpStatus.CREATED);
+            assertThat(responses).extracting(response -> response.getBody().uploadId())
+                .containsOnly(responses.getFirst().getBody().uploadId());
+            uploadId = responses.getFirst().getBody().uploadId();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        List<VideoUploadSessionEntity> activeSessions = sessionRepository.selectList(null).stream()
+            .filter(session -> Long.valueOf(owner.userId()).equals(session.getUserId()))
+            .filter(session -> hash.equals(session.getExpectedSha256()))
+            .filter(session -> List.of("CREATED", "UPLOADING", "FAILED", "COMPLETING")
+                .contains(session.getStatus()))
+            .toList();
+        assertThat(activeSessions).hasSize(1);
+        System.out.println("REAL_UPLOAD_CONCURRENCY=uploadId=" + uploadId
+            + ",activeSessions=" + activeSessions.size());
     }
 
     @Test
-    void shouldReuseCanonicalVideoForSequentialSameUserCompletions() throws Exception {
+    void shouldLetTerminalSessionsReleaseTheActiveHash() throws Exception {
+        owner = TestAuthClient.registerAndLogin(
+            restTemplate, baseUrl(""), "upload-terminal-owner-" + System.nanoTime()
+        );
+        byte[] content = mp4Part();
+        String hash = sha256(content);
+        CreateUploadSessionRequest request = new CreateUploadSessionRequest(
+            "terminal-content.mp4", "terminal-content", (long) content.length,
+            "video/mp4", (long) CHUNK_SIZE, hash
+        );
+        List<String> ids = new java.util.ArrayList<>();
+        try {
+            for (String terminalStatus : List.of("CANCELLED", "EXPIRED", "COMPLETED")) {
+                ResponseEntity<UploadSessionResponse> created = restTemplate.exchange(
+                    baseUrl("/api/uploads"), HttpMethod.POST, jsonEntity(owner, request),
+                    UploadSessionResponse.class
+                );
+                assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+                String id = created.getBody().uploadId();
+                ids.add(id);
+                VideoUploadSessionEntity session = sessionRepository.selectById(id);
+                session.setStatus(terminalStatus);
+                assertThat(sessionRepository.updateById(session)).isEqualTo(1);
+                assertThat(sessionRepository.findReusableByHash(
+                    owner.userId(), hash, LocalDateTime.now())).isNull();
+            }
+
+            ResponseEntity<UploadSessionResponse> active = restTemplate.exchange(
+                baseUrl("/api/uploads"), HttpMethod.POST, jsonEntity(owner, request),
+                UploadSessionResponse.class
+            );
+            assertThat(active.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            ids.add(active.getBody().uploadId());
+            assertThat(ids).doesNotHaveDuplicates();
+            assertThat(sessionRepository.selectList(null).stream()
+                .filter(session -> Long.valueOf(owner.userId()).equals(session.getUserId()))
+                .filter(session -> hash.equals(session.getExpectedSha256()))
+                .filter(session -> List.of("CREATED", "UPLOADING", "FAILED", "COMPLETING")
+                    .contains(session.getStatus())))
+                .hasSize(1);
+            System.out.println("REAL_UPLOAD_TERMINAL_IDS=" + ids);
+        } finally {
+            ids.forEach(sessionRepository::deleteById);
+        }
+    }
+
+    @Test
+    void shouldReuseCanonicalVideoWhenCreatingAfterCompletion() throws Exception {
         owner = TestAuthClient.registerAndLogin(
             restTemplate, baseUrl(""), "upload-dedup-sequential-" + System.nanoTime()
         );
         byte[] content = mp4Part();
         uploadId = createSession(owner, "same-content-first.mp4", content);
-        secondaryUploadId = createSession(owner, "same-content-second.mp4", content);
         uploadAndConfirm(owner, uploadId, 0, content);
-        uploadAndConfirm(owner, secondaryUploadId, 0, content);
-
         CompleteUploadResponse first = complete(owner, uploadId);
-        CompleteUploadResponse second = complete(owner, secondaryUploadId);
-
         assertThat(first.reusedExistingVideo()).isFalse();
-        assertThat(second.reusedExistingVideo()).isTrue();
-        assertThat(second.videoId()).isEqualTo(first.videoId());
+
+        ResponseEntity<UploadSessionResponse> reused = restTemplate.exchange(
+            baseUrl("/api/uploads"),
+            HttpMethod.POST,
+            jsonEntity(owner, new CreateUploadSessionRequest(
+                "same-content-second.mp4", "same-content-second", (long) content.length,
+                "video/mp4", (long) CHUNK_SIZE, sha256(content)
+            )),
+            UploadSessionResponse.class
+        );
+        assertThat(reused.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(reused.getBody()).isNotNull();
+        assertThat(reused.getBody().deduplicated()).isTrue();
+        assertThat(reused.getBody().videoId()).isEqualTo(first.videoId());
         assertThat(videoRepository.selectList(null))
             .filteredOn(video -> Long.valueOf(owner.userId()).equals(video.getUserId()))
             .hasSize(1);
@@ -610,49 +650,7 @@ class ResumableUploadInfrastructureIntegrationTest {
         return response.getBody();
     }
 
-    private List<CompleteUploadResponse> completeSessionsConcurrently(
-        Session session,
-        String firstUploadId,
-        String secondUploadId
-    ) throws Exception {
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        CountDownLatch ready = new CountDownLatch(2);
-        CountDownLatch start = new CountDownLatch(1);
-        try {
-            Future<CompleteUploadResponse> first = executor.submit(
-                () -> completeAfterBarrier(session, firstUploadId, ready, start)
-            );
-            Future<CompleteUploadResponse> second = executor.submit(
-                () -> completeAfterBarrier(session, secondUploadId, ready, start)
-            );
-            ready.await();
-            start.countDown();
-            return Arrays.asList(first.get(), second.get());
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
     private CompleteUploadResponse complete(Session session, String id) {
-        ResponseEntity<CompleteUploadResponse> response = restTemplate.exchange(
-            baseUrl("/api/uploads/" + id + "/complete"),
-            HttpMethod.POST,
-            new HttpEntity<>(session.headers()),
-            CompleteUploadResponse.class
-        );
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).isNotNull();
-        return response.getBody();
-    }
-
-    private CompleteUploadResponse completeAfterBarrier(
-        Session session,
-        String id,
-        CountDownLatch ready,
-        CountDownLatch start
-    ) throws Exception {
-        ready.countDown();
-        start.await();
         ResponseEntity<CompleteUploadResponse> response = restTemplate.exchange(
             baseUrl("/api/uploads/" + id + "/complete"),
             HttpMethod.POST,
@@ -672,6 +670,22 @@ class ResumableUploadInfrastructureIntegrationTest {
 
     private String baseUrl(String path) {
         return "http://127.0.0.1:" + port + path;
+    }
+
+    private ResponseEntity<UploadSessionResponse> createAfterBarrier(
+        Session session,
+        CreateUploadSessionRequest request,
+        CountDownLatch ready,
+        CountDownLatch start
+    ) throws Exception {
+        ready.countDown();
+        start.await();
+        return restTemplate.exchange(
+            baseUrl("/api/uploads"),
+            HttpMethod.POST,
+            jsonEntity(session, request),
+            UploadSessionResponse.class
+        );
     }
 
     private String bitmapKey(String id) {

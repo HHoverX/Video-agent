@@ -17,8 +17,10 @@ import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -59,7 +61,7 @@ public class UploadSessionService {
         this.videoRepository = videoRepository;
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public UploadSessionResponse create(long userId, CreateUploadSessionRequest request) {
         String fileName = safeFileName(request.fileName());
         String contentType = request.contentType().strip().toLowerCase(Locale.ROOT);
@@ -93,15 +95,20 @@ public class UploadSessionService {
 
         VideoEntity existingVideo = videoRepository.findByUserIdAndFileHash(userId, sha256);
         if (existingVideo != null && existingVideo.getId() != null) {
-            return new UploadSessionResponse(
-                null, true, fileName, title, fileSize, contentType, chunkSize,
-                Math.toIntExact(totalPartsLong), 0, UploadSessionStatus.COMPLETED.name(), null,
-                fileSize, List.of(), properties.maxClientConcurrency(), existingVideo.getId(), null, null
+            return deduplicatedResponse(
+                fileName, title, fileSize, contentType, chunkSize,
+                Math.toIntExact(totalPartsLong), existingVideo.getId()
             );
         }
 
-        String uploadId = UUID.randomUUID().toString();
         LocalDateTime now = LocalDateTime.now();
+        sessionRepository.expireReusableByHash(userId, sha256, now);
+        VideoUploadSessionEntity reusable = sessionRepository.findReusableByHash(userId, sha256, now);
+        if (reusable != null) {
+            return response(reusable, partStateService.completedPartNumbers(reusable));
+        }
+
+        String uploadId = UUID.randomUUID().toString();
         VideoUploadSessionEntity session = new VideoUploadSessionEntity();
         session.setId(uploadId);
         session.setUserId(userId);
@@ -118,8 +125,29 @@ public class UploadSessionService {
         session.setExpiresAt(now.plus(properties.sessionTtl()));
         session.setCreatedAt(now);
         session.setUpdatedAt(now);
-        if (sessionRepository.insert(session) != 1) {
-            throw new VideoAgentException(ErrorCode.VIDEO_UPLOAD_FAILED, "无法创建上传会话");
+        try {
+            if (sessionRepository.insert(session) != 1) {
+                throw new VideoAgentException(ErrorCode.VIDEO_UPLOAD_FAILED, "无法创建上传会话");
+            }
+        } catch (DuplicateKeyException exception) {
+            VideoUploadSessionEntity winner = sessionRepository.findReusableByHash(
+                userId, sha256, LocalDateTime.now()
+            );
+            if (winner != null) {
+                return response(winner, partStateService.completedPartNumbers(winner));
+            }
+            VideoEntity completedVideo = videoRepository.findByUserIdAndFileHash(userId, sha256);
+            if (completedVideo != null && completedVideo.getId() != null) {
+                return deduplicatedResponse(
+                    fileName, title, fileSize, contentType, chunkSize,
+                    Math.toIntExact(totalPartsLong), completedVideo.getId()
+                );
+            }
+            throw new VideoAgentException(
+                ErrorCode.VIDEO_UPLOAD_FAILED,
+                "并发创建上传会话后无法读取获胜会话，请重试",
+                exception
+            );
         }
         return response(session, List.of());
     }
@@ -272,6 +300,22 @@ public class UploadSessionService {
             throw new VideoAgentException(ErrorCode.INVALID_REQUEST, "SHA-256 必须是 64 位十六进制字符串");
         }
         return value.toLowerCase(Locale.ROOT);
+    }
+
+    private UploadSessionResponse deduplicatedResponse(
+        String fileName,
+        String title,
+        long fileSize,
+        String contentType,
+        long chunkSize,
+        int totalParts,
+        long videoId
+    ) {
+        return new UploadSessionResponse(
+            null, true, fileName, title, fileSize, contentType, chunkSize,
+            totalParts, 0, UploadSessionStatus.COMPLETED.name(), null,
+            fileSize, List.of(), properties.maxClientConcurrency(), videoId, null, null
+        );
     }
 
     private static String requireSha256(String value) {

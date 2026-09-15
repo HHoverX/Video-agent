@@ -1,111 +1,306 @@
 # VideoAgent
 
-VideoAgent 是一个 Java 后端 + AI 视频理解应用。用户可以上传长视频，系统在后台完成音频提取、ASR、结构化总结和检索索引，并基于真实字幕证据回答问题、返回可追溯时间戳。
+VideoAgent 是一个面向长视频的智能分析与问答系统。用户上传 MP4 视频后，系统异步完成音频提取、ASR 字幕生成、结构化总结和检索索引构建，并基于真实字幕证据回答问题、返回可跳转的时间范围。
 
-当前代码聚焦两条技术主线：
+项目采用 Vue 3 + Spring Boot 模块化单体。MySQL 保存业务事实，MinIO 保存视频与临时分片，RocketMQ 传递异步分析消息，Redis 提供上传进度、限流、任务进度和会话缓存，Milvus 统一承载长字幕的 Dense 与 BM25 派生索引。
 
-- **长视频上传与异步分析可靠性**：浏览器直传 MinIO、分片断点续传、幂等合并、事务 Outbox、任务租约/心跳、分阶段检查点和有界重试。
-- **自适应 RAG 与可信证据**：短字幕直接使用完整上下文，长字幕分块并写入 Qdrant；检索严格隔离用户和视频，引用由后端从真实 Evidence 映射。
+> 当前实现只支持 MP4。长视频上传使用“临时分片对象 + MinIO Compose”，不是原生 S3 Multipart Upload。
 
-> 分片实现采用“临时分片对象 + MinIO Compose”，不是原生 S3 Multipart Upload。旧的 Spring multipart 上传接口仍保留兼容。
+## 目录
 
-## 技术栈
+- [核心能力](#核心能力)
+- [系统架构](#系统架构)
+- [技术栈](#技术栈)
+- [快速开始](#快速开始)
+- [主要业务链路](#主要业务链路)
+- [AI Provider 配置](#ai-provider-配置)
+- [主要 API](#主要-api)
+- [数据库与迁移](#数据库与迁移)
+- [测试与验证](#测试与验证)
+- [项目结构](#项目结构)
+- [已知边界](#已知边界)
 
-- 后端：Java 21、Spring Boot 3、Maven、MyBatis-Plus、Flyway、LangChain4j
-- 前端：Vue 3、TypeScript、Vite、Pinia、Vue Router、Axios、Element Plus
-- 基础设施：MySQL 8、Redis、MinIO、Apache RocketMQ、Qdrant、Docker Compose
-- 媒体与 AI：FFmpeg、可替换 ASR/LLM/Embedding Provider、确定性 Mock Provider
-- 实时进度：Spring MVC `SseEmitter`、Browser `fetch + AbortController` 读取 SSE、有限 GET fallback
+## 核心能力
 
-## 整体链路
+- **可恢复分片上传**：浏览器 Web Worker 计算整文件 SHA-256，分片经预签名 PUT 直传 MinIO，支持暂停、恢复、取消、缺片补传和幂等完成。
+- **上传硬限流**：独立 Nginx 上传网关承接预签名 PUT，请求不回流 Spring Boot；限流键只对 PUT 生效，支持单 IP 并发、全局并发、请求速率和 burst 限制，拒绝状态为 HTTP 429。
+- **并发幂等**：同一用户、同一 SHA-256 同时创建上传会话时，由 MySQL 生成列和唯一索引选出唯一活跃 Session；竞争失败方复用 winner 的 `uploadId`。
+- **可靠异步分析**：分析任务与 Transactional Outbox 同事务提交，RocketMQ 重复投递通过数据库条件更新、租约、心跳和 generation fencing 隔离。
+- **阶段级 Checkpoint**：字幕、总结和 RAG 索引分别持久化；重试从最近成功阶段继续，避免无条件重复调用 ASR 或 LLM。
+- **自适应上下文**：短字幕直接传入完整上下文；长字幕按字幕边界切块并构建 Milvus 索引。
+- **混合检索**：Dense Retrieval 与 Milvus BM25 分别召回，应用层执行 RRF，可选 HTTP Reranker；Reranker 故障时回退 RRF 顺序。
+- **证据约束问答**：检索始终绑定服务端确定的 `userId + videoId`；模型只返回请求内 Evidence ID，最终时间戳由后端映射真实字幕证据。
+- **多轮会话记忆**：MySQL 保存持久会话，Redis 缓存最近历史；Redis 不可用时回退 MySQL。
+
+## 系统架构
 
 ```mermaid
 flowchart LR
-    Browser["Vue 客户端"] -->|"创建/查询上传会话"| API["Spring Boot API"]
-    API -->|"会话与分片状态"| MySQL[(MySQL)]
-    API -->|"签发 PUT URL"| Browser
-    Browser -->|"分片直传"| MinIO[(MinIO)]
-    Browser -->|"确认分片"| API
-    API -->|"Compose + 校验"| MinIO
-    API -->|"完成时：Video（或复用既有 Video）"| MySQL
-    Browser -->|"显式开始分析"| API
-    API -->|"同一事务：AnalysisTask + Outbox"| MySQL
-    Outbox["Outbox Publisher"] --> MQ[(RocketMQ)]
-    MySQL --> Outbox
+    Browser["Vue 3 客户端"] -->|"认证、会话、确认分片、查询结果"| API["Spring Boot API"]
+    API --> MySQL[(MySQL)]
+    API --> Redis[(Redis)]
+    API -->|"签发上传 URL"| Browser
+    Browser -->|"预签名 PUT"| Gateway["Nginx 上传网关"]
+    Gateway -->|"限并发 / 限速 / 不缓冲"| MinIO[(MinIO)]
+    API -->|"校验分片、Compose、播放 URL"| MinIO
+
+    API -->|"AnalysisTask + Outbox"| MySQL
+    MySQL --> Publisher["Outbox Publisher"]
+    Publisher --> MQ[(RocketMQ)]
     MQ --> Worker["Analysis Worker"]
-    Worker --> FFmpeg["FFmpeg → ASR"]
-    FFmpeg --> Checkpoint["Transcript → Summary 检查点"]
-    Checkpoint --> RAG["短文本直用 / 长文本 Embedding + Qdrant"]
-    RAG --> QA["Evidence 约束回答与后端引用映射"]
+    Worker --> FFmpeg["FFmpeg / ffprobe"]
+    FFmpeg --> ASR["ASR Provider"]
+    ASR --> Summary["LLM Summary"]
+    Summary --> Milvus[(Milvus Dense + BM25)]
+    Milvus --> QA["RRF / Reranker / Evidence QA"]
 ```
 
-上传完成接口只创建或复用持久 Video；用户显式调用 `POST /api/videos/{videoId}/analysis` 后才创建分析任务与 Outbox。两类接口均不在请求线程中执行 FFmpeg、ASR、总结或向量化。
+MySQL 是任务、字幕、总结、视频归属、上传状态和 RAG 生命周期的事实源。Redis、Milvus 和 MinIO 中可重建或临时的数据不替代数据库状态机。
 
-## 本地启动
+## 技术栈
 
-### 1. 准备环境变量
+| 层级 | 技术 |
+| --- | --- |
+| 后端 | Java 21、Spring Boot 3.5.5、Maven、Spring Security、MyBatis-Plus、Flyway |
+| AI | LangChain4j 1.18.0、可替换 ASR / LLM / Embedding Provider、可选 HTTP Reranker |
+| 前端 | Vue 3、TypeScript、Vite 6、Pinia、Vue Router、Axios、Element Plus |
+| 基础设施 | MySQL 8、Redis、MinIO、Nginx、RocketMQ、Milvus 2.6.22、etcd、Docker Compose |
+| 媒体处理 | FFmpeg、ffprobe |
+| 实时进度 | Spring MVC `SseEmitter`、浏览器 SSE 流读取及有限 GET fallback |
+
+## 快速开始
+
+### 1. 环境要求
+
+- Docker Desktop，且 Docker Engine 已启动
+- Java 21 或更高版本
+- Maven 3.9 或可用的 Maven 安装
+- Node.js 18 或更高版本、npm
+- 同时包含 `ffmpeg` 和 `ffprobe` 的 FFmpeg 发行版
+
+### 2. 准备环境变量
+
+在项目根目录复制示例文件：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-修改 `.env` 中所有 `change-me-*` 值，并至少配置一个足够长的 `JWT_SECRET`。真实账号、密钥和 API Key 不得提交到仓库。示例基线见 `.env.example`，实际默认值见 `backend/src/main/resources/application.yml`。
+Linux/macOS：
 
-默认使用 Mock ASR、Mock LLM、Mock Embedding 和 Mock Agent Planner，不需要第三方 API Key。真实 Provider 通过 `.env.example` 中对应的 `*_PROVIDER` 与凭据/模型变量启用；`LLM_PROVIDER=openai` 时必须同时配置 `LLM_API_KEY` 和 `LLM_MODEL`，否则后端会启动失败。
+```bash
+cp .env.example .env
+```
 
-### 2. 启动基础设施
+至少需要处理以下配置：
+
+| 配置 | 说明 |
+| --- | --- |
+| `MYSQL_ROOT_PASSWORD` | MySQL 初始化密码 |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | 后端数据库账号 |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | MinIO 账号 |
+| `JWT_SECRET` | JWT 密钥，必须至少包含 32 个 UTF-8 字节 |
+| `EMBEDDING_API_KEY` | `.env.example` 默认启用 DashScope Embedding，因此完整 Demo 需要填写 |
+
+禁止提交真实密码或 API Key。完整变量和示例值见 [.env.example](.env.example)，应用默认值见 [application.yml](backend/src/main/resources/application.yml)。Spring Boot 会加载根目录或 `backend` 上级目录中的 `.env`。
+
+如果只需要无第三方付费调用的本地流程，将以下配置改为 Mock：
+
+```env
+ASR_PROVIDER=mock
+LLM_PROVIDER=mock
+EMBEDDING_PROVIDER=mock
+AGENT_PLANNER_PROVIDER=mock
+```
+
+### 3. 启动基础设施
 
 ```powershell
 docker compose up -d
 docker compose ps
 ```
 
-| 服务 | 默认地址/端口 |
-| --- | --- |
-| MySQL | `localhost:3306` |
-| Redis | `localhost:6380` |
-| MinIO API / Console | `http://localhost:9000` / `http://localhost:9001` |
-| RocketMQ NameServer / Broker | `localhost:9876` / `localhost:10911` |
-| Qdrant REST / gRPC | `localhost:6333` / `localhost:6334` |
+| 服务 | 默认地址 | 用途 |
+| --- | --- | --- |
+| MySQL | `localhost:3306` | 业务数据与 Flyway 迁移 |
+| Redis | `localhost:6380` | Bitmap、令牌桶、进度和会话缓存 |
+| MinIO API | `http://localhost:9000` | 本地对象存储 |
+| MinIO Console | `http://localhost:9001` | MinIO 管理界面 |
+| Upload Gateway | `http://localhost:9002` | 浏览器预签名 PUT 入口 |
+| RocketMQ NameServer | `localhost:9876` | MQ 服务发现 |
+| RocketMQ Broker | `localhost:10911` | 分析消息传递 |
+| Milvus | `localhost:19530` | Dense + BM25 检索 |
+| Milvus WebUI/HTTP | `http://localhost:9091` | 健康检查与管理入口 |
 
-Compose 为本地 `http://localhost:5173` 配置了 MinIO CORS。非本地环境必须把宿主机变量 `MINIO_CORS_ALLOW_ORIGIN` 改为真实前端 Origin；Compose 会把它传给容器内的 `MINIO_API_CORS_ALLOW_ORIGIN`，否则浏览器无法使用预签名 URL 直传。
+Milvus 使用独立的 `milvus-etcd` 和 `milvus-minio` 容器保存自身元数据与对象数据，它们不对宿主机暴露业务端口。
 
-### 3. 启动后端
-
-需要 Java 21 或更高版本，以及同时包含 `ffmpeg` 和 `ffprobe` 的 FFmpeg 发行版。它们不在 `PATH` 时分别设置 `FFMPEG_PATH` 与 `FFPROBE_PATH`：
+### 4. 启动后端
 
 ```powershell
 Set-Location backend
+mvn spring-boot:run
+```
+
+如果 FFmpeg 不在 `PATH`：
+
+```powershell
 $env:FFMPEG_PATH = 'C:\path\to\ffmpeg.exe'
 $env:FFPROBE_PATH = 'C:\path\to\ffprobe.exe'
 mvn spring-boot:run
 ```
 
-健康检查：
+后端默认地址为 `http://localhost:8080`，启动时 Flyway 自动执行 `V1` 至 `V16`。健康检查：
 
 ```powershell
 Invoke-RestMethod http://localhost:8080/api/health
+Invoke-RestMethod http://localhost:8080/actuator/health
 ```
 
-Flyway 会自动执行 `V1`–`V11` 数据库迁移。
-
-### 4. 启动前端
+### 5. 启动前端
 
 ```powershell
 Set-Location frontend
-npm install
+npm ci
 npm run dev
 ```
 
-访问 `http://localhost:5173`。Vite 将 `/api` 代理到 `localhost:8080`。
+访问 `http://localhost:5173`。Vite 将 `/api` 代理到 `http://localhost:8080`。
 
-## 长视频分片上传
+Windows 用户也可以在准备好 `.env` 后运行：
 
-### 上传协议
+```powershell
+.\start-dev.bat
+```
 
-受保护接口均从 JWT 获取当前用户，并检查上传会话或视频 ownership：
+脚本会检查 Java、Maven、Node.js、npm、Docker 和所需基础设施，并分别启动前后端窗口。
+
+## 主要业务链路
+
+### 可恢复分片上传
 
 ```text
+计算整文件 SHA-256
+  → 创建或复用 Upload Session
+  → 申请分片预签名 URL
+  → 浏览器经 Nginx PUT 到 MinIO
+  → 后端校验实际分片大小与 ETag
+  → MySQL 记账 + Redis Bitmap 加速进度查询
+  → MinIO Compose
+  → 创建或复用 canonical Video
+```
+
+上传控制面由 Spring Boot 处理，视频字节通过上传网关直接进入 MinIO。Nginx 配置了：
+
+- `proxy_request_buffering off` 和 `proxy_buffering off`；
+- 单 IP 最大并发 `6`；
+- 全局最大并发 `100`；
+- 单 IP 默认请求速率 `20r/s`、burst `40`；
+- 超限统一返回 HTTP 429。
+
+客户端默认使用 `16MB` 分片和最多 `3` 个并发上传请求。上传状态为：
+
+```text
+CREATED → UPLOADING → COMPLETING → COMPLETED
+                         └──────→ FAILED
+CREATED / UPLOADING / FAILED → CANCELLED 或 EXPIRED
+```
+
+同一用户、同一 SHA-256 最多存在一个 `CREATED / UPLOADING / FAILED / COMPLETING` Session。`COMPLETED / CANCELLED / EXPIRED` 不占用活跃唯一键，因此不阻止创建新 Session。
+
+`expectedSha256` 由浏览器计算，目前用于用户范围内的视频去重和上传会话幂等。服务端会验证分片存在性、大小、ETag、合并后总大小和 MP4 `ftyp` 头，但不会重新流式计算最终对象的标准整文件 SHA-256。准确的信任边界见 [docs/sha256-trust-model.md](docs/sha256-trust-model.md)。
+
+### 异步分析与可靠性
+
+上传完成只创建或复用 Video。用户显式调用分析接口后，系统才创建 `analysis_task` 和 `analysis_outbox_event`，HTTP 请求线程不会同步执行 FFmpeg、ASR、总结或向量化。
+
+```text
+PENDING → PROCESSING → SUCCESS
+              ├────→ RETRY_WAITING → PROCESSING
+              └────→ FAILED
+```
+
+- Transactional Outbox 解决 MySQL 状态与 RocketMQ 投递之间的可靠衔接。
+- Consumer 通过条件更新抢占任务；重复消息不会重复取得同一代执行资格。
+- `processing_generation`、租约和心跳阻止旧 Worker 覆盖新 Worker 状态。
+- ASR、Summary 和 RAG Index 是独立 Checkpoint；只有已经持久化成功的阶段才能在重试时复用。
+- 第三方临时错误按有限预算重试；确定性认证、参数和响应结构错误不会无限重试。
+- Redis 分析令牌桶默认容量为 `60`，每秒补充 `10` 个令牌，每次分析请求消耗 `1` 个；单用户默认最多有 `3` 个活跃分析任务。
+- Redis 限流故障采用 fail-open，后续仍由 MySQL 任务幂等与活动任务数检查保护，但不等价于严格的分布式成本配额。
+
+### 自适应 RAG
+
+短字幕与长字幕采用不同策略：
+
+- 字幕总字符数不超过 `RAG_DIRECT_CONTEXT_MAX_CHARS=8000`：使用 `DIRECT_CONTEXT`，不构建向量索引，状态为 `NOT_REQUIRED`。
+- 超过阈值：按字幕片段边界切块，默认每块最多约 `2000` 字符并重叠一个相邻字幕片段，状态按 `NOT_BUILT → BUILDING → READY/FAILED` 推进。
+
+Milvus Collection 同时保存：
+
+- `denseVector`：Embedding 生成的浮点向量，使用 COSINE 检索；
+- `text`：启用 `jieba` tokenizer、`lowercase` 和 `cnalphanumonly` filter；
+- `sparseVector`：由 Milvus BM25 Function 从 `text` 生成；
+- `userId`、`videoId`、`analysisTaskId`、时间范围和源字幕索引。
+
+每次查询执行：
+
+```text
+Query Embedding → Dense Top-K ┐
+                              ├→ RRF → 可选 Reranker → 最终 Evidence
+Query Text      → BM25 Top-K  ┘
+```
+
+Dense 和 BM25 都强制过滤 `userId + videoId`。重建同一视频时先严格删除旧 Chunk，再写入确定性 Chunk ID；只有 Milvus 写入成功且当前 `buildToken` 仍有效，MySQL 中的索引状态才会变为 `READY`。
+
+默认检索参数：
+
+| 配置 | 默认值 |
+| --- | ---: |
+| `RAG_DENSE_TOP_K` | `15` |
+| `RAG_DENSE_MINIMUM_SCORE` | `0.0` |
+| `RAG_LEXICAL_TOP_K` | `15` |
+| `RAG_RRF_K` | `60` |
+| `RAG_RRF_CANDIDATE_LIMIT` | `15` |
+| `RAG_FINAL_EVIDENCE_LIMIT` | `5` |
+| `RAG_RERANKER_ENABLED` | `false` |
+
+这些值是工程默认值，不代表已经针对生产语料完成效果或容量调优。
+
+## AI Provider 配置
+
+| 能力 | Provider | 启用真实服务时的关键配置 |
+| --- | --- | --- |
+| ASR | `mock`、`groq`、`dashscope` | `ASR_PROVIDER`、`ASR_API_KEY`；模型和地址有 Provider 默认值 |
+| Summary / QA | `mock`、`openai` | `LLM_PROVIDER=openai`、`LLM_API_KEY`、`LLM_MODEL`；兼容服务另配 `LLM_BASE_URL` |
+| Embedding | `mock`、`openai`、`dashscope` | `EMBEDDING_PROVIDER`、`EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`、正确的 `EMBEDDING_DIMENSION` |
+| Agent Planner | `mock`、`llm` | `AGENT_PLANNER_PROVIDER=llm`，并提供完整 LLM 配置 |
+| Reranker | 任意符合当前 `/rerank` JSON 协议的 HTTP 服务 | `RAG_RERANKER_ENABLED=true`、地址、模型；服务要求鉴权时再配置 API Key |
+
+显式选择真实 Provider 但缺少必要配置时，应用会启动失败，不会静默降级为 Mock。Embedding 维度必须与 Milvus Collection Schema 一致；修改模型维度后需要使用匹配的 Collection 或重建派生索引。
+
+## 主要 API
+
+除注册、登录和健康检查外，业务接口均要求 `Authorization: Bearer <JWT>`。
+
+### 认证与健康检查
+
+```text
+POST /api/auth/register
+POST /api/auth/login
+GET  /api/auth/me
+GET  /api/health
+GET  /actuator/health
+```
+
+### 视频与上传
+
+```text
+POST   /api/videos                         兼容的 Spring multipart 上传
+GET    /api/videos
+GET    /api/videos/{videoId}
+GET    /api/videos/{videoId}/playback-url
+PATCH  /api/videos/{videoId}
+DELETE /api/videos/{videoId}
+
 POST   /api/uploads
 GET    /api/uploads/{uploadId}
 POST   /api/uploads/{uploadId}/parts/{partNumber}/url
@@ -114,163 +309,65 @@ POST   /api/uploads/{uploadId}/complete
 DELETE /api/uploads/{uploadId}
 ```
 
-完整流程：
-
-1. 客户端提交 `fileName`、`title`、`fileSize`、`contentType`、可选 `chunkSize` 和可选整文件 `sha256`。
-2. 服务端校验 MP4、文件大小、分片大小和分片总数，自行生成正式 `objectKey` 与临时分片前缀；客户端不能指定存储路径。
-3. 客户端为稳定的 `partNumber` 申请短时效预签名 URL，并直接 `PUT` 到 MinIO。视频字节不经过 Spring Boot。
-4. 客户端确认分片后，服务端从 MinIO 读取实际大小和 ETag，再幂等写入 MySQL。
-5. 页面刷新或网络恢复后，客户端查询会话，只补传响应中缺失的分片。前端默认最多 3 个并发请求，支持暂停、继续、取消、进度显示和带抖动的有限重试。
-6. 完成时服务端锁定会话，重新检查所有分片，用 MinIO Compose 生成确定性的正式对象，并校验最终大小、MP4 `ftyp` 头；服务端始终计算最终源对象的 SHA-256，调用方提供整文件 SHA-256 时再比对摘要。
-7. 同一数据库事务中按 `(userId, fileHash)` 创建或复用正式视频并完成会话；并发或重复完成请求返回同一 canonical `videoId`，不会重复建逻辑视频。分析任务和初始 Outbox 事件只在用户显式开始分析时创建。
-
-上传会话状态：
+### 分析结果与问答
 
 ```text
-CREATED → UPLOADING → COMPLETING → COMPLETED
-                         └──────→ FAILED（可重试完成）
-CREATED / UPLOADING / FAILED → CANCELLED 或 EXPIRED
-```
-
-定时清理任务只删除过期、取消或已完成会话的临时分片，不删除 `COMPLETED` 会话对应的正式视频对象。
-
-默认限制：
-
-| 配置 | 默认值 | 说明 |
-| --- | ---: | --- |
-| `VIDEO_RESUMABLE_MAX_FILE_SIZE` | `20GB` | 新分片直传入口的文件上限 |
-| `VIDEO_UPLOAD_DEFAULT_CHUNK_SIZE` | `16MB` | 默认分片大小 |
-| `VIDEO_UPLOAD_MIN_CHUNK_SIZE` / `VIDEO_UPLOAD_MAX_CHUNK_SIZE` | `5MB` / `128MB` | 允许的分片范围 |
-| `VIDEO_UPLOAD_MAX_PARTS` | `10000` | 最大分片数 |
-| `VIDEO_UPLOAD_SESSION_TTL` | `24h` | 会话有效期 |
-| `VIDEO_UPLOAD_PRESIGN_TTL` | `15m` | 单个直传 URL 有效期 |
-| `VIDEO_UPLOAD_MAX_CONCURRENCY` | `3` | 服务端返回给客户端的并发上限 |
-
-旧接口 `POST /api/videos` 仍接受 Spring multipart MP4，默认受 `VIDEO_MAX_FILE_SIZE=500MB` 和 `VIDEO_MAX_REQUEST_SIZE=501MB` 限制。长视频应使用 `/api/uploads`，它绕过 Spring 请求体大小限制。
-
-### 为什么使用 MinIO Compose
-
-项目现有 MinIO Java SDK 已能完成预签名 PUT、对象状态查询和服务端 Compose，因此没有为“技术名词”额外引入 AWS S3 SDK：
-
-- 浏览器直接上传，避免 Spring Boot 中转大文件和占用应用带宽/堆外缓冲。
-- 每个临时分片都是可查询、可校验的对象，MySQL 可持久恢复上传进度。
-- Compose 在 MinIO 内部完成，不需要应用下载后再拼接。
-- 使用源对象 ETag 条件避免合并期间分片被悄悄替换。
-
-代价是临时对象数量更多，需要清理任务；该方案也不能描述为原生 S3 Multipart Upload。
-
-## 可靠异步分析
-
-### 持久化衔接与状态机
-
-上传完成时保存或复用 `video`；用户显式开始分析时，`analysis_task` 和 `analysis_outbox_event` 在同一个 MySQL 事务中保存。Outbox Publisher 独立重试消息发送，避免数据库已提交但 RocketMQ 消息丢失。
-
-分析任务沿用现有兼容状态名：
-
-```text
-PENDING → PROCESSING → SUCCESS
-              └────→ RETRY_WAITING → PROCESSING
-              └────→ FAILED
-```
-
-`analysis_task` 记录当前阶段、尝试次数、最近错误码/错误信息、失败阶段、下次重试时间、处理时间和 `processing_generation`。
-
-### 重复消息、Worker 抢占与旧 Worker 隔离
-
-- RocketMQ 可能重复投递；Consumer 通过数据库条件更新抢占任务，已经完成或不满足状态条件的消息直接跳过。
-- Worker 只为当前 JVM 真正持有的任务续租。租约过期后，恢复任务可以把任务重新放回可执行状态。
-- 每次成功抢占都会递增 `processing_generation`。可以把它理解为一张带编号的工作票：之后所有心跳、进度和终态更新都必须携带同一编号。新 Worker 接管后编号已变化，旧 Worker 即使恢复，也无法覆盖新 Worker 的状态。
-- 单次任务默认最长执行 `2h`，处理租约默认 `15m`，心跳默认每 `2m` 续租；不会无限占用任务。
-- Redis 和 SSE 只提供进度缓存/观察通道，失败不会改变业务终态；MySQL 始终是事实源。
-
-### 第三方 API 失败路径
-
-1. Provider 将网络错误、超时、HTTP `408/425/429` 和可恢复 `5xx` 分类为可重试错误。
-2. 参数错误、认证失败、无权限等确定性 `4xx` 直接失败，不做无效重试。
-3. 可重试错误进入 `RETRY_WAITING`，默认总尝试次数最多 3 次；退避从 5 秒开始指数增长，最多 60 秒并加入随机抖动。
-4. REST Provider 响应包含 `Retry-After` 时优先使用服务端建议，但等待上限为 15 分钟。
-5. 超出任务尝试次数或最大执行时间后进入 `FAILED`，保留最近错误和失败阶段。
-
-Transcript 和 Summary 是持久化检查点：
-
-- ASR 成功、总结失败：重试时从 Summary 继续，不重复调用 ASR。
-- Summary 成功、向量化失败：重试时从 RAG Index 继续，不重复调用 ASR 或 LLM 总结。
-- RAG 构建使用独立 `build_token` 和构建租约，旧构建者不能覆盖新构建者结果。
-
-连接/读取超时分别由 Provider 配置控制，例如 `ASR_TIMEOUT`、`LLM_TIMEOUT`、`EMBEDDING_TIMEOUT`；整体任务受 `ANALYSIS_MAX_EXECUTION_TIME` 约束。
-
-## 自适应 RAG 与可信引用
-
-```text
-POST /api/videos/{videoId}/qa
-POST /api/videos/{videoId}/qa/agentic
-GET  /api/videos/{videoId}/rag/status
-POST /api/videos/{videoId}/rag/index
-```
-
-- **短 Transcript**：字符数不超过 `RAG_DIRECT_CONTEXT_MAX_CHARS`（默认 8000）时使用完整上下文，不切块、不调用 Embedding，索引状态为 `NOT_REQUIRED`。
-- **长 Transcript**：按字幕片段边界分块，保留 `startMs`、`endMs`、`videoId`、`userId` 元数据，写入 Qdrant 后执行 Top-K 语义检索。
-- **隔离**：所有向量写入和搜索都绑定 `userId + videoId`，API 层也再次检查视频 ownership。
-- **Agentic Retrieval**：Planner 只能选择 `GET_VIDEO_SUMMARY`、`GET_TRANSCRIPT_BY_TIME`、`SEARCH_TRANSCRIPT`；后端限制时间窗口、参数范围、Evidence 数量/长度和最大工具调用次数。
-- **可信 Citation**：模型只返回 Evidence 序号，后端再映射为真实字幕/检索块的时间范围；越界或伪造序号会被丢弃。
-- **证据不足**：语义命中低于 `RAG_MINIMUM_SCORE`（默认 0.45），或回答无法映射到真实引用时，返回“根据当前视频内容无法确定。”。
-
-默认 `RAG_TOP_K=5`、`RAG_CHUNK_MAX_CHARS=2000`、相邻块重叠 1 个字幕片段。生产环境应根据实际语料评测后调参，不能把这些默认值当作性能结论。
-
-## 主要 API
-
-除注册、登录和健康检查外，业务 API 均需要 Bearer JWT。
-
-```text
-POST /api/auth/register
-POST /api/auth/login
-GET  /api/auth/me
-
-POST   /api/videos                         兼容的普通 multipart 上传
-GET    /api/videos
-GET    /api/videos/{videoId}
-DELETE /api/videos/{videoId}
-
+GET  /api/videos/{videoId}/analysis
 POST /api/videos/{videoId}/analysis
 GET  /api/analysis/{taskId}
-GET  /api/analysis/{taskId}/events         text/event-stream
+GET  /api/analysis/{taskId}/events
 
-GET /api/videos/{videoId}/transcript
-GET /api/videos/{videoId}/summary
-GET /api/videos/{videoId}/chapters
-GET /api/videos/{videoId}/key-points
+GET  /api/videos/{videoId}/transcript
+GET  /api/videos/{videoId}/summary
+GET  /api/videos/{videoId}/chapters
+GET  /api/videos/{videoId}/key-points
+
+GET  /api/videos/{videoId}/rag/status
+POST /api/videos/{videoId}/rag/index
+POST /api/videos/{videoId}/qa
+POST /api/videos/{videoId}/qa/agentic
 ```
 
-## 数据库结构
+## 数据库与迁移
 
-Flyway 迁移位于 `backend/src/main/resources/db/migration`。主要表：
+Flyway 脚本位于 `backend/src/main/resources/db/migration`，当前范围为 `V1`–`V16`。
 
 | 表 | 职责 |
 | --- | --- |
-| `app_user`、`video` | 用户与有 ownership 的正式视频 |
-| `video_upload_session`、`video_upload_part` | 可恢复上传会话、分片大小/ETag/摘要和完成结果 |
-| `analysis_task` | 分析状态、阶段、重试、租约和 generation |
-| `analysis_outbox_event` | 待发送/重试的 RocketMQ 事件 |
-| `video_transcript_segment` | 带开始/结束时间的 ASR 检查点 |
-| `video_summary`、`video_chapter`、`video_key_point` | 结构化总结检查点 |
+| `app_user`、`video` | 用户、视频归属和用户范围内的内容去重 |
+| `video_upload_session`、`video_upload_part` | 上传状态机、分片记账、完成 fencing 和并发幂等 |
+| `analysis_task` | 分析阶段、状态、重试、租约、错误和 generation |
+| `analysis_outbox_event` | 待发布和重试的 RocketMQ 事件 |
+| `video_transcript_segment` | 带时间戳的 ASR 字幕 Checkpoint |
+| `video_summary`、`video_chapter`、`video_key_point` | 结构化总结 Checkpoint |
 | `video_rag_index` | RAG 模式、构建状态、租约和 build token |
+| `conversation_turn` | 按用户和视频隔离的持久对话历史 |
 
-Qdrant 保存长 Transcript 的向量与证据元数据，不替代 MySQL 中的业务状态。
+最新迁移：
 
-## 构建与测试
+- `V15`：将历史 RAG 索引重置为 `NOT_BUILT`，清空旧构建信息，并删除已经不再使用的 MySQL `video_rag_chunk` 表。
+- `V16`：先把重复活跃上传 Session 标记为 `EXPIRED`，再创建 STORED 生成列 `active_expected_sha256` 和唯一索引 `uk_video_upload_active_hash`。
 
-常规验证：
+Milvus 是可以从 MySQL 字幕重新构建的派生检索索引，不参与 Flyway 事务。升级后，已有长字幕需要通过现有 RAG 建索引入口重建。
+
+## 测试与验证
+
+完整常规回归：
 
 ```powershell
 Set-Location backend
 mvn test
-mvn package
 
 Set-Location ../frontend
+npm test
 npm run build
+
+Set-Location ..
+docker compose config --quiet
+git diff --check
 ```
 
-需要 Docker 基础设施的测试默认跳过，显式启用方式如下：
+需要真实基础设施的用例默认通过环境变量门控，不会在普通 `mvn test` 中伪装成 Mock 验收。常用真实验收命令：
 
 ```powershell
 Set-Location backend
@@ -278,63 +375,56 @@ Set-Location backend
 $env:VIDEOAGENT_UPLOAD_INFRA_TEST = 'true'
 mvn '-Dtest=ResumableUploadInfrastructureIntegrationTest' test
 
+$env:VIDEOAGENT_ANALYSIS_PROTECTION_INFRA_TEST = 'true'
+mvn '-Dtest=AnalysisProtectionInfrastructureIntegrationTest' test
+
+$env:VIDEOAGENT_REAL_MILVUS_ACCEPTANCE = 'true'
+mvn '-Dtest=RealMilvusInfrastructureAcceptanceTest' test
+
 $env:VIDEOAGENT_M7_INFRA_TEST = 'true'
-mvn '-Dtest=Milestone7ReliabilityInfrastructureIntegrationTest' test
-
-$env:VIDEOAGENT_M8_RAG_INFRA_TEST = 'true'
-mvn '-Dtest=Milestone8RagInfrastructureIntegrationTest' test
-
-$env:VIDEOAGENT_M8_AGENT_INFRA_TEST = 'true'
-mvn '-Dtest=Milestone8AgentInfrastructureIntegrationTest' test
+mvn '-Dtest=Milestone7ReliabilityInfrastructureIntegrationTest,M7TransactionalAtomicityIntegrationTest' test
 ```
 
-最近一次实际验证结果：
+真实 ASR、LLM 与 Embedding Smoke Test 需要额外显式开关、有效凭据和测试视频。它们可能产生第三方费用，默认不执行。
 
-| 验证 | 真实结果 |
-| --- | --- |
-| 后端 `mvn test` | 435 tests，0 failures，0 errors，43 skipped（带开关的基础设施/真实 AI 测试） |
-| 分片上传基础设施测试 | 1/1 通过；覆盖预签名直传、重复确认、缺片恢复、并发/重复完成、SHA-256、单一视频/任务和跨用户拒绝 |
-| M7 可靠性基础设施测试 | 9/9 通过；覆盖事务 Outbox、重复消息、检查点恢复、过期租约接管、generation 隔离和重试预算 |
-| M8 RAG 基础设施测试 | 2/2 通过；覆盖短/长上下文、Qdrant 过滤和后端 Citation 映射 |
-| 前端 `npm test` | 5 个测试文件 / 22 个测试通过 |
-| 前端 `npm run build` | 构建成功；Vite 仅提示主 chunk 较大 |
-
-没有执行过真实 20GB 文件的压力/性能测试，也没有执行需要付费凭据的真实 ASR、LLM 和 Embedding 端到端 Smoke Test；README 不声明相关性能数据。
-
-## 目录结构
+## 项目结构
 
 ```text
 backend/
   src/main/java/com/videoagent/
-    auth/        JWT 登录与当前用户
-    upload/      分片会话、直传确认、Compose、清理
-    video/       正式视频元数据与兼容上传接口
-    storage/     MinIO 存储适配与 Compose
-    analysis/    异步任务、MQ、租约/心跳、恢复与 SSE
-    outbox/      事务 Outbox 发布
-    media/       FFmpeg 与受控临时目录
+    auth/        JWT 认证与当前用户
+    video/       视频元数据、播放 URL 与兼容上传
+    upload/      分片 Session、直传确认、Compose、幂等和清理
+    storage/     MinIO 内部、播放和上传预签名客户端
+    analysis/    任务状态机、MQ Consumer、租约、恢复和 SSE
+    outbox/      Transactional Outbox 发布
+    media/       FFmpeg 与临时文件管理
     asr/         ASR Provider
-    summary/     结构化总结 Provider 与检查点
+    summary/     结构化总结 Provider
     transcript/  时间戳字幕
-    rag/         分块、Embedding、Qdrant、QA 与 Citation
-    agent/       白名单检索工具与 Planner
-    provider/    第三方 HTTP 错误分类
-  src/main/resources/db/migration/  Flyway V1-V11
-frontend/        Vue 3 Web 应用与可恢复上传客户端
-infra/           RocketMQ 本地配置
+    rag/         分块、Embedding、Milvus、BM25、RRF、Reranker 和 QA
+    agent/       受约束 Planner、白名单工具、Evidence 与会话记忆
+  src/main/resources/
+    application.yml
+    db/migration/          Flyway V1-V16
+frontend/                  Vue 3 客户端、上传 Worker 和页面测试
+infra/nginx/               上传网关配置模板
+infra/rocketmq/            RocketMQ Broker 配置
+docs/                      设计边界与补充文档
+scripts/start-dev.ps1      Windows 本地启动脚本
 docker-compose.yml
 ```
 
-## 已知限制
+## 已知边界
 
-- 当前只接受 MP4；完成阶段校验容器头，但不做完整媒体解码验证。
-- 前端刷新后受浏览器文件权限限制，需要用户重新选择同一个本地文件，随后会自动查询会话并只补传缺失分片。
-- 前端当前不计算整文件 SHA-256；服务端始终校验分片 ETag、大小、最终大小和 MP4 头，并计算、持久化最终源对象 SHA-256；调用方提供 SHA-256 时再比对摘要。
-- MinIO Compose 依赖临时分片对象；生产部署必须监控清理任务并正确配置 CORS、生命周期和存储容量。
-- LangChain4j LLM 适配器能按异常/状态分类重试；如果 SDK 异常不暴露响应头，则无法读取该次 LLM 响应的 `Retry-After`。REST ASR/Embedding 适配器支持该响应头。
-- 默认 Provider 都是 Mock。真实模型质量、限流配额、成本和最大输入需要按供应商单独验证。
-- SSE 订阅者保存在当前应用进程；多实例部署若要跨实例实时推送，需要额外的广播方案。Redis 仍只用作临时进度缓存。
-- 前端提供原生视频播放；章节、要点、转录与带时间范围的 Citation 可跳转到对应位置。
-- 已完成正确性测试，但未进行大文件并发压测、故障注入压测或性能基准测试。
+- 当前只接受 MP4；完成阶段校验文件大小和 `ftyp` 头，不进行完整媒体解码验证。
+- 客户端 SHA-256 是去重与幂等标识，不是服务端重新计算后的可信内容证明。
+- MinIO Compose、MySQL 状态和 Redis Bitmap 不在同一个分布式事务中；系统通过 fencing、幂等和恢复任务实现最终收敛。
+- Milvus 写入与 MySQL `READY` 状态不是跨存储原子事务；失败会保留可重建状态，不能描述为分布式事务。
+- Nginx 只能限制经过上传网关的 PUT。开发环境允许客户端直连 `MinIO:9000` 便于调试；生产环境必须通过网络策略禁止客户端直接访问 MinIO 原始 API 端口，否则可绕过上传限流。
+- Redis 令牌桶故障时采用 fail-open；单用户活动任务数检查是一层实用保护，不应表述为严格原子配额。
+- SSE 订阅者保存在当前应用实例；多实例部署如需跨实例实时推送，需要额外广播机制。
+- 真实 Provider 的模型质量、配额、成本和最大输入必须针对供应商单独验证。
+- 项目未声明未经执行的大文件并发性能、弱网成功率、召回率或生产容量数据。
 
-当前能力以代码、Flyway 迁移和测试结果为准。
+当前行为以源码、Flyway 迁移和可重复执行的测试结果为准。

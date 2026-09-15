@@ -20,6 +20,34 @@ public interface VideoUploadSessionRepository extends BaseMapper<VideoUploadSess
     @Select("SELECT * FROM video_upload_session WHERE id = #{uploadId} FOR UPDATE")
     VideoUploadSessionEntity lockById(@Param("uploadId") String uploadId);
 
+    @Select("""
+        SELECT * FROM video_upload_session
+        WHERE user_id = #{userId}
+          AND active_expected_sha256 = #{expectedSha256}
+          AND expires_at > #{now}
+        LIMIT 1
+        FOR UPDATE
+        """)
+    VideoUploadSessionEntity findReusableByHash(
+        @Param("userId") long userId,
+        @Param("expectedSha256") String expectedSha256,
+        @Param("now") LocalDateTime now
+    );
+
+    @Update("""
+        UPDATE video_upload_session
+        SET status = 'EXPIRED', updated_at = #{now}
+        WHERE user_id = #{userId}
+          AND expected_sha256 = #{expectedSha256}
+          AND status IN ('CREATED', 'UPLOADING', 'FAILED')
+          AND expires_at <= #{now}
+        """)
+    int expireReusableByHash(
+        @Param("userId") long userId,
+        @Param("expectedSha256") String expectedSha256,
+        @Param("now") LocalDateTime now
+    );
+
     @Update("""
         UPDATE video_upload_session
         SET status = 'COMPLETING', completing_at = #{completingAt},

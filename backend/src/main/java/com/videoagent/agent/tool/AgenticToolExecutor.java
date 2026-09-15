@@ -223,7 +223,7 @@ public class AgenticToolExecutor {
 
         if (mode == QaContextMode.DIRECT_CONTEXT) {
             // Short transcript: the full transcript is the evidence. No
-            // embedding, no Qdrant.
+            // embedding, no Milvus.
             List<EvidenceItem> items = new ArrayList<>();
             for (VideoTranscriptSegmentEntity segment : directSearchSegments) {
                 long startMs = segment.getStartMs() == null ? 0L : segment.getStartMs();

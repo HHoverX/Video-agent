@@ -25,6 +25,7 @@ import com.videoagent.video.repository.VideoRepository;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.util.unit.DataSize;
 
 import java.time.Duration;
@@ -102,6 +103,48 @@ class UploadSessionServiceTest {
         assertThat(response.deduplicated()).isFalse();
         assertThat(response.uploadId()).isNotNull();
         verify(videos).findByUserIdAndFileHash(8L, hash());
+        verify(sessions).insert(any(VideoUploadSessionEntity.class));
+    }
+
+    @Test
+    void shouldReuseExistingActiveSessionForSameUserAndHash() {
+        VideoUploadSessionEntity existing = session("UPLOADING");
+        existing.setExpectedSha256(hash());
+        when(sessions.findReusableByHash(eq(7L), eq(hash()), any(LocalDateTime.class)))
+            .thenReturn(existing);
+        when(partState.completedPartNumbers(existing)).thenReturn(List.of(1));
+
+        UploadSessionResponse response = service.create(7L, request());
+
+        assertThat(response.uploadId()).isEqualTo("u1");
+        assertThat(response.completedParts()).extracting(part -> part.partNumber()).containsExactly(1);
+        verify(sessions, never()).insert(any(VideoUploadSessionEntity.class));
+    }
+
+    @Test
+    void shouldReturnWinningSessionAfterConcurrentUniqueKeyConflict() {
+        VideoUploadSessionEntity winner = session("CREATED");
+        winner.setExpectedSha256(hash());
+        when(sessions.findReusableByHash(eq(7L), eq(hash()), any(LocalDateTime.class)))
+            .thenReturn(null, winner);
+        when(sessions.insert(any(VideoUploadSessionEntity.class)))
+            .thenThrow(new DuplicateKeyException("active hash"));
+
+        UploadSessionResponse response = service.create(7L, request());
+
+        assertThat(response.uploadId()).isEqualTo("u1");
+        assertThat(response.deduplicated()).isFalse();
+    }
+
+    @Test
+    void shouldExpireStaleSessionAndNotReuseCancelledSession() {
+        when(sessions.insert(any(VideoUploadSessionEntity.class))).thenReturn(1);
+
+        UploadSessionResponse response = service.create(7L, request());
+
+        assertThat(response.uploadId()).isNotEqualTo("cancelled");
+        verify(sessions).expireReusableByHash(eq(7L), eq(hash()), any(LocalDateTime.class));
+        verify(sessions).findReusableByHash(eq(7L), eq(hash()), any(LocalDateTime.class));
         verify(sessions).insert(any(VideoUploadSessionEntity.class));
     }
 
@@ -311,5 +354,12 @@ class UploadSessionServiceTest {
 
     private String hash() {
         return "a".repeat(64);
+    }
+
+    private CreateUploadSessionRequest request() {
+        return new CreateUploadSessionRequest(
+            "lesson.mp4", "lesson", 40L * 1024 * 1024,
+            "video/mp4", 16L * 1024 * 1024, hash()
+        );
     }
 }

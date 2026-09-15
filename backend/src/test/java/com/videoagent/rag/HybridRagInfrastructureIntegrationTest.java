@@ -12,15 +12,12 @@ import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.rag.chunk.TranscriptChunk;
 import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
-import com.videoagent.rag.entity.VideoRagChunkEntity;
-import com.videoagent.rag.repository.VideoRagChunkRepository;
 import com.videoagent.rag.rerank.HttpTranscriptReranker;
 import com.videoagent.rag.retrieval.LexicalChunk;
-import com.videoagent.rag.retrieval.LexicalTranscriptStore;
 import com.videoagent.rag.retrieval.ReciprocalRankFusion;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
-import com.videoagent.rag.vector.QdrantVectorStore;
+import com.videoagent.rag.vector.MilvusTranscriptStore;
 import com.videoagent.rag.vector.VectorPoint;
 import com.videoagent.video.entity.VideoEntity;
 import com.videoagent.video.repository.VideoRepository;
@@ -29,7 +26,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -53,16 +49,13 @@ class HybridRagInfrastructureIntegrationTest {
     @Autowired private AppUserRepository userRepository;
     @Autowired private VideoRepository videoRepository;
     @Autowired private AnalysisTaskRepository taskRepository;
-    @Autowired private VideoRagChunkRepository chunkRepository;
-    @Autowired private LexicalTranscriptStore lexicalStore;
-    @Autowired private QdrantVectorStore vectorStore;
-    @Autowired private JdbcTemplate jdbcTemplate;
+    @Autowired private MilvusTranscriptStore transcriptStore;
     @Autowired private ObjectMapper objectMapper;
 
     private final List<Long> users = new ArrayList<>();
     private final List<Long> videos = new ArrayList<>();
     private final List<Long> tasks = new ArrayList<>();
-    private final List<long[]> qdrantIndexes = new ArrayList<>();
+    private final List<long[]> milvusIndexes = new ArrayList<>();
     private HttpServer rerankServer;
 
     @AfterEach
@@ -71,15 +64,14 @@ class HybridRagInfrastructureIntegrationTest {
             rerankServer.stop(0);
             rerankServer = null;
         }
-        qdrantIndexes.forEach(index -> vectorStore.deleteByVideo(index[0], index[1]));
-        videos.forEach(videoId -> chunkRepository.deleteByUserAndVideo(ownerOf(videoId), videoId));
+        milvusIndexes.forEach(index -> transcriptStore.deleteByVideo(index[0], index[1]));
         for (Long taskId : tasks.reversed()) taskRepository.deleteById(taskId);
         for (Long videoId : videos.reversed()) videoRepository.deleteById(videoId);
         for (Long userId : users.reversed()) userRepository.deleteById(userId);
     }
 
     @Test
-    void shouldUseNgramFulltextForCjkPreciseTermsAndSqlIsolation() {
+    void shouldUseMilvusBm25ForChineseTechnicalTermsAndIsolation() {
         long userA = insertUser("hybrid-a");
         long userB = insertUser("hybrid-b");
         long videoX = insertVideo(userA, "X");
@@ -95,29 +87,21 @@ class HybridRagInfrastructureIntegrationTest {
             if (index == 11) text = "UploadCompletionTransaction 保证完成阶段原子性";
             chunks.add(chunk(index, text));
         }
-        lexicalStore.replace(userA, videoX, taskX, chunks);
-        lexicalStore.replace(userA, videoY, taskY, List.of(chunk(0, "事务回滚只属于另一个视频")));
+        putChunks(userA, videoX, taskX, chunks);
+        putChunks(userA, videoY, taskY, List.of(chunk(0, "事务回滚只属于另一个视频")));
+        long foreignVideo = insertVideo(userB, "foreign");
+        long foreignTask = insertTask(foreignVideo, "v1");
+        putChunks(userB, foreignVideo, foreignTask, List.of(chunk(0, "事务回滚只属于另一个用户")));
 
-        VideoRagChunkEntity foreignUser = entity(userB, videoX, taskX, 99, "事务回滚只属于另一个用户");
-        assertThat(chunkRepository.insert(foreignUser)).isEqualTo(1);
-
-        assertThat(lexicalStore.search(userA, videoX, "事务回滚", 15))
+        assertThat(transcriptStore.searchLexical(userA, videoX, "事务回滚", 15))
             .extracting(LexicalChunk::text)
             .contains("事务回滚发生在数据库写入失败之后")
             .doesNotContain("事务回滚只属于另一个视频", "事务回滚只属于另一个用户");
-        assertThat(lexicalStore.search(userA, videoX, "NullPointerException", 15))
-            .extracting(LexicalChunk::text).contains("捕获 NullPointerException 后记录错误类别");
-        assertThat(lexicalStore.search(userA, videoX, "UploadCompletionTransaction", 15))
-            .extracting(LexicalChunk::text).contains("UploadCompletionTransaction 保证完成阶段原子性");
-
-        Map<String, Object> explain = jdbcTemplate.queryForMap("""
-            EXPLAIN SELECT id FROM video_rag_chunk
-            WHERE user_id = ? AND video_id = ?
-              AND MATCH(text) AGAINST(? IN NATURAL LANGUAGE MODE)
-            ORDER BY MATCH(text) AGAINST(? IN NATURAL LANGUAGE MODE) DESC
-            LIMIT 15
-            """, userA, videoX, "事务回滚", "事务回滚");
-        assertThat(String.valueOf(explain.get("key"))).isEqualTo("ft_rag_chunk_text");
+        for (String term : List.of("Redis", "RocketMQ", "SHA-256", "NullPointerException", "uploadId")) {
+            putChunks(userA, videoX, taskX, List.of(chunk(0, "技术关键词 " + term)));
+            assertThat(transcriptStore.searchLexical(userA, videoX, term, 15))
+                .extracting(LexicalChunk::text).contains("技术关键词 " + term);
+        }
     }
 
     @Test
@@ -126,18 +110,16 @@ class HybridRagInfrastructureIntegrationTest {
         long video = insertVideo(user, "lifecycle");
         long taskV1 = insertTask(video, "v1");
         long taskV2 = insertTask(video, "v2");
-        lexicalStore.replace(user, video, taskV1, List.of(chunk(0, "v1 obsolete marker")));
+        putChunks(user, video, taskV1, List.of(chunk(0, "v1 obsolete marker")));
 
         List<TranscriptChunk> current = List.of(chunk(0, "v2 current marker"), chunk(1, "v2 current second"));
-        lexicalStore.replace(user, video, taskV2, current);
-        lexicalStore.replace(user, video, taskV2, current);
+        putChunks(user, video, taskV2, current);
+        putChunks(user, video, taskV2, current);
 
-        assertThat(jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM video_rag_chunk WHERE user_id=? AND video_id=?", Integer.class, user, video))
-            .isEqualTo(2);
-        assertThat(jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM video_rag_chunk WHERE user_id=? AND video_id=? AND analysis_task_id=?",
-            Integer.class, user, video, taskV1)).isZero();
+        assertThat(transcriptStore.searchLexical(user, video, "obsolete", 15)).isEmpty();
+        assertThat(transcriptStore.searchLexical(user, video, "current", 15))
+            .extracting(LexicalChunk::text)
+            .containsExactlyInAnyOrder("v2 current marker", "v2 current second");
     }
 
     @Test
@@ -151,17 +133,15 @@ class HybridRagInfrastructureIntegrationTest {
             chunk(2, "C NullPointerException precise marker"),
             chunk(3, "D UploadCompletionTransaction precise marker")
         );
-        lexicalStore.replace(user, video, task, chunks);
-
-        vectorStore.ensureCollection(384);
-        vectorStore.deleteByVideoStrict(user, video);
-        vectorStore.upsertPoints(user, video, task, List.of(
+        transcriptStore.ensureCollection(384);
+        transcriptStore.deleteByVideoStrict(user, video);
+        transcriptStore.upsertPoints(user, video, task, List.of(
             point(chunks.get(0), vector(1.0f, 0.0f)),
             point(chunks.get(1), vector(0.9f, 0.1f)),
             point(chunks.get(2), vector(0.0f, 1.0f)),
             point(chunks.get(3), vector(0.0f, 1.0f))
         ));
-        qdrantIndexes.add(new long[] {user, video});
+        milvusIndexes.add(new long[] {user, video});
 
         AtomicInteger rerankCalls = new AtomicInteger();
         startReranker(rerankCalls);
@@ -169,7 +149,7 @@ class HybridRagInfrastructureIntegrationTest {
             new RagProperties.Reranker(true, rerankBaseUrl(), "integration-secret", "fake-reranker",
                 Duration.ofSeconds(2)));
         TranscriptRetriever retriever = new TranscriptRetriever(
-            fixedEmbeddingProvider(), vectorStore, lexicalStore, new ReciprocalRankFusion(),
+            fixedEmbeddingProvider(), transcriptStore, new ReciprocalRankFusion(),
             new HttpTranscriptReranker(properties), properties);
 
         List<RetrievedChunk> result = retriever.retrieve(
@@ -235,19 +215,15 @@ class HybridRagInfrastructureIntegrationTest {
         return new TranscriptChunk(index, text, index * 1000L, (index + 1) * 1000L, List.of(index));
     }
 
-    private VideoRagChunkEntity entity(long user, long video, long task, int index, String text) {
-        VideoRagChunkEntity entity = new VideoRagChunkEntity();
-        entity.setChunkId(video + ":" + task + ":" + index);
-        entity.setUserId(user);
-        entity.setVideoId(video);
-        entity.setAnalysisTaskId(task);
-        entity.setChunkIndex(index);
-        entity.setText(text);
-        entity.setStartMs(index * 1000L);
-        entity.setEndMs((index + 1) * 1000L);
-        entity.setSourceSegmentIndexes("[" + index + "]");
-        entity.setCreatedAt(LocalDateTime.now());
-        return entity;
+    private void putChunks(long user, long video, long task, List<TranscriptChunk> chunks) {
+        transcriptStore.ensureCollection(384);
+        transcriptStore.deleteByVideoStrict(user, video);
+        transcriptStore.upsertPoints(user, video, task, chunks.stream()
+            .map(chunk -> point(chunk, vector(1.0f, 0.0f)))
+            .toList());
+        if (milvusIndexes.stream().noneMatch(index -> index[0] == user && index[1] == video)) {
+            milvusIndexes.add(new long[] {user, video});
+        }
     }
 
     private long insertUser(String prefix) {
@@ -296,7 +272,4 @@ class HybridRagInfrastructureIntegrationTest {
         return task.getId();
     }
 
-    private long ownerOf(long videoId) {
-        return videoRepository.selectById(videoId).getUserId();
-    }
 }

@@ -23,6 +23,7 @@
         <minio.version>8.5.17</minio.version>
         <rocketmq-spring.version>2.3.2</rocketmq-spring.version>
         <langchain4j.version>1.18.0</langchain4j.version>
+        <milvus-sdk.version>2.6.22</milvus-sdk.version>
         <jjwt.version>0.13.0</jjwt.version>
     </properties>
 
@@ -76,6 +77,11 @@
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
             <version>${minio.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.milvus</groupId>
+            <artifactId>milvus-sdk-java</artifactId>
+            <version>${milvus-sdk.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.rocketmq</groupId>

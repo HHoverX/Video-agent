@@ -55,6 +55,8 @@ public class UploadCompletionTransaction {
         }
 
         String suppliedSha256 = UploadSessionService.normalizeSha256(request == null ? null : request.sha256());
+        // This is the client declaration captured when the session was created.
+        // It is a deduplication key, not a server-verified digest of the composed object.
         String fileHash = UploadSessionService.normalizeSha256(session.getExpectedSha256());
         if (fileHash == null) {
             if (suppliedSha256 == null) {

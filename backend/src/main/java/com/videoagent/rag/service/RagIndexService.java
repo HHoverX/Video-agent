@@ -13,8 +13,7 @@ import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.entity.RagIndexStatus;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.repository.VideoRagIndexRepository;
-import com.videoagent.rag.retrieval.LexicalTranscriptStore;
-import com.videoagent.rag.vector.QdrantVectorStore;
+import com.videoagent.rag.vector.MilvusTranscriptStore;
 import com.videoagent.rag.vector.VectorPoint;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
@@ -40,7 +39,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Builds and tracks the RAG index lifecycle in MySQL (the source of truth),
- * while Qdrant holds the derived vector data. A short transcript never creates
+ * while Milvus holds the derived dense and BM25 data. A short transcript never creates
  * a vector index (NOT_REQUIRED). For RAG transcripts, the build deletes old
  * vectors first, then upserts with deterministic point ids so rebuilds replace
  * rather than accumulate.
@@ -57,8 +56,7 @@ public class RagIndexService {
     private final ContextStrategyResolver strategyResolver;
     private final TranscriptChunker chunker;
     private final EmbeddingProvider embeddingProvider;
-    private final QdrantVectorStore vectorStore;
-    private final LexicalTranscriptStore lexicalStore;
+    private final MilvusTranscriptStore transcriptStore;
     private final RagProperties ragProperties;
     private final EmbeddingProperties embeddingProperties;
     private final TransactionTemplate transactionTemplate;
@@ -72,8 +70,7 @@ public class RagIndexService {
         ContextStrategyResolver strategyResolver,
         TranscriptChunker chunker,
         EmbeddingProvider embeddingProvider,
-        QdrantVectorStore vectorStore,
-        LexicalTranscriptStore lexicalStore,
+        MilvusTranscriptStore transcriptStore,
         RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
         Optional<PlatformTransactionManager> transactionManager,
@@ -85,8 +82,7 @@ public class RagIndexService {
         this.strategyResolver = strategyResolver;
         this.chunker = chunker;
         this.embeddingProvider = embeddingProvider;
-        this.vectorStore = vectorStore;
-        this.lexicalStore = lexicalStore;
+        this.transcriptStore = transcriptStore;
         this.ragProperties = ragProperties;
         this.embeddingProperties = embeddingProperties;
         this.transactionTemplate = transactionManager.map(TransactionTemplate::new).orElse(null);
@@ -100,14 +96,13 @@ public class RagIndexService {
         ContextStrategyResolver strategyResolver,
         TranscriptChunker chunker,
         EmbeddingProvider embeddingProvider,
-        QdrantVectorStore vectorStore,
-        LexicalTranscriptStore lexicalStore,
+        MilvusTranscriptStore transcriptStore,
         RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
         Optional<PlatformTransactionManager> transactionManager
     ) {
         this(indexRepository, segmentRepository, ownershipService, strategyResolver, chunker, embeddingProvider,
-            vectorStore, lexicalStore, ragProperties, embeddingProperties, transactionManager, AiUsageMetrics.noop());
+            transcriptStore, ragProperties, embeddingProperties, transactionManager, AiUsageMetrics.noop());
     }
 
     @Transactional(readOnly = true)
@@ -229,7 +224,7 @@ public class RagIndexService {
             List<TranscriptChunk> chunks = chunker.chunk(segments);
             List<String> texts = chunks.stream().map(TranscriptChunk::text).toList();
             List<float[]> vectors = embedDocuments(texts, telemetryContext);
-            vectorStore.ensureCollection(embeddingProperties.dimension());
+            transcriptStore.ensureCollection(embeddingProvider.dimension());
 
             List<VectorPoint> points = new ArrayList<>(chunks.size());
             for (int i = 0; i < chunks.size(); i++) {
@@ -245,9 +240,8 @@ public class RagIndexService {
                 ));
             }
             // Idempotent rebuild: clear old vectors for this video, then write.
-            vectorStore.deleteByVideoStrict(userId, videoId);
-            vectorStore.upsertPoints(userId, videoId, index.getAnalysisTaskId(), points);
-            lexicalStore.replace(userId, videoId, index.getAnalysisTaskId(), chunks);
+            transcriptStore.deleteByVideoStrict(userId, videoId);
+            transcriptStore.upsertPoints(userId, videoId, index.getAnalysisTaskId(), points);
 
             int ready = transactions().execute(status ->
                 indexRepository.markReady(index.getId(), buildToken, chunks.size(), LocalDateTime.now()));

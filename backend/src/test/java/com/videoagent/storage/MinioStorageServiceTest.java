@@ -23,20 +23,25 @@ class MinioStorageServiceTest {
 
     private final ObjectProvider<MinioClient> internalClientProvider = mock(ObjectProvider.class);
     private final ObjectProvider<MinioClient> publicPresignClientProvider = mock(ObjectProvider.class);
+    private final ObjectProvider<MinioClient> uploadPresignClientProvider = mock(ObjectProvider.class);
     private final MinioClient internalClient = mock(MinioClient.class);
     private final MinioClient publicPresignClient = mock(MinioClient.class);
+    private final MinioClient uploadPresignClient = mock(MinioClient.class);
     private MinioStorageService storageService;
 
     @BeforeEach
     void setUp() {
         when(internalClientProvider.getObject()).thenReturn(internalClient);
         when(publicPresignClientProvider.getObject()).thenReturn(publicPresignClient);
+        when(uploadPresignClientProvider.getObject()).thenReturn(uploadPresignClient);
         storageService = new MinioStorageService(
             internalClientProvider,
             publicPresignClientProvider,
+            uploadPresignClientProvider,
             new StorageProperties(
                 "http://minio.internal:9000",
                 "https://media.example.com",
+                "https://upload.example.com",
                 "access-key",
                 "secret-key",
                 "videoagent"
@@ -62,16 +67,16 @@ class MinioStorageServiceTest {
     }
 
     @Test
-    void shouldPresignPutWithPublicClient() throws Exception {
+    void shouldPresignPutWithDedicatedUploadGatewayClient() throws Exception {
         when(internalClient.bucketExists(any())).thenReturn(true);
-        when(publicPresignClient.getPresignedObjectUrl(any())).thenReturn("https://media.example.com/signed-put");
+        when(uploadPresignClient.getPresignedObjectUrl(any())).thenReturn("https://upload.example.com/signed-put");
 
         String url = storageService.presignPutObject("uploads/part-1", Duration.ofMinutes(15));
 
-        assertThat(url).isEqualTo("https://media.example.com/signed-put");
+        assertThat(url).isEqualTo("https://upload.example.com/signed-put");
         ArgumentCaptor<GetPresignedObjectUrlArgs> arguments =
             ArgumentCaptor.forClass(GetPresignedObjectUrlArgs.class);
-        verify(publicPresignClient).getPresignedObjectUrl(arguments.capture());
+        verify(uploadPresignClient).getPresignedObjectUrl(arguments.capture());
         assertThat(arguments.getValue().method()).isEqualTo(Method.PUT);
         assertThat(arguments.getValue().bucket()).isEqualTo("videoagent");
         assertThat(arguments.getValue().object()).isEqualTo("uploads/part-1");
