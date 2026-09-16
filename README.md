@@ -30,6 +30,7 @@ VideoAgent 是一个面向长视频的智能分析与问答系统。用户上传
 - **统一 RAG 索引**：所有有效字幕都按字幕边界切块，并建立 Milvus Dense 与 BM25 索引。
 - **混合检索**：Dense Retrieval 与 Milvus BM25 分别召回，应用层执行 RRF，截取最终 Top-K Evidence。
 - **证据约束问答**：检索始终绑定服务端确定的 `userId + videoId`；模型只返回请求内 Evidence ID，最终时间戳由后端映射真实字幕证据。
+- **紧凑视频工作区**：桌面端播放器与 AI Q&A 在左栏纵向排列并保持 `24px` 间距，右侧内容面板独立展示；小屏继续使用现有单列响应式布局。
 - **多轮会话记忆**：MySQL 保存持久会话，Redis 缓存最近历史；Redis 不可用时回退 MySQL。
 
 ## 系统架构

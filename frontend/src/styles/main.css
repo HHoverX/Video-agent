@@ -698,8 +698,7 @@ p {
   display: grid;
   grid-template-areas:
     "analysis analysis"
-    "player content"
-    "qa content"
+    "left content"
     "transcript transcript";
   grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr);
   gap: 24px;
@@ -708,6 +707,14 @@ p {
 
 .video-workspace__analysis {
   grid-area: analysis;
+}
+
+.video-workspace__left {
+  grid-area: left;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .video-workspace__player {
@@ -728,7 +735,7 @@ p {
 
 .video-workspace > .analysis-panel,
 .video-workspace > .summary-panel,
-.video-workspace > .qa-panel,
+.video-workspace__left > .qa-panel,
 .video-workspace > .transcript-panel {
   margin-top: 0;
 }
@@ -1353,6 +1360,10 @@ p {
       "qa"
       "transcript";
     grid-template-columns: 1fr;
+  }
+
+  .video-workspace__left {
+    display: contents;
   }
 }
 

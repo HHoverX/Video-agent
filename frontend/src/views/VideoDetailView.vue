@@ -436,11 +436,25 @@ onBeforeUnmount(() => {
           @start="handleStartAnalysis"
           @retry="handleStartAnalysis"
         />
-        <VideoPlayer
-          ref="playerRef"
-          class="detail-visual video-workspace__player"
-          :video-id="video.id"
-        />
+        <div class="video-workspace__left">
+          <VideoPlayer
+            ref="playerRef"
+            class="detail-visual video-workspace__player"
+            :video-id="video.id"
+          />
+          <VideoQaPanel
+            :key="video.id"
+            class="video-workspace__qa"
+            :rag-status="ragStatus"
+            :loading="qaLoading"
+            :building="buildingIndex"
+            :error="qaError"
+            :result="qaResult"
+            @ask="handleAsk"
+            @prepare="handleBuildIndex"
+            @seek="handleSeek"
+          />
+        </div>
         <AiContentPanel
           class="video-workspace__content"
           :summary="summary"
@@ -448,18 +462,6 @@ onBeforeUnmount(() => {
           :key-points="keyPoints"
           :loading="summaryLoading"
           :error="summaryError"
-          @seek="handleSeek"
-        />
-        <VideoQaPanel
-          :key="video.id"
-          class="video-workspace__qa"
-          :rag-status="ragStatus"
-          :loading="qaLoading"
-          :building="buildingIndex"
-          :error="qaError"
-          :result="qaResult"
-          @ask="handleAsk"
-          @prepare="handleBuildIndex"
           @seek="handleSeek"
         />
         <TranscriptPanel
