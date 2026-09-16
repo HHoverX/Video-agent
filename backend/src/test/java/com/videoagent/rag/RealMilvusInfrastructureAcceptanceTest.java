@@ -72,7 +72,7 @@ class RealMilvusInfrastructureAcceptanceTest {
             List<VectorPoint> dense = store.searchDense(
                 userA, videoA, embeddingProvider.embedQuery("Redis distributed lock"), 10);
             List<LexicalChunk> bm25 = store.searchLexical(userA, videoA, "Redis", 10);
-            List<HybridCandidate> hybrid = fusion.fuse(videoA, dense, bm25, 60, 10);
+            List<HybridCandidate> hybrid = fusion.fuse(videoA, dense, bm25, 60);
 
             System.out.println("REAL_MILVUS_DENSE=" + dense.stream()
                 .map(hit -> hit.chunkIndex() + ":" + hit.score() + ":" + hit.text()).toList());

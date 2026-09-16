@@ -42,10 +42,9 @@ import java.util.UUID;
  * M8.1 RAG infrastructure acceptance. Uses real MySQL, Redis, RocketMQ, MinIO,
  * FFmpeg and Milvus with Mock ASR / Mock Summary / Mock Embedding / Mock QA.
  *
- * PATH A (short transcript): DIRECT_CONTEXT, rag/status = NOT_REQUIRED, no
- * Milvus chunks, QA answers from the full transcript with timestamp citations.
+ * PATH A (short transcript): NOT_BUILT -> build -> READY -> retrieval.
  *
- * PATH B (long transcript): RAG, NOT_BUILT -> build -> READY -> retrieval ->
+ * PATH B (long transcript): NOT_BUILT -> build -> READY -> retrieval ->
  * grounded QA with chunk citations. Also verifies user isolation (A cannot
  * reach B's index / QA and Milvus never returns B's chunks for A's query).
  */
@@ -59,8 +58,8 @@ import java.util.UUID;
         "videoagent.ai.llm.provider=mock",
         "videoagent.rag.embedding.provider=mock",
         "videoagent.rag.embedding.dimension=384",
-        "videoagent.rag.direct-context-max-chars=8000",
-        "videoagent.rag.chunk-max-chars=4000"
+        "videoagent.rag.milvus.collection=video_transcript_chunks_m8_rag_test_384",
+        "videoagent.rag.chunk-target-tokens=600"
     }
 )
 class Milestone8RagInfrastructureIntegrationTest {
@@ -124,23 +123,20 @@ class Milestone8RagInfrastructureIntegrationTest {
     }
 
     @Test
-    void pathAShortTranscriptUsesDirectContextWithoutVectors() {
+    void pathAShortTranscriptBuildsAndUsesRagIndex() {
         long videoId = insertVideo(userA, "Short video");
         insertTranscript(videoId, userA.userId(), shortSegments());
 
         RagIndexStatusResponse status = ragStatus(videoId, userA);
-        assertThat(status.mode()).isEqualTo("DIRECT_CONTEXT");
-        assertThat(status.status()).isEqualTo("NOT_REQUIRED");
+        assertThat(status.status()).isEqualTo("NOT_BUILT");
 
-        // Build must not create vectors for DIRECT_CONTEXT.
         RagIndexStatusResponse afterBuild = ragBuild(videoId, userA);
-        assertThat(afterBuild.status()).isEqualTo("NOT_REQUIRED");
+        assertThat(afterBuild.status()).isEqualTo("READY");
         VideoRagIndexEntity index = ragIndexRepository.findByVideoId(videoId);
         assertThat(index).isNotNull();
-        assertThat(index.getChunkCount()).isZero();
+        assertThat(index.getChunkCount()).isGreaterThan(0);
 
         QaResponse qa = askQa(videoId, userA, "Redis 用于什么？");
-        assertThat(qa.mode()).isEqualTo("DIRECT_CONTEXT");
         assertThat(qa.answer()).contains("Redis");
         assertThat(qa.citations()).isNotEmpty();
         assertThat(qa.citations().getFirst().startMs()).isGreaterThanOrEqualTo(0);
@@ -166,7 +162,6 @@ class Milestone8RagInfrastructureIntegrationTest {
 
         // Build A's index.
         RagIndexStatusResponse built = ragBuild(videoA, userA);
-        assertThat(built.mode()).isEqualTo("RAG");
         assertThat(built.status()).isEqualTo("READY");
         assertThat(built.chunkCount()).isGreaterThan(0);
 
@@ -174,9 +169,8 @@ class Milestone8RagInfrastructureIntegrationTest {
         assertThat(builtB.status()).isEqualTo("READY");
         assertThat(builtB.chunkCount()).isGreaterThan(0);
 
-        // QA in RAG mode.
+        // QA through the READY RAG index.
         QaResponse qa = askQa(videoA, userA, "Redis 用来做什么？");
-        assertThat(qa.mode()).isEqualTo("RAG");
         assertThat(qa.answer()).isNotBlank();
         assertThat(qa.citations()).isNotEmpty();
 

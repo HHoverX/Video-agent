@@ -1,6 +1,6 @@
 # VideoAgent v1.0.0 FINAL AI Handoff
 
-> 历史说明：本文记录冻结的 v1.0.0 基线。当前工作区已将 Qdrant / MySQL FULLTEXT RAG 迁移为 Milvus Dense + BM25，并加入上传会话幂等和 Nginx 上传网关；当前行为以源码与 `README.md` 为准。
+> 本文已同步当前 Milvus Dense + BM25 + RRF 检索链路；当前行为仍以源码与 `README.md` 为准。
 >
 > 最后更新：2026-08-13
 > 最终基线：`v1.0.0` / `0d04a7fe73baf6f7309f31214687c78be736b0c4`
@@ -43,7 +43,7 @@ VideoAgent 是一个面向 Java 后端与 AI Application 工程学习的**模块
 | M6.5 | Real Provider 接入：DashScope ASR、Groq ASR adapter、OpenAI-compatible LLM；最终真实验收采用 DashScope + DeepSeek |
 | M6.6 | JWT、用户 ownership、Video CRUD、分页/模糊查询、Authenticated SSE |
 | M7 | Transactional Outbox、原子 Claim、有界重试、恢复、Heartbeat、Generation Fencing、Durable Resume |
-| M8.1 | Adaptive Basic RAG：DIRECT_CONTEXT 或 Chunk / Embedding / Qdrant / Top-K |
+| M8.1 | Basic RAG：Chunk / Embedding / Milvus Dense + BM25 / RRF / Top-K |
 | M8.2 | 有界 Agentic Retrieval：Planner、Validator、三种 Tool、Evidence 与 Citation Validation |
 
 v1.0.0 已封板：不进入 M8.3 / M9，不继续增加功能，不以“优化”为由改造架构或引入新技术栈。后续目标是学习源码、稳定演示、故障排查和面试准备。
@@ -59,7 +59,7 @@ v1.0.0 已封板：不进入 M8.3 / M9，不继续增加功能，不以“优化
 - RocketMQ 5.3.2（NameServer + 单 Broker）；RocketMQ Spring Starter 2.3.2
 - MinIO Object Storage
 - LangChain4j 1.18.0、OpenAI-compatible Chat / Embedding API
-- Qdrant 1.12.4（REST adapter）
+- Milvus 2.6.22
 - Maven、JUnit 5、Spring Boot Test、Mockito
 
 ### Media / AI
@@ -88,7 +88,7 @@ Windows Host
     ├── MinIO
     ├── RocketMQ NameServer
     ├── RocketMQ Broker
-    └── Qdrant
+    └── Milvus
 ```
 
 Spring Boot 与 Vue 默认在 Host 运行，通过宿主机端口连接 Docker 中间件；Compose 不包含后端或前端容器。
@@ -121,9 +121,9 @@ Vue Browser
 ```text
 Question + owned video
   → load latest successful Transcript
-  → transcript chars <= threshold: DIRECT_CONTEXT → full segments → LLM
-  → transcript chars > threshold: RAG → query embedding → Qdrant top-K → LLM
-  → backend citation mapping from supplied Segment / retrieved Chunk metadata
+  → require RAG index READY
+  → Dense Top-K + BM25 Top-K → RRF → final Top-K Evidence → LLM
+  → backend citation mapping from retrieved Chunk metadata
 ```
 
 ### M8.2 Agentic Retrieval
@@ -140,15 +140,15 @@ Question + server-bound context
 
 它只有一次规划、一次执行、一次合成；没有 ReAct 循环、反思循环或自主扩权。
 
-## 5. MySQL / Redis / RocketMQ / MinIO / Qdrant 职责
+## 5. MySQL / Redis / RocketMQ / MinIO / Milvus 职责
 
 | 组件 | 当前职责 | 明确边界 |
 | --- | --- | --- |
-| MySQL | 用户、视频 metadata / object key、任务状态、Outbox、Transcript、Summary、RAG index 生命周期；最终业务事实来源 | 不保存视频二进制；不能与 RocketMQ、MinIO、Qdrant 做一个原子事务 |
+| MySQL | 用户、视频 metadata / object key、任务状态、Outbox、Transcript、Summary、RAG index 生命周期；最终业务事实来源 | 不保存视频二进制；不能与 RocketMQ、MinIO、Milvus 做一个原子事务 |
 | Redis | `video:analysis:progress:{taskId}` 实时进度快照与 TTL | Best-effort cache；不参与 Claim、Retry、Resume、Recovery、Fencing 或终态判断；不保存 Session |
 | RocketMQ | At-least-once 异步传递分析消息，解耦 HTTP 与长耗时媒体/AI 处理 | 可能重复投递；不传视频、Transcript 或大对象；不是 Exactly Once |
 | MinIO | 保存原始上传视频，供分析 Worker 下载 | 不保存 ownership、任务状态或分析结果；删除后的对象清理是 best-effort |
-| Qdrant | 保存 Transcript Chunk 的向量和检索 metadata，执行相似度搜索 | 是可从 MySQL Transcript 重建的 Derived Index，不是业务事实来源 |
+| Milvus | 保存 Transcript Chunk、Dense Vector 和由 BM25 Function 生成的 Sparse Vector，执行混合检索 | 是可从 MySQL Transcript 重建的 Derived Index，不是业务事实来源 |
 
 SSE 是进程内观察通道。浏览器断开、SSE 发送失败或 Redis key 丢失不会取消后台任务；查询可回退 MySQL。
 
@@ -168,7 +168,7 @@ Authorization: Bearer <JWT>
 - Video、Analysis、SSE、Transcript、Summary、RAG、Agentic QA 均在服务端执行 ownership 检查。
 - 跨用户资源访问统一返回 404，避免泄露资源是否存在。
 - Planner schema 和 Tool 参数不包含 `userId` / `videoId`；LLM 不能选择身份、资源或权限。
-- M8.1 / M8.2 的检索隔离由两层约束组成：先在 MySQL 执行 video ownership 校验，再在 Qdrant payload filter 中同时约束 `userId = currentUserId` 与 `videoId = 当前视频`。不能只依赖向量相似度或 Planner 输出限定检索范围。
+- M8.1 / M8.2 的检索隔离由两层约束组成：先在 MySQL 执行 video ownership 校验，再在 Milvus filter 中同时约束 `userId = currentUserId` 与 `videoId = 当前视频`。不能只依赖检索分数或 Planner 输出限定检索范围。
 - 当前没有 RBAC、ACL、管理员、OAuth2/SSO、refresh token、服务端 revoke list 或多设备 Session 管理；前端 JWT 存在 `localStorage` 的 XSS 权衡。
 
 ## 7. Provider 边界
@@ -264,32 +264,27 @@ stale PROCESSING ──recovery──> RETRY_WAITING | FAILED
 - Crash Recovery 默认需要等待 Lease；Outbox 轮询会引入发布延迟。
 - 没有 DLQ 管理界面、手动重试 UI 或跨服务分布式追踪。
 
-## 9. M8.1 Adaptive RAG 最终实现
+## 9. M8.1 RAG 最终实现
 
-上下文策略依据 Transcript 字符数，而不是视频时长：
+所有有效 Transcript 都建立 RAG 索引：
 
 ```text
-transcriptChars <= RAG_DIRECT_CONTEXT_MAX_CHARS (default 8000)
-  → DIRECT_CONTEXT / NOT_REQUIRED
-  → 全量 Transcript Segments 直接进入 QA Context
-  → 不调用 Embedding 或 Qdrant
-
-transcriptChars > threshold
-  → RAG / NOT_BUILT
-  → build: Chunk → batch Embedding → Qdrant
-  → query: Question Embedding → Qdrant payload filter
-           (userId=currentUserId AND videoId=当前视频) → Top-K (default 5)
+Transcript
+  → NOT_BUILT
+  → build: ASR Segment 原子边界 + 本地近似 Token Target 分块 → batch Embedding → Milvus Dense + BM25
+  → query: Dense Top-K + BM25 Top-K
+           → RRF → final Top-K (default 5)
   → retrieved Chunks 进入 QA Context
 ```
 
-- `video_rag_index` 生命周期为 `NOT_REQUIRED / NOT_BUILT / BUILDING / READY / FAILED`，与 Analysis 状态机分离。
+- `video_rag_index` 生命周期为 `NOT_BUILT / BUILDING / READY / FAILED`，与 Analysis 状态机分离。
+- Chunk 默认目标为本地估算的约 600 Token，并重叠 1 个完整 ASR Segment；该估算不等同于托管 `text-embedding-v4` 的精确 Tokenizer，600 也不是模型的 8192 Token 输入上限。
 - Index build 当前是同步请求；BUILDING Claim 使用短 MySQL 事务先提交，防止并发重复构建。
 - Rebuild 严格删除旧 vectors 后再 upsert deterministic point IDs；删除失败则构建失败，不把混合索引标记 READY。
 - RAG 查询和 Agentic `SEARCH_TRANSCRIPT` 在执行时重新 `requireReady()`，不只相信规划前快照。
-- DIRECT citation 只接受本次提供的 Segment Index；RAG citation 只接受本次 Top-K 返回的 Chunk Index。
-- Citation 的文本和时间戳来自 MySQL / Qdrant metadata，不采用 LLM 自报 timestamp。
-- 隔离不是笼统的“相似度过滤”：服务层先通过 MySQL ownership 校验当前用户是否拥有视频，向量检索再用 Qdrant payload filter 同时约束 `userId=currentUserId` 与 `videoId=当前视频`。
-- MySQL 保存 Transcript 和索引生命周期，是事实来源；Qdrant 保存可重建的派生向量。两者没有原子事务，通过失败状态和 rebuild 收敛。
+- Citation 只接受本次 Top-K 返回的 Chunk Index；文本和时间戳来自 Milvus Chunk metadata，不采用 LLM 自报 timestamp。
+- 隔离不是笼统的“相似度过滤”：服务层先通过 MySQL ownership 校验当前用户是否拥有视频，检索再用 Milvus filter 同时约束 `userId=currentUserId` 与 `videoId=当前视频`。
+- MySQL 保存 Transcript 和索引生命周期，是事实来源；Milvus 保存可重建的派生索引。两者没有原子事务，通过失败状态和 rebuild 收敛。
 - 当前业务键限制同一 `videoId + analysisType + modelVersion` 只能创建一个 AnalysisTask；这也是当前 Transcript / RAG versioning 的业务边界，不应声称支持任意重新分析版本。
 
 ## 10. M8.2 Agentic Retrieval 最终实现
@@ -313,8 +308,8 @@ Question
 | Tool | 用途 | 数据路径 |
 | --- | --- | --- |
 | `GET_VIDEO_SUMMARY` | “这个视频主要讲了什么？” | 读取 MySQL 已持久化 Summary / Chapters / Key Points；不重新调用 Summary Provider；无伪造时间戳 |
-| `GET_TRANSCRIPT_BY_TIME` | “第 10 分钟讲了什么？” | 以 `analysisTaskId + videoId + time range` 在 MySQL 做区间查询；不调用 Embedding / Qdrant |
-| `SEARCH_TRANSCRIPT` | 语义问题或比较问题 | DIRECT_CONTEXT 返回完整短 Transcript；RAG 模式执行 Embedding + Qdrant Top-K，可进行有界多查询分解 |
+| `GET_TRANSCRIPT_BY_TIME` | “第 10 分钟讲了什么？” | 以 `analysisTaskId + videoId + time range` 在 MySQL 做区间查询；不调用 Embedding / Milvus |
+| `SEARCH_TRANSCRIPT` | 语义问题或比较问题 | 检查 RAG READY，执行 Dense + BM25 检索与 RRF 融合；可进行有界多查询分解 |
 
 Plan schema 只接受封闭 Tool enum，不允许任意 Tool 名称，也不包含 `userId` 或 `videoId`。多 Action 只允许受控的 `SEARCH_TRANSCRIPT` 组合；最终 strategy 由后端根据已验证 Action 推导，不信任 Planner 自报的 intent / label。
 
@@ -335,9 +330,9 @@ Plan schema 只接受封闭 Tool enum，不允许任意 Tool 名称，也不包�
 ### 架构与运行限制
 
 - 模块化单体，不是微服务；未证明百万 QPS、高可用集群或生产级多实例部署。
-- Docker Compose 使用单 MySQL、单 Redis、单 MinIO、单 RocketMQ Broker、单 Qdrant；没有基础设施 HA。
+- Docker Compose 使用单 MySQL、单 Redis、单 MinIO、单 RocketMQ Broker、单 Milvus；没有基础设施 HA。
 - SSE subscriptions 保存在单应用实例内存，无 Redis Pub/Sub；多实例广播和粘性路由未实现。
-- MinIO / Qdrant 删除发生在 MySQL 删除提交后，属于 best-effort cleanup，失败可能留下不可达 orphan data。
+- MinIO / Milvus 删除发生在 MySQL 删除提交后，属于 best-effort cleanup，失败可能留下不可达 orphan data。
 - JWT 没有 refresh / revoke；logout 只清除前端状态，已签发 Token 在过期前仍可验证。
 
 ### Reliability 非声明
@@ -349,8 +344,8 @@ Plan schema 只接受封闭 Tool enum，不允许任意 Tool 名称，也不包�
 
 ### RAG / Agent 非声明
 
-- MySQL + Qdrant 不是强一致；Qdrant 是 derived index。
-- Basic RAG 是 dense embedding + single-query Top-K；没有 BM25、Hybrid Search、Reranker、Cross-Encoder、Self-RAG 或 CRAG，也没有 `RAG_MIN_SCORE`。
+- MySQL + Milvus 不是强一致；Milvus 是 derived index。
+- Basic RAG 使用 Dense + BM25 + RRF 混合检索；没有 Cross-Encoder、Self-RAG 或 CRAG，也没有 `RAG_MIN_SCORE`。
 - RAG index build 是同步的；非常长的 Transcript 可能增加请求时间和成本。
 - 检索可能受 Chunk 边界、Embedding 质量和 Top-K 影响，不保证每次召回最佳证据。
 - Agentic Retrieval 是单轮、有界、面向视频证据的 Tool Router，不是通用 Autonomous Agent、Multi-Agent、MCP、GraphRAG、Memory Agent 或 exactly-correct intent classifier。

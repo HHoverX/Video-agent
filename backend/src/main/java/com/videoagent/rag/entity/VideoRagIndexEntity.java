@@ -14,8 +14,6 @@ public class VideoRagIndexEntity {
     private Long videoId;
     private Long analysisTaskId;
     private String status;
-    private String contextMode;
-    private Integer transcriptChars;
     private Integer chunkCount;
     private String embeddingProvider;
     private String embeddingModel;
@@ -57,22 +55,6 @@ public class VideoRagIndexEntity {
 
     public void setStatus(String status) {
         this.status = status;
-    }
-
-    public String getContextMode() {
-        return contextMode;
-    }
-
-    public void setContextMode(String contextMode) {
-        this.contextMode = contextMode;
-    }
-
-    public Integer getTranscriptChars() {
-        return transcriptChars;
-    }
-
-    public void setTranscriptChars(Integer transcriptChars) {
-        this.transcriptChars = transcriptChars;
     }
 
     public Integer getChunkCount() {

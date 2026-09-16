@@ -19,9 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const question = ref('')
-const canAsk = computed(
-  () => props.ragStatus?.mode === 'DIRECT_CONTEXT' || props.ragStatus?.status === 'READY',
-)
+const canAsk = computed(() => props.ragStatus?.status === 'READY')
 
 function ask() {
   const value = question.value.trim()
@@ -55,7 +53,7 @@ function ask() {
       </div>
     </div>
     <div v-else-if="ragStatus.status === 'NOT_BUILT'" class="qa-body">
-      <p class="qa-hint">该视频内容较长，需要先准备视频问答。</p>
+      <p class="qa-hint">需要先准备视频问答。</p>
       <el-button :loading="building" @click="emit('prepare')">准备视频问答</el-button>
     </div>
     <div v-else-if="ragStatus.status === 'BUILDING'" class="qa-body">

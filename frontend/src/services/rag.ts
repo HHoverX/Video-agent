@@ -1,14 +1,11 @@
 import { api } from './api'
 
-export type QaContextMode = 'DIRECT_CONTEXT' | 'RAG'
-export type RagIndexStatus = 'NOT_REQUIRED' | 'NOT_BUILT' | 'BUILDING' | 'READY' | 'FAILED'
+export type RagIndexStatus = 'NOT_BUILT' | 'BUILDING' | 'READY' | 'FAILED'
 
 export interface RagIndexStatusResponse {
-  mode: QaContextMode
   status: RagIndexStatus
   chunkCount: number | null
   embeddingModel: string | null
-  transcriptChars: number | null
   lastErrorCode: string | null
   lastErrorMessage: string | null
 }
@@ -27,7 +24,6 @@ export interface AgenticCitation {
 }
 
 export interface QaResponse {
-  mode: QaContextMode
   answer: string
   citations: QaCitation[]
 }
@@ -35,7 +31,6 @@ export interface QaResponse {
 export interface AgenticQaResponse {
   answer: string
   strategy: string
-  contextMode: string | null
   toolsUsed: string[]
   citations: AgenticCitation[]
 }

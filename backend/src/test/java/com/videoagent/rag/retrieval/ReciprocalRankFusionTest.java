@@ -18,7 +18,7 @@ class ReciprocalRankFusionTest {
             lexical(9, 2, "C", 9.0), lexical(9, 3, "D", 8.0), lexical(9, 0, "A", 7.0)
         );
 
-        List<HybridCandidate> result = new ReciprocalRankFusion().fuse(7L, dense, lexical, 60, 10);
+        List<HybridCandidate> result = new ReciprocalRankFusion().fuse(7L, dense, lexical, 60);
 
         assertThat(result).extracting(HybridCandidate::text).containsExactly("A", "C", "B", "D");
         assertThat(result).extracting(HybridCandidate::chunkId).doesNotHaveDuplicates();

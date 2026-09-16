@@ -10,7 +10,6 @@ import java.util.List;
 public record AgenticQaResponse(
     String answer,
     String strategy,
-    String contextMode,
     List<String> toolsUsed,
     List<AgenticCitation> citations
 ) {

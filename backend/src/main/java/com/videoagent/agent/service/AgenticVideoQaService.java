@@ -19,8 +19,6 @@ import com.videoagent.agent.qa.AgenticQaResult;
 import com.videoagent.agent.tool.AgenticToolExecutor;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.context.ContextStrategyResolver;
-import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.dto.QaResponse;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
 import com.videoagent.rag.service.RagIndexService;
@@ -61,7 +59,6 @@ public class AgenticVideoQaService {
     private final VideoTranscriptSegmentRepository segmentRepository;
     private final VideoSummaryService summaryService;
     private final RagIndexService ragIndexService;
-    private final ContextStrategyResolver strategyResolver;
     private final RetrievalPlannerProvider planner;
     private final RetrievalPlanValidator planValidator;
     private final AgenticToolExecutor toolExecutor;
@@ -76,7 +73,6 @@ public class AgenticVideoQaService {
         VideoTranscriptSegmentRepository segmentRepository,
         VideoSummaryService summaryService,
         RagIndexService ragIndexService,
-        ContextStrategyResolver strategyResolver,
         RetrievalPlannerProvider planner,
         RetrievalPlanValidator planValidator,
         AgenticToolExecutor toolExecutor,
@@ -90,7 +86,6 @@ public class AgenticVideoQaService {
         this.segmentRepository = segmentRepository;
         this.summaryService = summaryService;
         this.ragIndexService = ragIndexService;
-        this.strategyResolver = strategyResolver;
         this.planner = planner;
         this.planValidator = planValidator;
         this.toolExecutor = toolExecutor;
@@ -119,7 +114,7 @@ public class AgenticVideoQaService {
             if (segments.isEmpty()) {
                 completionDelegatedToBasic = true;
                 AgenticQaResponse response = fallbackToBasic(
-                    videoId, userId, question, telemetryContext, context);
+                    videoId, userId, question, telemetryContext);
                 return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
@@ -143,7 +138,7 @@ public class AgenticVideoQaService {
                     plannerFailure.getClass().getSimpleName());
                 completionDelegatedToBasic = true;
                 AgenticQaResponse response = fallbackToBasic(
-                    videoId, userId, question, telemetryContext, context);
+                    videoId, userId, question, telemetryContext);
                 return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
@@ -165,7 +160,6 @@ public class AgenticVideoQaService {
                 AgenticQaResponse response = new AgenticQaResponse(
                     "根据当前视频内容无法确定。",
                     strategy.name(),
-                    context.contextMode() == null ? null : context.contextMode().name(),
                     toolsUsed,
                     List.of()
                 );
@@ -185,23 +179,19 @@ public class AgenticVideoQaService {
                 AgenticQaResponse response = new AgenticQaResponse(
                     "根据当前视频内容无法确定。",
                     strategy.name(),
-                    context.contextMode() == null ? null : context.contextMode().name(),
                     toolsUsed,
                     List.of()
                 );
                 return rememberSuccessfulTurn(userId, videoId, question, response);
             }
 
-            log.info("[requestId={}][userId={}][videoId={}][strategy={}][contextMode={}][toolCount={}][toolsUsed={}] agentic qa answered",
-                telemetryContext.requestId(), userId, videoId, strategy,
-                context.contextMode() == null ? null : context.contextMode().name(),
-                toolsUsed.size(), toolsUsed);
+            log.info("[requestId={}][userId={}][videoId={}][strategy={}][toolCount={}][toolsUsed={}] agentic qa answered",
+                telemetryContext.requestId(), userId, videoId, strategy, toolsUsed.size(), toolsUsed);
             outcome = "success";
             errorCategory = "none";
             AgenticQaResponse response = new AgenticQaResponse(
                 result.answer(),
                 strategy.name(),
-                context.contextMode() == null ? null : context.contextMode().name(),
                 toolsUsed,
                 citations
             );
@@ -225,10 +215,6 @@ public class AgenticVideoQaService {
         long userId,
         List<VideoTranscriptSegmentEntity> segments
     ) {
-        QaContextMode mode = segments.isEmpty()
-            ? null
-            : strategyResolver.resolveMode(segments);
-
         Long taskId = segments.isEmpty() ? null : segments.getFirst().getTaskId();
         boolean hasSummary = summaryService.getSummary(videoId, userId).isPresent();
         VideoRagIndexEntity index = ragIndexService.getStatus(videoId, userId, segments);
@@ -238,7 +224,6 @@ public class AgenticVideoQaService {
             userId,
             videoId,
             taskId,
-            mode,
             !segments.isEmpty(),
             hasSummary,
             ragStatus
@@ -249,8 +234,7 @@ public class AgenticVideoQaService {
         long videoId,
         long userId,
         String question,
-        QaTelemetryContext telemetryContext,
-        AgenticQaContext context
+        QaTelemetryContext telemetryContext
     ) {
         QaResponse basic = basicQaService.answerWithContext(
             videoId,
@@ -264,13 +248,11 @@ public class AgenticVideoQaService {
             : basic.citations().stream()
                 .map(c -> new AgenticCitation("TRANSCRIPT_SEARCH", c.startMs(), c.endMs(), c.text()))
                 .toList();
-        log.info("[requestId={}][userId={}][videoId={}][strategy=BASIC_FALLBACK][contextMode={}] agentic qa fell back to basic qa",
-            telemetryContext.requestId(), userId, videoId,
-            context.contextMode() == null ? null : context.contextMode().name());
+        log.info("[requestId={}][userId={}][videoId={}][strategy=BASIC_FALLBACK] agentic qa fell back to basic qa",
+            telemetryContext.requestId(), userId, videoId);
         return new AgenticQaResponse(
             basic.answer(),
             "BASIC_FALLBACK",
-            basic.mode(),
             List.of(),
             citations
         );

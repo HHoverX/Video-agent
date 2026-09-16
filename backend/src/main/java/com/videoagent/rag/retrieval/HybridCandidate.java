@@ -11,15 +11,9 @@ public record HybridCandidate(
     List<Integer> sourceSegmentIndexes,
     Float denseScore,
     Double lexicalScore,
-    double rrfScore,
-    Double rerankScore
+    double rrfScore
 ) {
     public HybridCandidate {
         sourceSegmentIndexes = sourceSegmentIndexes == null ? List.of() : List.copyOf(sourceSegmentIndexes);
-    }
-
-    public HybridCandidate withRerankScore(double score) {
-        return new HybridCandidate(chunkId, chunkIndex, text, startMs, endMs, sourceSegmentIndexes,
-            denseScore, lexicalScore, rrfScore, score);
     }
 }

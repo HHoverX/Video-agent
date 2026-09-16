@@ -6,7 +6,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.videoagent.agent.config.AgentProperties;
 import com.videoagent.agent.context.AgenticQaContext;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.context.QaContextMode;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,7 +17,7 @@ class RetrievalPlanValidatorTest {
     private final AgentProperties properties = new AgentProperties("mock", 4, 15_000L, 120_000L, 12, 12_000, "");
     private RetrievalPlanValidator validator;
     private final AgenticQaContext context = new AgenticQaContext(
-        1L, 7L, 3L, QaContextMode.RAG, true, true, "READY"
+        1L, 7L, 3L, true, true, "READY"
     );
 
     @BeforeEach

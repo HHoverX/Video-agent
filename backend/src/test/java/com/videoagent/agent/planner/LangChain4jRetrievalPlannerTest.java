@@ -16,7 +16,6 @@ import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalPlanValidator;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.telemetry.AiUsageMetrics;
 import com.videoagent.telemetry.QaTelemetryContext;
 
@@ -39,7 +38,7 @@ class LangChain4jRetrievalPlannerTest {
     private final AgentProperties properties =
         new AgentProperties("mock", 4, 15_000L, 120_000L, 12, 12_000, "");
     private final AgenticQaContext context =
-        new AgenticQaContext(1L, 7L, 3L, QaContextMode.RAG, true, true, "READY");
+        new AgenticQaContext(1L, 7L, 3L, true, true, "READY");
 
     @Test
     void shouldPreserveMissingTimeSoValidatorRejectsRealAdapterOutput() {

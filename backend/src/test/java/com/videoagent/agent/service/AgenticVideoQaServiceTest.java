@@ -37,8 +37,6 @@ import com.videoagent.agent.qa.AgenticQaResult;
 import com.videoagent.agent.tool.AgenticToolExecutor;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.config.RagProperties;
-import com.videoagent.rag.context.ContextStrategyResolver;
 import com.videoagent.rag.dto.QaCitation;
 import com.videoagent.rag.dto.QaResponse;
 import com.videoagent.rag.entity.RagIndexStatus;
@@ -78,8 +76,6 @@ class AgenticVideoQaServiceTest {
         new ConversationMemoryProperties(Duration.ofHours(24), 6, 256);
     private AgenticVideoQaService service;
 
-    private final RagProperties ragProperties = new RagProperties(100, 200, 1, 5, 0.0f);
-
     @BeforeEach
     void setUp() {
         when(conversationMemory.load(anyLong(), anyLong())).thenReturn(ConversationHistory.empty());
@@ -88,7 +84,6 @@ class AgenticVideoQaServiceTest {
             segmentRepository,
             summaryService,
             ragIndexService,
-            new ContextStrategyResolver(ragProperties),
             planner,
             planValidator,
             toolExecutor,
@@ -131,7 +126,6 @@ class AgenticVideoQaServiceTest {
         when(summaryService.getSummary(7L, 1L)).thenReturn(java.util.Optional.empty());
         VideoRagIndexEntity index = new VideoRagIndexEntity();
         index.setStatus(RagIndexStatus.NOT_BUILT.name());
-        index.setContextMode("RAG");
         when(ragIndexService.getStatus(eq(7L), eq(1L), anyList())).thenReturn(index);
         when(planner.plan(any(AgenticQaContext.class), eq("Redis 作用？"),
             any(ConversationHistory.class), any(QaTelemetryContext.class)))
@@ -245,7 +239,7 @@ class AgenticVideoQaServiceTest {
             eq(7L), eq(1L), eq("问题"), any(QaTelemetryContext.class),
             eq(QaTelemetryRoute.AGENTIC_FALLBACK_BASIC)
         ))
-            .thenReturn(new QaResponse("DIRECT_CONTEXT", "基础答案", List.of(new QaCitation(0, 2000, "short"))));
+            .thenReturn(new QaResponse("基础答案", List.of(new QaCitation(0, 2000, "short"))));
 
         AgenticQaResponse response = service.answerAgentic(7L, 1L, "问题");
 
@@ -279,7 +273,7 @@ class AgenticVideoQaServiceTest {
         when(basicQaService.answerWithContext(
             eq(7L), eq(1L), eq("问题"), any(QaTelemetryContext.class),
             eq(QaTelemetryRoute.AGENTIC_FALLBACK_BASIC)
-        )).thenReturn(new QaResponse("DIRECT_CONTEXT", "基础答案", List.of()));
+        )).thenReturn(new QaResponse("基础答案", List.of()));
 
         Logger logger = (Logger) LoggerFactory.getLogger(AgenticVideoQaService.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -365,7 +359,7 @@ class AgenticVideoQaServiceTest {
             eq(7L), eq(1L), eq("q"), any(QaTelemetryContext.class),
             eq(QaTelemetryRoute.AGENTIC_FALLBACK_BASIC)
         ))
-            .thenReturn(new QaResponse("RAG", "basic", List.of()));
+            .thenReturn(new QaResponse("basic", List.of()));
 
         AgenticQaResponse response = service.answerAgentic(7L, 1L, "q");
 

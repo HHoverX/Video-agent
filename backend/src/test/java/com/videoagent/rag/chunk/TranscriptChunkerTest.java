@@ -12,14 +12,82 @@ import java.util.List;
 
 class TranscriptChunkerTest {
 
-    private final RagProperties properties = new RagProperties(1000, 200, 1, 5, 0.0f);
-    private final TranscriptChunker chunker = new TranscriptChunker(properties);
+    @Test
+    void shouldMergeSegmentsUntilCandidateExceedsTarget() {
+        TokenEstimator estimator = text -> switch (text) {
+            case "S1" -> 100;
+            case "S1\nS2" -> 280;
+            case "S1\nS2\nS3" -> 480;
+            case "S1\nS2\nS3\nS4" -> 730;
+            case "S3\nS4" -> 450;
+            default -> 250;
+        };
+
+        List<TranscriptChunk> chunks = chunker(600, 1, estimator).chunk(List.of(
+            segment(0, 0, 1000, "S1"),
+            segment(1, 1000, 2000, "S2"),
+            segment(2, 2000, 3000, "S3"),
+            segment(3, 3000, 4000, "S4")
+        ));
+
+        assertThat(chunks).hasSize(2);
+        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(0, 1, 2);
+        assertThat(chunks.getFirst().text()).isEqualTo("S1\nS2\nS3");
+        assertThat(chunks.get(1).sourceSegmentIndexes()).containsExactly(2, 3);
+    }
+
+    @Test
+    void shouldOverlapByOneWholeSegment() {
+        List<TranscriptChunk> chunks = chunker(3, 1, String::length).chunk(List.of(
+            segment(0, 0, 1000, "a"),
+            segment(1, 1000, 2000, "b"),
+            segment(2, 2000, 3000, "c"),
+            segment(3, 3000, 4000, "d")
+        ));
+
+        assertThat(chunks).hasSize(3);
+        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(0, 1);
+        assertThat(chunks.get(1).sourceSegmentIndexes()).containsExactly(1, 2);
+        assertThat(chunks.get(2).sourceSegmentIndexes()).containsExactly(2, 3);
+    }
+
+    @Test
+    void shouldKeepOversizedSegmentAtomic() {
+        List<TranscriptChunk> chunks = chunker(600, 1, text -> 800).chunk(List.of(
+            segment(7, 1000, 5000, "oversized segment")
+        ));
+
+        assertThat(chunks).hasSize(1);
+        assertThat(chunks.getFirst().text()).isEqualTo("oversized segment");
+        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(7);
+    }
+
+    @Test
+    void shouldReturnFinalChunkBelowTarget() {
+        TokenEstimator estimator = text -> switch (text) {
+            case "S1", "S2" -> 250;
+            case "S3" -> 100;
+            case "S1\nS2" -> 500;
+            case "S1\nS2\nS3" -> 700;
+            default -> 700;
+        };
+
+        List<TranscriptChunk> chunks = chunker(600, 0, estimator).chunk(List.of(
+            segment(0, 0, 1000, "S1"),
+            segment(1, 1000, 2000, "S2"),
+            segment(2, 2000, 3000, "S3")
+        ));
+
+        assertThat(chunks).hasSize(2);
+        assertThat(chunks.get(1).text()).isEqualTo("S3");
+    }
 
     @Test
     void shouldChunkSingleSegment() {
-        List<TranscriptChunk> chunks = chunker.chunk(List.of(
+        List<TranscriptChunk> chunks = chunker(600, 1, text -> 10).chunk(List.of(
             segment(0, 0, 5000, "only segment")
         ));
+
         assertThat(chunks).hasSize(1);
         assertThat(chunks.getFirst().chunkIndex()).isZero();
         assertThat(chunks.getFirst().text()).isEqualTo("only segment");
@@ -29,77 +97,74 @@ class TranscriptChunkerTest {
     }
 
     @Test
-    void shouldAggregateMultipleAdjacentSegments() {
-        List<TranscriptChunk> chunks = chunker.chunk(List.of(
-            segment(0, 0, 2000, "first"),
-            segment(1, 2000, 4000, "second"),
-            segment(2, 4000, 6000, "third")
+    void shouldHandleEmptyTranscript() {
+        assertThat(chunker(600, 1, text -> 1).chunk(List.of())).isEmpty();
+    }
+
+    @Test
+    void shouldAlwaysAdvanceWhenOverlapExceedsChunkSize() {
+        List<TranscriptChunk> chunks = chunker(1, 99, String::length).chunk(List.of(
+            segment(0, 0, 1000, "a"),
+            segment(1, 1000, 2000, "b"),
+            segment(2, 2000, 3000, "c")
         ));
-        assertThat(chunks).hasSize(1);
-        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(0, 1, 2);
-        assertThat(chunks.getFirst().startMs()).isZero();
-        assertThat(chunks.getFirst().endMs()).isEqualTo(6000L);
-        assertThat(chunks.getFirst().text()).isEqualTo("first\nsecond\nthird");
-    }
 
-    @Test
-    void shouldSplitWhenMaxCharsReached() {
-        // Each segment is 150 chars; max is 200 -> first chunk takes one,
-        // second chunk takes the next.
-        List<VideoTranscriptSegmentEntity> segments = List.of(
-            segment(0, 0, 2000, "a".repeat(150)),
-            segment(1, 2000, 4000, "b".repeat(150)),
-            segment(2, 4000, 6000, "c".repeat(150))
-        );
-        List<TranscriptChunk> chunks = chunker.chunk(segments);
-        assertThat(chunks.size()).isGreaterThan(1);
-        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(0);
-        assertThat(chunks.get(1).sourceSegmentIndexes()).containsExactly(1);
-    }
-
-    @Test
-    void shouldApplyOverlap() {
-        // max=200, each segment 80 chars: two fit (160) but three do not (240).
-        // chunk1=[0,1]; overlap by 1 -> chunk2 starts at 1 -> [1,2]; chunk3=[2,3].
-        List<VideoTranscriptSegmentEntity> segments = List.of(
-            segment(0, 0, 1000, "a".repeat(80)),
-            segment(1, 1000, 2000, "b".repeat(80)),
-            segment(2, 2000, 3000, "c".repeat(80)),
-            segment(3, 3000, 4000, "d".repeat(80))
-        );
-        List<TranscriptChunk> chunks = chunker.chunk(segments);
         assertThat(chunks).hasSize(3);
-        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(0, 1);
-        assertThat(chunks.get(1).sourceSegmentIndexes()).containsExactly(1, 2);
-        assertThat(chunks.get(2).sourceSegmentIndexes()).containsExactly(2, 3);
+        assertThat(chunks).extracting(TranscriptChunk::sourceSegmentIndexes)
+            .containsExactly(List.of(0), List.of(1), List.of(2));
     }
 
     @Test
-    void shouldPreserveTimestampOrdering() {
-        // Deliberately unsorted input; output must be time-ordered.
+    void shouldPreserveTimestampAndSourceIndexesAfterSorting() {
         List<VideoTranscriptSegmentEntity> shuffled = new ArrayList<>(List.of(
             segment(0, 0, 1000, "zero"),
             segment(2, 4000, 6000, "two"),
             segment(1, 1000, 4000, "one")
         ));
-        List<TranscriptChunk> chunks = chunker.chunk(shuffled);
+
+        List<TranscriptChunk> chunks = chunker(600, 1, text -> 10).chunk(shuffled);
+
         assertThat(chunks).hasSize(1);
         assertThat(chunks.getFirst().startMs()).isZero();
         assertThat(chunks.getFirst().endMs()).isEqualTo(6000L);
         assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(0, 1, 2);
+        assertThat(chunks.getFirst().text()).isEqualTo("zero\none\ntwo");
     }
 
     @Test
-    void shouldHandleEmptyTranscript() {
-        assertThat(chunker.chunk(List.of())).isEmpty();
+    void shouldEstimateTheFinalNewlineJoinedText() {
+        List<String> estimatedTexts = new ArrayList<>();
+        TokenEstimator estimator = text -> {
+            estimatedTexts.add(text);
+            return 1;
+        };
+
+        chunker(600, 1, estimator).chunk(List.of(
+            segment(0, 0, 1000, "first"),
+            segment(1, 1000, 2000, "second")
+        ));
+
+        assertThat(estimatedTexts).containsExactly("first", "first\nsecond");
     }
 
     @Test
-    void shouldHandleSingleSegmentExceedingMaxChars() {
-        VideoTranscriptSegmentEntity giant = segment(0, 0, 5000, "g".repeat(5000));
-        List<TranscriptChunk> chunks = chunker.chunk(List.of(giant));
+    void shouldSkipBlankSegmentsInsteadOfCreatingEmptyChunks() {
+        List<TranscriptChunk> chunks = chunker(600, 1, text -> 1).chunk(List.of(
+            segment(0, 0, 1000, " "),
+            segment(1, 1000, 2000, "kept"),
+            segment(2, 2000, 3000, "")
+        ));
+
         assertThat(chunks).hasSize(1);
-        assertThat(chunks.getFirst().text()).hasSize(5000);
+        assertThat(chunks.getFirst().text()).isEqualTo("kept");
+        assertThat(chunks.getFirst().sourceSegmentIndexes()).containsExactly(1);
+    }
+
+    private TranscriptChunker chunker(int targetTokens, int overlapSegments, TokenEstimator estimator) {
+        return new TranscriptChunker(
+            new RagProperties(targetTokens, overlapSegments, 5, 0.0f),
+            estimator
+        );
     }
 
     private VideoTranscriptSegmentEntity segment(int index, long startMs, long endMs, String text) {

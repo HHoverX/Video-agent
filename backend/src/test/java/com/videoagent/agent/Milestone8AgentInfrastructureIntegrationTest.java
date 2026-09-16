@@ -63,9 +63,9 @@ import java.util.UUID;
         "videoagent.ai.llm.provider=mock",
         "videoagent.rag.embedding.provider=mock",
         "videoagent.rag.embedding.dimension=384",
+        "videoagent.rag.milvus.collection=video_transcript_chunks_m8_agent_test_384",
         "videoagent.agent.planner-provider=mock",
-        "videoagent.agent.max-tool-calls=4",
-        "videoagent.rag.direct-context-max-chars=8000"
+        "videoagent.agent.max-tool-calls=4"
     }
 )
 class Milestone8AgentInfrastructureIntegrationTest {

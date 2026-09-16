@@ -4,6 +4,8 @@ import com.videoagent.rag.config.RagProperties;
 import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
 
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -20,14 +22,19 @@ import java.util.Set;
 @Component
 public class TranscriptChunker {
 
-    private final RagProperties properties;
+    private static final Logger log = LoggerFactory.getLogger(TranscriptChunker.class);
 
-    public TranscriptChunker(RagProperties properties) {
+    private final RagProperties properties;
+    private final TokenEstimator tokenEstimator;
+
+    public TranscriptChunker(RagProperties properties, TokenEstimator tokenEstimator) {
         this.properties = properties;
+        this.tokenEstimator = tokenEstimator;
     }
 
     public List<TranscriptChunk> chunk(List<VideoTranscriptSegmentEntity> segments) {
         List<VideoTranscriptSegmentEntity> ordered = segments.stream()
+            .filter(segment -> segment.getText() != null && !segment.getText().isBlank())
             .sorted(Comparator
                 .comparing(VideoTranscriptSegmentEntity::getSegmentIndex,
                     Comparator.nullsLast(Comparator.naturalOrder()))
@@ -46,18 +53,17 @@ public class TranscriptChunker {
             int end = cursor;
             while (end < ordered.size()) {
                 VideoTranscriptSegmentEntity segment = ordered.get(end);
-                if (builder.canAdd(segment, properties.chunkMaxChars())) {
+                int estimatedTokens = tokenEstimator.estimateTokens(builder.textWith(segment));
+                if (builder.isEmpty() || estimatedTokens <= properties.chunkTargetTokens()) {
                     builder.add(segment);
+                    if (builder.size() == 1 && estimatedTokens > properties.chunkTargetTokens()) {
+                        log.warn("[segmentIndex={}][estimatedTokens={}][chunkTargetTokens={}] transcript segment exceeds chunk target and remains atomic",
+                            segment.getSegmentIndex(), estimatedTokens, properties.chunkTargetTokens());
+                    }
                     end++;
                 } else {
                     break;
                 }
-            }
-            // At least one segment is always in a chunk even if a single
-            // segment exceeds the max char budget.
-            if (builder.isEmpty() && end < ordered.size()) {
-                builder.add(ordered.get(end));
-                end++;
             }
             chunks.add(builder.build());
             chunkIndex++;
@@ -78,22 +84,25 @@ public class TranscriptChunker {
         private final int chunkIndex;
         private final List<VideoTranscriptSegmentEntity> segments = new ArrayList<>();
         private final Set<Integer> sourceSegmentIndexes = new LinkedHashSet<>();
-        private long textLength = 0;
+        private final StringBuilder text = new StringBuilder();
 
         private ChunkBuilder(int chunkIndex) {
             this.chunkIndex = chunkIndex;
         }
 
-        private boolean canAdd(VideoTranscriptSegmentEntity segment, int maxChars) {
-            int textLength = segment.getText() == null ? 0 : segment.getText().length();
-            return this.textLength + textLength <= maxChars;
+        private String textWith(VideoTranscriptSegmentEntity segment) {
+            if (text.isEmpty()) {
+                return segment.getText();
+            }
+            return text + "\n" + segment.getText();
         }
 
         private void add(VideoTranscriptSegmentEntity segment) {
             segments.add(segment);
-            if (segment.getText() != null) {
-                textLength += segment.getText().length();
+            if (!text.isEmpty()) {
+                text.append('\n');
             }
+            text.append(segment.getText());
             if (segment.getSegmentIndex() != null) {
                 sourceSegmentIndexes.add(segment.getSegmentIndex());
             }
@@ -103,16 +112,16 @@ public class TranscriptChunker {
             return segments.isEmpty();
         }
 
+        private int size() {
+            return segments.size();
+        }
+
         private TranscriptChunk build() {
             VideoTranscriptSegmentEntity first = segments.getFirst();
             VideoTranscriptSegmentEntity last = segments.getLast();
-            String text = segments.stream()
-                .map(s -> s.getText() == null ? "" : s.getText())
-                .reduce((a, b) -> a + "\n" + b)
-                .orElse("");
             return new TranscriptChunk(
                 chunkIndex,
-                text,
+                text.toString(),
                 first.getStartMs() == null ? 0L : first.getStartMs(),
                 last.getEndMs() == null ? first.getStartMs() : last.getEndMs(),
                 List.copyOf(sourceSegmentIndexes)

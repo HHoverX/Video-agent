@@ -2,8 +2,6 @@ package com.videoagent.rag.service;
 
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.context.ContextStrategyResolver;
-import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.dto.QaCitation;
 import com.videoagent.rag.dto.QaResponse;
 import com.videoagent.rag.entity.RagIndexStatus;
@@ -33,14 +31,9 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Orchestrates grounded QA across both modes:
- *
- *  - DIRECT_CONTEXT: the full transcript segments become the LLM context; the
- *    model cites segment indexes and the backend resolves them to real
- *    timestamps from the database.
- *  - RAG: the index must be READY; the question is embedded, top-K chunks are
- *    retrieved with userId+videoId filtering, the model cites chunk indexes and
- *    the backend resolves them to real chunk metadata.
+ * Orchestrates grounded QA through the READY RAG index. The question is
+ * embedded, top-K chunks are retrieved with userId+videoId filtering, and the
+ * model cites chunk indexes resolved to real chunk metadata.
  *
  * Every citation is validated against the context actually provided to the
  * model. Fabricated indexes are dropped and never become timestamps.
@@ -53,7 +46,6 @@ public class VideoQaService {
 
     private final VideoOwnershipService ownershipService;
     private final VideoTranscriptSegmentRepository segmentRepository;
-    private final ContextStrategyResolver strategyResolver;
     private final VideoQaProvider qaProvider;
     private final TranscriptRetriever retriever;
     private final RagIndexService ragIndexService;
@@ -61,14 +53,12 @@ public class VideoQaService {
     public VideoQaService(
         VideoOwnershipService ownershipService,
         VideoTranscriptSegmentRepository segmentRepository,
-        ContextStrategyResolver strategyResolver,
         VideoQaProvider qaProvider,
         TranscriptRetriever retriever,
         RagIndexService ragIndexService
     ) {
         this.ownershipService = ownershipService;
         this.segmentRepository = segmentRepository;
-        this.strategyResolver = strategyResolver;
         this.qaProvider = qaProvider;
         this.retriever = retriever;
         this.ragIndexService = ragIndexService;
@@ -113,19 +103,8 @@ public class VideoQaService {
         try {
             ownershipService.requireOwned(videoId, userId);
             List<VideoTranscriptSegmentEntity> segments =
-                strategyResolver.requireNonEmpty(segmentRepository.findLatestSuccessfulByVideoId(videoId));
+                requireNonEmpty(segmentRepository.findLatestSuccessfulByVideoId(videoId));
             effectiveContext = effectiveContext.withAnalysisTaskId(segments.getFirst().getTaskId());
-            QaContextMode mode = strategyResolver.resolveMode(segments);
-
-            if (mode == QaContextMode.DIRECT_CONTEXT) {
-                effectiveRoute = routeOverride == null ? QaTelemetryRoute.BASIC_DIRECT : routeOverride;
-                QaResponse response = answerDirect(
-                    videoId, userId, question, segments, effectiveContext, effectiveRoute
-                );
-                outcome = "success";
-                errorCategory = "none";
-                return response;
-            }
 
             effectiveRoute = routeOverride == null ? QaTelemetryRoute.BASIC_RAG : routeOverride;
             VideoRagIndexEntity index = ragIndexService.requireReady(videoId, userId);
@@ -151,40 +130,6 @@ public class VideoQaService {
         }
     }
 
-    private QaResponse answerDirect(
-        long videoId,
-        long userId,
-        String question,
-        List<VideoTranscriptSegmentEntity> segments,
-        QaTelemetryContext telemetryContext,
-        QaTelemetryRoute telemetryRoute
-    ) {
-        List<VideoQaRequest.ContextItem> context = new ArrayList<>(segments.size());
-        for (VideoTranscriptSegmentEntity segment : segments) {
-            int index = segment.getSegmentIndex() == null ? context.size() : segment.getSegmentIndex();
-            context.add(new VideoQaRequest.ContextItem(
-                index,
-                segment.getText() == null ? "" : segment.getText(),
-                segment.getStartMs() == null ? 0L : segment.getStartMs(),
-                segment.getEndMs() == null ? 0L : segment.getEndMs()
-            ));
-        }
-        VideoQaResult result = qaProvider.answer(
-            new VideoQaRequest(videoId, question, context), telemetryContext, telemetryRoute
-        );
-
-        Map<Integer, VideoQaRequest.ContextItem> byIndex = new LinkedHashMap<>();
-        for (VideoQaRequest.ContextItem item : context) {
-            byIndex.put(item.index(), item);
-        }
-        List<QaCitation> citations = resolveCitations(result.citationIndexes(), byIndex);
-        String answer = citations.isEmpty() ? INSUFFICIENT_EVIDENCE : result.answer();
-
-        log.info("[userId={}][videoId={}][contextMode=DIRECT_CONTEXT][transcriptChars={}][segmentCount={}] qa answered",
-            userId, videoId, strategyResolver.transcriptChars(segments), segments.size());
-        return new QaResponse(QaContextMode.DIRECT_CONTEXT.name(), answer, citations);
-    }
-
     private QaResponse answerRag(
         long videoId,
         long userId,
@@ -197,8 +142,8 @@ public class VideoQaService {
             userId, videoId, question, telemetryContext, telemetryRoute
         );
         if (chunks.isEmpty()) {
-            log.info("[userId={}][videoId={}][contextMode=RAG] no evidence above minimum score", userId, videoId);
-            return new QaResponse(QaContextMode.RAG.name(), INSUFFICIENT_EVIDENCE, List.of());
+            log.info("[userId={}][videoId={}] no evidence above minimum score", userId, videoId);
+            return new QaResponse(INSUFFICIENT_EVIDENCE, List.of());
         }
 
         List<VideoQaRequest.ContextItem> context = new ArrayList<>(chunks.size());
@@ -222,10 +167,17 @@ public class VideoQaService {
         String answer = citations.isEmpty() ? INSUFFICIENT_EVIDENCE : result.answer();
 
         List<Integer> retrievedIndexes = chunks.stream().map(RetrievedChunk::chunkIndex).toList();
-        log.info("[userId={}][videoId={}][analysisTaskId={}][ragIndexId={}][contextMode=RAG][retrievalTopK={}][retrievedChunkIndexes={}] qa answered",
+        log.info("[userId={}][videoId={}][analysisTaskId={}][ragIndexId={}][retrievalTopK={}][retrievedChunkIndexes={}] qa answered",
             userId, videoId, index.getAnalysisTaskId(), index.getId(),
             chunks.size(), retrievedIndexes);
-        return new QaResponse(QaContextMode.RAG.name(), answer, citations);
+        return new QaResponse(answer, citations);
+    }
+
+    private List<VideoTranscriptSegmentEntity> requireNonEmpty(List<VideoTranscriptSegmentEntity> segments) {
+        if (segments == null || segments.isEmpty()) {
+            throw new VideoAgentException(ErrorCode.TRANSCRIPTION_FAILED, "该视频暂无可用字幕，无法进行问答");
+        }
+        return segments;
     }
 
     /**

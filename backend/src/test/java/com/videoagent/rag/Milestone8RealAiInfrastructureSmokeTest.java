@@ -103,7 +103,6 @@ class Milestone8RealAiInfrastructureSmokeTest {
             RagIndexStatusResponse.class
         );
         assertThat(built.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(built.getBody().mode()).isEqualTo("RAG");
         assertThat(built.getBody().status()).isEqualTo("READY");
 
         // Ask about a specific fact that only exists in segment index 50, so the
@@ -116,7 +115,6 @@ class Milestone8RealAiInfrastructureSmokeTest {
             QaResponse.class
         );
         assertThat(qa.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(qa.getBody().mode()).isEqualTo("RAG");
         assertThat(qa.getBody().answer()).isNotBlank();
         // The answer should be grounded in the transcript (it contains the
         // Redis fact verbatim), and must carry a citation.

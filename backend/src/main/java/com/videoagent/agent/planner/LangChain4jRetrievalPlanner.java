@@ -28,8 +28,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Real retrieval planner backed by the same LangChain4j ChatModel used for QA
  * and summaries. It receives the current question, bounded conversation
- * history, and a compact metadata summary (has summary, transcript mode, rag
- * status) — never the full transcript — and returns a strict structured plan.
+ * history, and a compact metadata summary (transcript, summary, and RAG status)
+ * — never the full transcript — and returns a strict structured plan.
  */
 public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
 
@@ -186,12 +186,10 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
         return """
             - 是否存在字幕：%s
             - 是否有已生成的摘要：%s
-            - 字幕上下文模式：%s
             - RAG 索引状态：%s
             """.formatted(
             context.hasTranscript() ? "是" : "否",
             context.hasSummary() ? "是" : "否",
-            context.contextMode() == null ? "未知" : context.contextMode().name(),
             context.ragStatus() == null ? "未知" : context.ragStatus()
         );
     }

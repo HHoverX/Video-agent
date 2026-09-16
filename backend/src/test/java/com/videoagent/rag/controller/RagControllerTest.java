@@ -48,43 +48,41 @@ class RagControllerTest {
     @Test
     void shouldReturnRagStatus() throws Exception {
         VideoRagIndexEntity index = new VideoRagIndexEntity();
-        index.setContextMode("DIRECT_CONTEXT");
-        index.setStatus(RagIndexStatus.NOT_REQUIRED.name());
-        index.setTranscriptChars(100);
+        index.setStatus(RagIndexStatus.NOT_BUILT.name());
         index.setChunkCount(0);
         when(ragIndexService.getStatus(7L, 5L)).thenReturn(index);
 
         mockMvc.perform(get("/api/videos/7/rag/status"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.mode").value("DIRECT_CONTEXT"))
-            .andExpect(jsonPath("$.status").value("NOT_REQUIRED"))
+            .andExpect(jsonPath("$.mode").doesNotExist())
+            .andExpect(jsonPath("$.transcript" + "Chars").doesNotExist())
+            .andExpect(jsonPath("$.status").value("NOT_BUILT"))
             .andExpect(jsonPath("$.chunkCount").value(0));
     }
 
     @Test
     void shouldBuildIndex() throws Exception {
         VideoRagIndexEntity index = new VideoRagIndexEntity();
-        index.setContextMode("RAG");
         index.setStatus(RagIndexStatus.READY.name());
         index.setChunkCount(3);
         when(ragIndexService.buildIndex(7L, 5L)).thenReturn(index);
 
         mockMvc.perform(post("/api/videos/7/rag/index"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.mode").value("RAG"))
+            .andExpect(jsonPath("$.mode").doesNotExist())
             .andExpect(jsonPath("$.status").value("READY"));
     }
 
     @Test
     void shouldAnswerQa() throws Exception {
         when(qaService.answer(7L, 5L, "问题？"))
-            .thenReturn(new QaResponse("DIRECT_CONTEXT", "答案", List.of()));
+            .thenReturn(new QaResponse("答案", List.of()));
 
         mockMvc.perform(post("/api/videos/7/qa")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"question\":\"问题？\"}"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.mode").value("DIRECT_CONTEXT"))
+            .andExpect(jsonPath("$.mode").doesNotExist())
             .andExpect(jsonPath("$.answer").value("答案"));
     }
 

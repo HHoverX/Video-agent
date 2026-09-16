@@ -2,9 +2,6 @@ package com.videoagent.rag;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.sun.net.httpserver.HttpServer;
 import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.auth.entity.AppUserEntity;
@@ -12,7 +9,6 @@ import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.rag.chunk.TranscriptChunk;
 import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
-import com.videoagent.rag.rerank.HttpTranscriptReranker;
 import com.videoagent.rag.retrieval.LexicalChunk;
 import com.videoagent.rag.retrieval.ReciprocalRankFusion;
 import com.videoagent.rag.retrieval.RetrievedChunk;
@@ -27,22 +23,18 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @EnabledIfEnvironmentVariable(named = "VIDEOAGENT_HYBRID_RAG_INFRA_TEST", matches = "true")
 @SpringBootTest(properties = {
     "videoagent.ai.asr.provider=mock",
     "videoagent.ai.llm.provider=mock",
     "videoagent.rag.embedding.provider=mock",
-    "videoagent.rag.embedding.dimension=384"
+    "videoagent.rag.embedding.dimension=384",
+    "videoagent.rag.milvus.collection=video_transcript_chunks_hybrid_test_384"
 })
 class HybridRagInfrastructureIntegrationTest {
 
@@ -50,20 +42,14 @@ class HybridRagInfrastructureIntegrationTest {
     @Autowired private VideoRepository videoRepository;
     @Autowired private AnalysisTaskRepository taskRepository;
     @Autowired private MilvusTranscriptStore transcriptStore;
-    @Autowired private ObjectMapper objectMapper;
 
     private final List<Long> users = new ArrayList<>();
     private final List<Long> videos = new ArrayList<>();
     private final List<Long> tasks = new ArrayList<>();
     private final List<long[]> milvusIndexes = new ArrayList<>();
-    private HttpServer rerankServer;
 
     @AfterEach
     void cleanUp() {
-        if (rerankServer != null) {
-            rerankServer.stop(0);
-            rerankServer = null;
-        }
         milvusIndexes.forEach(index -> transcriptStore.deleteByVideo(index[0], index[1]));
         for (Long taskId : tasks.reversed()) taskRepository.deleteById(taskId);
         for (Long videoId : videos.reversed()) videoRepository.deleteById(videoId);
@@ -123,7 +109,7 @@ class HybridRagInfrastructureIntegrationTest {
     }
 
     @Test
-    void shouldRunDenseLexicalRrfAndHttpRerankAsOnePipeline() throws Exception {
+    void shouldRunDenseLexicalRrfAndFinalLimitAsOnePipeline() {
         long user = insertUser("hybrid-pipeline");
         long video = insertVideo(user, "pipeline");
         long task = insertTask(video, "v1");
@@ -143,51 +129,17 @@ class HybridRagInfrastructureIntegrationTest {
         ));
         milvusIndexes.add(new long[] {user, video});
 
-        AtomicInteger rerankCalls = new AtomicInteger();
-        startReranker(rerankCalls);
-        RagProperties properties = new RagProperties(8000, 2000, 1, 2, 0.0f, 2, 60, 15, 3,
-            new RagProperties.Reranker(true, rerankBaseUrl(), "integration-secret", "fake-reranker",
-                Duration.ofSeconds(2)));
+        RagProperties properties = new RagProperties(2000, 1, 2, 0.0f, 2, 60, 3);
         TranscriptRetriever retriever = new TranscriptRetriever(
-            fixedEmbeddingProvider(), transcriptStore, new ReciprocalRankFusion(),
-            new HttpTranscriptReranker(properties), properties);
+            fixedEmbeddingProvider(), transcriptStore, new ReciprocalRankFusion(), properties);
 
         List<RetrievedChunk> result = retriever.retrieve(
             user, video, "NullPointerException UploadCompletionTransaction");
 
-        assertThat(rerankCalls).hasValue(1);
         assertThat(result).hasSize(3);
-        assertThat(result).extracting(RetrievedChunk::text).containsExactly(
-            "C NullPointerException precise marker",
-            "A semantic database recovery candidate",
-            "D UploadCompletionTransaction precise marker"
-        );
-    }
-
-    private void startReranker(AtomicInteger calls) throws Exception {
-        rerankServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        rerankServer.createContext("/rerank", exchange -> {
-            calls.incrementAndGet();
-            JsonNode request = objectMapper.readTree(exchange.getRequestBody());
-            List<Map<String, Object>> results = new ArrayList<>();
-            for (int index = 0; index < request.path("documents").size(); index++) {
-                String document = request.path("documents").get(index).asText();
-                double score = document.startsWith("C ") ? 0.95
-                    : document.startsWith("A ") ? 0.70
-                    : document.startsWith("D ") ? 0.40 : 0.10;
-                results.add(Map.of("index", index, "relevance_score", score));
-            }
-            byte[] response = objectMapper.writeValueAsBytes(Map.of("results", results));
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.sendResponseHeaders(200, response.length);
-            exchange.getResponseBody().write(response);
-            exchange.close();
-        });
-        rerankServer.start();
-    }
-
-    private String rerankBaseUrl() {
-        return "http://127.0.0.1:" + rerankServer.getAddress().getPort();
+        assertThat(result).extracting(RetrievedChunk::text)
+            .contains("A semantic database recovery candidate", "D UploadCompletionTransaction precise marker");
+        assertThat(result).extracting(RetrievedChunk::score).isSortedAccordingTo(java.util.Comparator.reverseOrder());
     }
 
     private EmbeddingProvider fixedEmbeddingProvider() {

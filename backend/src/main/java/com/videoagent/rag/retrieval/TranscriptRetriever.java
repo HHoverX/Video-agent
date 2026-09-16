@@ -4,7 +4,6 @@ import com.videoagent.rag.config.RagProperties;
 import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.vector.MilvusTranscriptStore;
 import com.videoagent.rag.vector.VectorPoint;
-import com.videoagent.rag.rerank.TranscriptReranker;
 import com.videoagent.telemetry.QaTelemetryContext;
 import com.videoagent.telemetry.QaTelemetryRoute;
 
@@ -27,20 +26,17 @@ public class TranscriptRetriever {
     private final EmbeddingProvider embeddingProvider;
     private final MilvusTranscriptStore transcriptStore;
     private final ReciprocalRankFusion fusion;
-    private final TranscriptReranker reranker;
     private final RagProperties properties;
 
     public TranscriptRetriever(
         EmbeddingProvider embeddingProvider,
         MilvusTranscriptStore transcriptStore,
         ReciprocalRankFusion fusion,
-        TranscriptReranker reranker,
         RagProperties properties
     ) {
         this.embeddingProvider = embeddingProvider;
         this.transcriptStore = transcriptStore;
         this.fusion = fusion;
-        this.reranker = reranker;
         this.properties = properties;
     }
 
@@ -75,30 +71,17 @@ public class TranscriptRetriever {
         List<LexicalChunk> lexical = transcriptStore.searchLexical(
             userId, videoId, query, properties.lexicalTopK());
         List<HybridCandidate> fused = fusion.fuse(
-            videoId, dense, lexical, properties.rrfK(), properties.rrfCandidateLimit());
-        List<HybridCandidate> ordered = fused;
-        boolean fallback = false;
-        if (reranker.enabled() && !fused.isEmpty()) {
-            try {
-                ordered = reranker.rerank(query, fused);
-            } catch (RuntimeException exception) {
-                fallback = true;
-                log.warn("[userId={}][videoId={}][stage=RERANK][exceptionClass={}] reranker unavailable; using RRF order",
-                    userId, videoId, exception.getClass().getSimpleName());
-            }
-        }
-        List<RetrievedChunk> result = ordered.stream()
+            videoId, dense, lexical, properties.rrfK());
+        List<RetrievedChunk> result = fused.stream()
             .limit(properties.finalEvidenceLimit())
             .map(candidate -> new RetrievedChunk(
                 candidate.chunkIndex(), candidate.text(), candidate.startMs(), candidate.endMs(),
                 candidate.sourceSegmentIndexes(),
-                candidate.rerankScore() == null
-                    ? (float) candidate.rrfScore()
-                    : candidate.rerankScore().floatValue()
+                (float) candidate.rrfScore()
             ))
             .toList();
-        log.info("[userId={}][videoId={}][stage=HYBRID_RETRIEVAL][denseCount={}][lexicalCount={}][fusedCount={}][rerankerFallback={}][finalCount={}]",
-            userId, videoId, dense.size(), lexical.size(), fused.size(), fallback, result.size());
+        log.info("[userId={}][videoId={}][stage=HYBRID_RETRIEVAL][denseCount={}][lexicalCount={}][fusedCount={}][finalCount={}]",
+            userId, videoId, dense.size(), lexical.size(), fused.size(), result.size());
         return result;
     }
 }

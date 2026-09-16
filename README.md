@@ -27,8 +27,8 @@ VideoAgent 是一个面向长视频的智能分析与问答系统。用户上传
 - **并发幂等**：同一用户、同一 SHA-256 同时创建上传会话时，由 MySQL 生成列和唯一索引选出唯一活跃 Session；竞争失败方复用 winner 的 `uploadId`。
 - **可靠异步分析**：分析任务与 Transactional Outbox 同事务提交，RocketMQ 重复投递通过数据库条件更新、租约、心跳和 generation fencing 隔离。
 - **阶段级 Checkpoint**：字幕、总结和 RAG 索引分别持久化；重试从最近成功阶段继续，避免无条件重复调用 ASR 或 LLM。
-- **自适应上下文**：短字幕直接传入完整上下文；长字幕按字幕边界切块并构建 Milvus 索引。
-- **混合检索**：Dense Retrieval 与 Milvus BM25 分别召回，应用层执行 RRF，可选 HTTP Reranker；Reranker 故障时回退 RRF 顺序。
+- **统一 RAG 索引**：所有有效字幕都按字幕边界切块，并建立 Milvus Dense 与 BM25 索引。
+- **混合检索**：Dense Retrieval 与 Milvus BM25 分别召回，应用层执行 RRF，截取最终 Top-K Evidence。
 - **证据约束问答**：检索始终绑定服务端确定的 `userId + videoId`；模型只返回请求内 Evidence ID，最终时间戳由后端映射真实字幕证据。
 - **多轮会话记忆**：MySQL 保存持久会话，Redis 缓存最近历史；Redis 不可用时回退 MySQL。
 
@@ -52,7 +52,7 @@ flowchart LR
     FFmpeg --> ASR["ASR Provider"]
     ASR --> Summary["LLM Summary"]
     Summary --> Milvus[(Milvus Dense + BM25)]
-    Milvus --> QA["RRF / Reranker / Evidence QA"]
+    Milvus --> QA["RRF / Top-K Evidence QA"]
 ```
 
 MySQL 是任务、字幕、总结、视频归属、上传状态和 RAG 生命周期的事实源。Redis、Milvus 和 MinIO 中可重建或临时的数据不替代数据库状态机。
@@ -62,7 +62,7 @@ MySQL 是任务、字幕、总结、视频归属、上传状态和 RAG 生命周
 | 层级 | 技术 |
 | --- | --- |
 | 后端 | Java 21、Spring Boot 3.5.5、Maven、Spring Security、MyBatis-Plus、Flyway |
-| AI | LangChain4j 1.18.0、可替换 ASR / LLM / Embedding Provider、可选 HTTP Reranker |
+| AI | LangChain4j 1.18.0、可替换 ASR / LLM / Embedding Provider |
 | 前端 | Vue 3、TypeScript、Vite 6、Pinia、Vue Router、Axios、Element Plus |
 | 基础设施 | MySQL 8、Redis、MinIO、Nginx、RocketMQ、Milvus 2.6.22、etcd、Docker Compose |
 | 媒体处理 | FFmpeg、ffprobe |
@@ -227,12 +227,9 @@ PENDING → PROCESSING → SUCCESS
 - Redis 分析令牌桶默认容量为 `60`，每秒补充 `10` 个令牌，每次分析请求消耗 `1` 个；单用户默认最多有 `3` 个活跃分析任务。
 - Redis 限流故障采用 fail-open，后续仍由 MySQL 任务幂等与活动任务数检查保护，但不等价于严格的分布式成本配额。
 
-### 自适应 RAG
+### RAG 索引与混合检索
 
-短字幕与长字幕采用不同策略：
-
-- 字幕总字符数不超过 `RAG_DIRECT_CONTEXT_MAX_CHARS=8000`：使用 `DIRECT_CONTEXT`，不构建向量索引，状态为 `NOT_REQUIRED`。
-- 超过阈值：按字幕片段边界切块，默认每块最多约 `2000` 字符并重叠一个相邻字幕片段，状态按 `NOT_BUILT → BUILDING → READY/FAILED` 推进。
+视频分析完成后，所有有效字幕都以带时间戳的 ASR 字幕片段作为最小不可拆单元，使用本地 Token 估算器按目标 Token Budget 动态合并相邻字幕片段；默认目标约 `600` Token，相邻 Chunk 重叠一个字幕片段。这里的 Chunk Token 数是本地启发式估算值，不声明与托管 `text-embedding-v4` Tokenizer 完全一致。`600` 是控制检索粒度的工程默认值，并非该 Embedding 模型的 `8192` Token 输入上限。索引状态按 `NOT_BUILT → BUILDING → READY/FAILED` 推进，问答只在索引为 `READY` 时执行检索。
 
 Milvus Collection 同时保存：
 
@@ -245,23 +242,23 @@ Milvus Collection 同时保存：
 
 ```text
 Query Embedding → Dense Top-K ┐
-                              ├→ RRF → 可选 Reranker → 最终 Evidence
+                              ├→ RRF → 最终 Top-K Evidence
 Query Text      → BM25 Top-K  ┘
 ```
 
 Dense 和 BM25 都强制过滤 `userId + videoId`。重建同一视频时先严格删除旧 Chunk，再写入确定性 Chunk ID；只有 Milvus 写入成功且当前 `buildToken` 仍有效，MySQL 中的索引状态才会变为 `READY`。
 
-默认检索参数：
+默认分块与检索参数：
 
 | 配置 | 默认值 |
 | --- | ---: |
+| `RAG_CHUNK_TARGET_TOKENS` | `600` |
+| `RAG_CHUNK_OVERLAP_SEGMENTS` | `1` |
 | `RAG_DENSE_TOP_K` | `15` |
 | `RAG_DENSE_MINIMUM_SCORE` | `0.0` |
 | `RAG_LEXICAL_TOP_K` | `15` |
 | `RAG_RRF_K` | `60` |
-| `RAG_RRF_CANDIDATE_LIMIT` | `15` |
 | `RAG_FINAL_EVIDENCE_LIMIT` | `5` |
-| `RAG_RERANKER_ENABLED` | `false` |
 
 这些值是工程默认值，不代表已经针对生产语料完成效果或容量调优。
 
@@ -273,7 +270,6 @@ Dense 和 BM25 都强制过滤 `userId + videoId`。重建同一视频时先严�
 | Summary / QA | `mock`、`openai` | `LLM_PROVIDER=openai`、`LLM_API_KEY`、`LLM_MODEL`；兼容服务另配 `LLM_BASE_URL` |
 | Embedding | `mock`、`openai`、`dashscope` | `EMBEDDING_PROVIDER`、`EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`、正确的 `EMBEDDING_DIMENSION` |
 | Agent Planner | `mock`、`llm` | `AGENT_PLANNER_PROVIDER=llm`，并提供完整 LLM 配置 |
-| Reranker | 任意符合当前 `/rerank` JSON 协议的 HTTP 服务 | `RAG_RERANKER_ENABLED=true`、地址、模型；服务要求鉴权时再配置 API Key |
 
 显式选择真实 Provider 但缺少必要配置时，应用会启动失败，不会静默降级为 Mock。Embedding 维度必须与 Milvus Collection Schema 一致；修改模型维度后需要使用匹配的 Collection 或重建派生索引。
 
@@ -340,15 +336,16 @@ Flyway 脚本位于 `backend/src/main/resources/db/migration`，当前范围为 
 | `analysis_outbox_event` | 待发布和重试的 RocketMQ 事件 |
 | `video_transcript_segment` | 带时间戳的 ASR 字幕 Checkpoint |
 | `video_summary`、`video_chapter`、`video_key_point` | 结构化总结 Checkpoint |
-| `video_rag_index` | RAG 模式、构建状态、租约和 build token |
+| `video_rag_index` | RAG 构建状态、租约和 build token |
 | `conversation_turn` | 按用户和视频隔离的持久对话历史 |
 
 最新迁移：
 
 - `V15`：将历史 RAG 索引重置为 `NOT_BUILT`，清空旧构建信息，并删除已经不再使用的 MySQL `video_rag_chunk` 表。
 - `V16`：先把重复活跃上传 Session 标记为 `EXPIRED`，再创建 STORED 生成列 `active_expected_sha256` 和唯一索引 `uk_video_upload_active_hash`。
+- `V17`：将历史 `NOT_REQUIRED` 索引状态迁移为 `NOT_BUILT`，并删除已废弃的 `context_mode`、`transcript_chars` 字段。
 
-Milvus 是可以从 MySQL 字幕重新构建的派生检索索引，不参与 Flyway 事务。升级后，已有长字幕需要通过现有 RAG 建索引入口重建。
+Milvus 是可以从 MySQL 字幕重新构建的派生检索索引，不参与 Flyway 事务。升级后，处于 `NOT_BUILT` 状态且已有有效字幕的视频可以通过现有 RAG 建索引入口重建。
 
 ## 测试与验证
 
@@ -381,11 +378,29 @@ mvn '-Dtest=AnalysisProtectionInfrastructureIntegrationTest' test
 $env:VIDEOAGENT_REAL_MILVUS_ACCEPTANCE = 'true'
 mvn '-Dtest=RealMilvusInfrastructureAcceptanceTest' test
 
+$env:VIDEOAGENT_HYBRID_RAG_INFRA_TEST = 'true'
+mvn '-Dtest=HybridRagInfrastructureIntegrationTest' test
+
+$env:VIDEOAGENT_M8_RAG_INFRA_TEST = 'true'
+mvn '-Dtest=Milestone8RagInfrastructureIntegrationTest' test
+
+$env:VIDEOAGENT_M8_AGENT_INFRA_TEST = 'true'
+mvn '-Dtest=Milestone8AgentInfrastructureIntegrationTest' test
+
 $env:VIDEOAGENT_M7_INFRA_TEST = 'true'
 mvn '-Dtest=Milestone7ReliabilityInfrastructureIntegrationTest,M7TransactionalAtomicityIntegrationTest' test
 ```
 
 真实 ASR、LLM 与 Embedding Smoke Test 需要额外显式开关、有效凭据和测试视频。它们可能产生第三方费用，默认不执行。
+
+如需观测本地 Token 估算器与 DashScope `text-embedding-v4` 实际用量的偏差，可在提供有效 `EMBEDDING_API_KEY` 后显式运行开发级校准测试：
+
+```powershell
+$env:VIDEOAGENT_TOKEN_ESTIMATION_CALIBRATION_TEST = 'true'
+mvn '-Dtest=DashScopeTokenEstimationCalibrationIntegrationTest' test
+```
+
+该测试逐条读取响应中的 `usage.total_tokens` 并输出估算比值；它不属于生产分块链路，也不要求本地估算值与托管模型 Tokenizer 完全相等。
 
 ## 项目结构
 
@@ -402,11 +417,11 @@ backend/
     asr/         ASR Provider
     summary/     结构化总结 Provider
     transcript/  时间戳字幕
-    rag/         分块、Embedding、Milvus、BM25、RRF、Reranker 和 QA
+    rag/         分块、Embedding、Milvus、BM25、RRF 和 QA
     agent/       受约束 Planner、白名单工具、Evidence 与会话记忆
   src/main/resources/
     application.yml
-    db/migration/          Flyway V1-V16
+    db/migration/          Flyway V1-V17
 frontend/                  Vue 3 客户端、上传 Worker 和页面测试
 infra/nginx/               上传网关配置模板
 infra/rocketmq/            RocketMQ Broker 配置

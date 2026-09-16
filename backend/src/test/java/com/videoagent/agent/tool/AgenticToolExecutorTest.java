@@ -20,7 +20,6 @@ import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalTool;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
 import com.videoagent.rag.service.RagIndexService;
@@ -56,11 +55,7 @@ class AgenticToolExecutorTest {
     }
 
     private AgenticQaContext ragContext() {
-        return new AgenticQaContext(1L, 7L, 3L, QaContextMode.RAG, true, true, "READY");
-    }
-
-    private AgenticQaContext directContext() {
-        return new AgenticQaContext(1L, 7L, 3L, QaContextMode.DIRECT_CONTEXT, true, true, "NOT_REQUIRED");
+        return new AgenticQaContext(1L, 7L, 3L, true, true, "READY");
     }
 
     private List<VideoTranscriptSegmentEntity> segments() {
@@ -197,19 +192,6 @@ class AgenticToolExecutorTest {
     // ---- Search tool ----
 
     @Test
-    void shouldUseFullTranscriptInDirectModeWithoutEmbedding() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
-
-        List<EvidenceItem> evidence = executor.execute(directContext(),
-            List.of(RetrievalAction.search("Redis")));
-
-        assertThat(evidence).hasSize(3);
-        assertThat(evidence).allMatch(e -> e.sourceType() == EvidenceSourceType.TRANSCRIPT_SEARCH);
-        assertThat(evidence).extracting(EvidenceItem::segmentIndex).containsExactly(0, 1, 2);
-        verify(transcriptRetriever, never()).retrieve(anyLong(), anyLong(), anyString());
-    }
-
-    @Test
     void shouldUseTranscriptRetrieverInRagReadyMode() {
         when(transcriptRetriever.retrieve(1L, 7L, "Redis 作用")).thenReturn(List.of(
             new RetrievedChunk(0, "Redis 缓存进度", 0, 2000, List.of(0), 0.9f)
@@ -238,18 +220,6 @@ class AgenticToolExecutorTest {
 
         verify(transcriptRetriever).retrieve(
             1L, 7L, "Redis 作用", telemetryContext, QaTelemetryRoute.AGENTIC
-        );
-    }
-
-    @Test
-    void shouldKeepDirectSearchLocalWhenTelemetryIsPresent() {
-        QaTelemetryContext telemetryContext = new QaTelemetryContext("request-1", 7L, 3L);
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
-
-        executor.execute(directContext(), List.of(RetrievalAction.search("Redis")), telemetryContext);
-
-        verify(transcriptRetriever, never()).retrieve(
-            anyLong(), anyLong(), anyString(), any(QaTelemetryContext.class), any(QaTelemetryRoute.class)
         );
     }
 

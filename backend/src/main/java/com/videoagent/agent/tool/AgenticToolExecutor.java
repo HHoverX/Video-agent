@@ -8,7 +8,6 @@ import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalTool;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
 import com.videoagent.rag.service.RagIndexService;
@@ -80,17 +79,11 @@ public class AgenticToolExecutor {
         List<RetrievalAction> uniqueActions = actions == null
             ? List.of()
             : new ArrayList<>(new LinkedHashSet<>(actions));
-        List<VideoTranscriptSegmentEntity> directSearchSegments =
-            context.contextMode() == QaContextMode.DIRECT_CONTEXT
-                && uniqueActions.stream().anyMatch(action -> action != null
-                    && action.tool() == RetrievalTool.SEARCH_TRANSCRIPT)
-                ? loadSegments(context.videoId())
-                : List.of();
         for (RetrievalAction action : uniqueActions) {
             if (action == null || action.tool() == null) {
                 continue;
             }
-            evidence.addAll(executeAction(context, action, directSearchSegments, idCounter, telemetryContext));
+            evidence.addAll(executeAction(context, action, idCounter, telemetryContext));
         }
         return evidence;
     }
@@ -98,7 +91,6 @@ public class AgenticToolExecutor {
     private List<EvidenceItem> executeAction(
         AgenticQaContext context,
         RetrievalAction action,
-        List<VideoTranscriptSegmentEntity> directSearchSegments,
         AtomicInteger idCounter,
         QaTelemetryContext telemetryContext
     ) {
@@ -111,7 +103,7 @@ public class AgenticToolExecutor {
                 case GET_VIDEO_SUMMARY -> summaryEvidence(context, idCounter);
                 case GET_TRANSCRIPT_BY_TIME -> timeEvidence(context, action, idCounter);
                 case SEARCH_TRANSCRIPT -> searchEvidence(
-                    context, action.query(), directSearchSegments, idCounter, telemetryContext);
+                    context, action.query(), idCounter, telemetryContext);
             };
             outcome = "success";
             errorCategory = "none";
@@ -215,34 +207,9 @@ public class AgenticToolExecutor {
     private List<EvidenceItem> searchEvidence(
         AgenticQaContext context,
         String query,
-        List<VideoTranscriptSegmentEntity> directSearchSegments,
         AtomicInteger idCounter,
         QaTelemetryContext telemetryContext
     ) {
-        QaContextMode mode = context.contextMode();
-
-        if (mode == QaContextMode.DIRECT_CONTEXT) {
-            // Short transcript: the full transcript is the evidence. No
-            // embedding, no Milvus.
-            List<EvidenceItem> items = new ArrayList<>();
-            for (VideoTranscriptSegmentEntity segment : directSearchSegments) {
-                long startMs = segment.getStartMs() == null ? 0L : segment.getStartMs();
-                long endMs = segment.getEndMs() == null ? startMs : segment.getEndMs();
-                items.add(new EvidenceItem(
-                    evidenceId(idCounter),
-                    EvidenceSourceType.TRANSCRIPT_SEARCH,
-                    segment.getText() == null ? "" : segment.getText(),
-                    startMs,
-                    endMs,
-                    segment.getSegmentIndex(),
-                    null,
-                    List.of(),
-                    null
-                ));
-            }
-            return items;
-        }
-
         ragIndexService.requireReady(context.videoId(), context.currentUserId());
 
         List<RetrievedChunk> chunks = telemetryContext == null
@@ -272,10 +239,6 @@ public class AgenticToolExecutor {
             context.currentUserId(), context.videoId(),
             chunks.stream().map(RetrievedChunk::chunkIndex).toList());
         return items;
-    }
-
-    private List<VideoTranscriptSegmentEntity> loadSegments(long videoId) {
-        return segmentRepository.findLatestSuccessfulByVideoId(videoId);
     }
 
     private String evidenceId(AtomicInteger counter) {

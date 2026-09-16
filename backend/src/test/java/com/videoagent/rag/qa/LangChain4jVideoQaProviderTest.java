@@ -34,13 +34,13 @@ class LangChain4jVideoQaProviderTest {
         VideoQaResult result = provider.answer(
             request(),
             new QaTelemetryContext("request-1", 7L, 3L),
-            QaTelemetryRoute.BASIC_DIRECT
+            QaTelemetryRoute.BASIC_RAG
         );
 
         assertThat(result.answer()).isEqualTo("answer");
         assertThat(registry.get("videoagent.ai.logical.calls")
             .tag("scope", "qa").tag("stage", "qa_basic")
-            .tag("mode", "basic_direct").tag("outcome", "success").counter().count()).isEqualTo(1.0d);
+            .tag("mode", "basic_rag").tag("outcome", "success").counter().count()).isEqualTo(1.0d);
         assertThat(inputAmount(registry, "question_chars")).isEqualTo(8.0d);
         assertThat(inputAmount(registry, "context_chars")).isEqualTo(6.0d);
         assertThat(inputAmount(registry, "context_items")).isEqualTo(2.0d);
@@ -79,7 +79,7 @@ class LangChain4jVideoQaProviderTest {
         assertThat(provider.answer(
             request(),
             new QaTelemetryContext("request-1", 7L, 3L),
-            QaTelemetryRoute.BASIC_DIRECT
+            QaTelemetryRoute.BASIC_RAG
         ).answer()).isEqualTo("answer");
     }
 

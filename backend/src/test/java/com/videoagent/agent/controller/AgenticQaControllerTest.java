@@ -46,7 +46,6 @@ class AgenticQaControllerTest {
             .thenReturn(new AgenticQaResponse(
                 "因为延迟低",
                 "SEMANTIC_SEARCH",
-                "RAG",
                 List.of("SEARCH_TRANSCRIPT"),
                 List.of(new AgenticCitation("TRANSCRIPT_SEARCH", 0L, 2000L, "Redis 缓存"))
             ));

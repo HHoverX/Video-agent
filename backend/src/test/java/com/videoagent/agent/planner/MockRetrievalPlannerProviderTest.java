@@ -8,7 +8,6 @@ import com.videoagent.agent.memory.ConversationTurn;
 import com.videoagent.agent.plan.RetrievalAction;
 import com.videoagent.agent.plan.RetrievalPlan;
 import com.videoagent.agent.plan.RetrievalTool;
-import com.videoagent.rag.context.QaContextMode;
 
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +17,7 @@ class MockRetrievalPlannerProviderTest {
 
     private final MockRetrievalPlannerProvider planner = new MockRetrievalPlannerProvider();
     private final AgenticQaContext context = new AgenticQaContext(
-        1L, 7L, 3L, QaContextMode.RAG, true, true, "READY"
+        1L, 7L, 3L, true, true, "READY"
     );
 
     @Test

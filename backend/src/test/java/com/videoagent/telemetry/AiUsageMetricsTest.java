@@ -39,7 +39,7 @@ class AiUsageMetricsTest {
         AiUsageMetrics metrics = new AiUsageMetrics(meterRegistry);
 
         metrics.recordLogicalCall(
-            "qa", "qa_basic", "openai", "model", "basic_direct", "success", "none", 12
+            "qa", "qa_basic", "openai", "model", "basic_rag", "success", "none", 12
         );
 
         Meter.Id id = meterRegistry.get("videoagent.ai.logical.calls").meter().getId();

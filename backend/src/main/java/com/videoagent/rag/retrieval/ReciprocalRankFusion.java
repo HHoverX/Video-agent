@@ -12,8 +12,7 @@ import java.util.Map;
 @Component
 public class ReciprocalRankFusion {
 
-    public List<HybridCandidate> fuse(long videoId, List<VectorPoint> dense, List<LexicalChunk> lexical,
-                                      int k, int candidateLimit) {
+    public List<HybridCandidate> fuse(long videoId, List<VectorPoint> dense, List<LexicalChunk> lexical, int k) {
         Map<String, MutableCandidate> candidates = new LinkedHashMap<>();
         for (int index = 0; index < dense.size(); index++) {
             VectorPoint hit = dense.get(index);
@@ -30,7 +29,6 @@ public class ReciprocalRankFusion {
             .map(MutableCandidate::toImmutable)
             .sorted(Comparator.comparingDouble(HybridCandidate::rrfScore).reversed()
                 .thenComparing(HybridCandidate::chunkId))
-            .limit(candidateLimit)
             .toList();
     }
 
@@ -83,7 +81,7 @@ public class ReciprocalRankFusion {
 
         HybridCandidate toImmutable() {
             return new HybridCandidate(id, index, text, startMs, endMs, segmentIndexes,
-                denseScore, lexicalScore, rrfScore, null);
+                denseScore, lexicalScore, rrfScore);
         }
     }
 }

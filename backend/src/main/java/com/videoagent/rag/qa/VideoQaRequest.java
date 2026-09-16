@@ -3,9 +3,8 @@ package com.videoagent.rag.qa;
 import java.util.List;
 
 /**
- * A QA request carries the already-selected context: either all transcript
- * segments (DIRECT_CONTEXT) or the top-K retrieved chunks (RAG). The provider
- * answers strictly from this context.
+ * A QA request carries the already-selected top-K transcript chunks. The
+ * provider answers strictly from this context.
  */
 public record VideoQaRequest(
     long videoId,

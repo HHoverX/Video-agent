@@ -6,9 +6,6 @@ import com.videoagent.analysis.entity.AnalysisTaskEntity;
 import com.videoagent.rag.chunk.TranscriptChunk;
 import com.videoagent.rag.chunk.TranscriptChunker;
 import com.videoagent.rag.config.EmbeddingProperties;
-import com.videoagent.rag.config.RagProperties;
-import com.videoagent.rag.context.ContextStrategyResolver;
-import com.videoagent.rag.context.QaContextMode;
 import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.entity.RagIndexStatus;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
@@ -39,10 +36,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Builds and tracks the RAG index lifecycle in MySQL (the source of truth),
- * while Milvus holds the derived dense and BM25 data. A short transcript never creates
- * a vector index (NOT_REQUIRED). For RAG transcripts, the build deletes old
- * vectors first, then upserts with deterministic point ids so rebuilds replace
- * rather than accumulate.
+ * while Milvus holds the derived dense and BM25 data. Every valid transcript is
+ * indexed. A build deletes old vectors first, then upserts deterministic point
+ * ids so rebuilds replace rather than accumulate.
  */
 @Service
 public class RagIndexService {
@@ -53,11 +49,9 @@ public class RagIndexService {
     private final VideoRagIndexRepository indexRepository;
     private final VideoTranscriptSegmentRepository segmentRepository;
     private final VideoOwnershipService ownershipService;
-    private final ContextStrategyResolver strategyResolver;
     private final TranscriptChunker chunker;
     private final EmbeddingProvider embeddingProvider;
     private final MilvusTranscriptStore transcriptStore;
-    private final RagProperties ragProperties;
     private final EmbeddingProperties embeddingProperties;
     private final TransactionTemplate transactionTemplate;
     private final AiUsageMetrics usageMetrics;
@@ -67,11 +61,9 @@ public class RagIndexService {
         VideoRagIndexRepository indexRepository,
         VideoTranscriptSegmentRepository segmentRepository,
         VideoOwnershipService ownershipService,
-        ContextStrategyResolver strategyResolver,
         TranscriptChunker chunker,
         EmbeddingProvider embeddingProvider,
         MilvusTranscriptStore transcriptStore,
-        RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
         Optional<PlatformTransactionManager> transactionManager,
         AiUsageMetrics usageMetrics
@@ -79,11 +71,9 @@ public class RagIndexService {
         this.indexRepository = indexRepository;
         this.segmentRepository = segmentRepository;
         this.ownershipService = ownershipService;
-        this.strategyResolver = strategyResolver;
         this.chunker = chunker;
         this.embeddingProvider = embeddingProvider;
         this.transcriptStore = transcriptStore;
-        this.ragProperties = ragProperties;
         this.embeddingProperties = embeddingProperties;
         this.transactionTemplate = transactionManager.map(TransactionTemplate::new).orElse(null);
         this.usageMetrics = usageMetrics == null ? AiUsageMetrics.noop() : usageMetrics;
@@ -93,16 +83,14 @@ public class RagIndexService {
         VideoRagIndexRepository indexRepository,
         VideoTranscriptSegmentRepository segmentRepository,
         VideoOwnershipService ownershipService,
-        ContextStrategyResolver strategyResolver,
         TranscriptChunker chunker,
         EmbeddingProvider embeddingProvider,
         MilvusTranscriptStore transcriptStore,
-        RagProperties ragProperties,
         EmbeddingProperties embeddingProperties,
         Optional<PlatformTransactionManager> transactionManager
     ) {
-        this(indexRepository, segmentRepository, ownershipService, strategyResolver, chunker, embeddingProvider,
-            transcriptStore, ragProperties, embeddingProperties, transactionManager, AiUsageMetrics.noop());
+        this(indexRepository, segmentRepository, ownershipService, chunker, embeddingProvider,
+            transcriptStore, embeddingProperties, transactionManager, AiUsageMetrics.noop());
     }
 
     @Transactional(readOnly = true)
@@ -125,42 +113,22 @@ public class RagIndexService {
         long videoId,
         List<VideoTranscriptSegmentEntity> segments
     ) {
-        long chars = strategyResolver.transcriptChars(segments);
-        QaContextMode mode = strategyResolver.resolveMode(segments);
         Long taskId = latestTaskId(segments);
 
         VideoRagIndexEntity existing = indexRepository.findByVideoId(videoId);
-        if (mode == QaContextMode.DIRECT_CONTEXT) {
-            if (existing == null) {
-                return notRequired(videoId, taskId, chars);
-            }
-            existing.setContextMode(QaContextMode.DIRECT_CONTEXT.name());
-            existing.setStatus(RagIndexStatus.NOT_REQUIRED.name());
-            return existing;
-        }
         if (existing == null) {
-            return notBuilt(videoId, taskId, chars);
+            return notBuilt(videoId, taskId);
         }
-        existing.setContextMode(QaContextMode.RAG.name());
         return existing;
     }
 
     public VideoRagIndexEntity buildIndex(long videoId, long userId) {
         ownershipService.requireOwned(videoId, userId);
-        List<VideoTranscriptSegmentEntity> segments = strategyResolver.requireNonEmpty(loadTranscript(videoId));
-        long chars = strategyResolver.transcriptChars(segments);
-        QaContextMode mode = strategyResolver.resolveMode(segments);
-        if (mode == QaContextMode.DIRECT_CONTEXT) {
-            VideoRagIndexEntity notRequired = transactions().execute(status ->
-                upsertIndex(videoId, userId, segments, chars, mode));
-            log.info("[userId={}][videoId={}][contextMode=DIRECT_CONTEXT][transcriptChars={}] index not required",
-                userId, videoId, chars);
-            return notRequired;
-        }
+        List<VideoTranscriptSegmentEntity> segments = requireNonEmpty(loadTranscript(videoId));
 
         String buildToken = UUID.randomUUID().toString();
         VideoRagIndexEntity index = transactions().execute(status -> {
-            VideoRagIndexEntity candidate = upsertIndex(videoId, userId, segments, chars, mode);
+            VideoRagIndexEntity candidate = upsertIndex(videoId, segments);
             int claimed = claimBuild(candidate.getId(), buildToken);
             if (claimed != 1) {
                 throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
@@ -173,31 +141,25 @@ public class RagIndexService {
 
     /**
      * Analysis-worker entry point. It reads transcript rows by the currently
-     * running task id (the task is intentionally not SUCCESS yet), persists
-     * NOT_REQUIRED for short transcripts, and treats a READY row for the same
-     * task as an embedding checkpoint so retries do not pay for embeddings twice.
+     * running task id (the task is intentionally not SUCCESS yet), and treats a
+     * READY row for the same task as an embedding checkpoint so retries do not
+     * pay for embeddings twice.
      */
     public VideoRagIndexEntity ensureAnalysisIndex(AnalysisTaskEntity task, long userId) {
         long videoId = task.getVideoId();
         ownershipService.requireOwned(videoId, userId);
-        List<VideoTranscriptSegmentEntity> segments = strategyResolver.requireNonEmpty(
+        List<VideoTranscriptSegmentEntity> segments = requireNonEmpty(
             segmentRepository.findByTaskId(task.getId())
         );
-        long chars = strategyResolver.transcriptChars(segments);
-        QaContextMode mode = strategyResolver.resolveMode(segments);
         VideoRagIndexEntity existing = indexRepository.findByVideoId(videoId);
         if (existing != null
             && task.getId().equals(existing.getAnalysisTaskId())
-            && (RagIndexStatus.READY.name().equals(existing.getStatus())
-                || RagIndexStatus.NOT_REQUIRED.name().equals(existing.getStatus()))) {
+            && RagIndexStatus.READY.name().equals(existing.getStatus())) {
             return existing;
-        }
-        if (mode == QaContextMode.DIRECT_CONTEXT) {
-            return transactions().execute(status -> upsertIndex(videoId, userId, segments, chars, mode));
         }
         String buildToken = UUID.randomUUID().toString();
         VideoRagIndexEntity index = transactions().execute(status -> {
-            VideoRagIndexEntity candidate = upsertIndex(videoId, userId, segments, chars, mode);
+            VideoRagIndexEntity candidate = upsertIndex(videoId, segments);
             int claimed = claimBuild(candidate.getId(), buildToken);
             if (claimed != 1) {
                 throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
@@ -249,7 +211,7 @@ public class RagIndexService {
                 throw new VideoAgentException(ErrorCode.RAG_INDEX_BUILD_FAILED,
                     "问答索引状态更新失败");
             }
-            log.info("[userId={}][videoId={}][analysisTaskId={}][ragIndexId={}][contextMode=RAG][chunkCount={}][embeddingProvider={}] index ready",
+            log.info("[userId={}][videoId={}][analysisTaskId={}][ragIndexId={}][chunkCount={}][embeddingProvider={}] index ready",
                 userId, videoId, index.getAnalysisTaskId(), index.getId(), chunks.size(),
                 embeddingProvider.providerName());
             return indexRepository.selectById(index.getId());
@@ -307,10 +269,7 @@ public class RagIndexService {
 
     private VideoRagIndexEntity upsertIndex(
         long videoId,
-        long userId,
-        List<VideoTranscriptSegmentEntity> segments,
-        long chars,
-        QaContextMode mode
+        List<VideoTranscriptSegmentEntity> segments
     ) {
         VideoRagIndexEntity existing = indexRepository.findByVideoId(videoId);
         Long taskId = latestTaskId(segments);
@@ -318,58 +277,33 @@ public class RagIndexService {
             VideoRagIndexEntity created = new VideoRagIndexEntity();
             created.setVideoId(videoId);
             created.setAnalysisTaskId(taskId);
-            created.setStatus(mode == QaContextMode.DIRECT_CONTEXT
-                ? RagIndexStatus.NOT_REQUIRED.name()
-                : RagIndexStatus.NOT_BUILT.name());
-            created.setContextMode(mode.name());
-            created.setTranscriptChars((int) chars);
+            created.setStatus(RagIndexStatus.NOT_BUILT.name());
             created.setChunkCount(0);
-            created.setEmbeddingProvider(mode == QaContextMode.RAG ? embeddingProvider.providerName() : "");
+            created.setEmbeddingProvider(embeddingProvider.providerName());
             created.setEmbeddingModel(embeddingProperties.model());
-            created.setEmbeddingDimension(mode == QaContextMode.RAG ? embeddingProperties.dimension() : 0);
+            created.setEmbeddingDimension(embeddingProperties.dimension());
             created.setCreatedAt(LocalDateTime.now());
             created.setUpdatedAt(LocalDateTime.now());
             indexRepository.insert(created);
             return created;
         }
-        existing.setTranscriptChars((int) chars);
         existing.setAnalysisTaskId(taskId);
-        if (mode == QaContextMode.DIRECT_CONTEXT) {
-            existing.setStatus(RagIndexStatus.NOT_REQUIRED.name());
-            existing.setContextMode(QaContextMode.DIRECT_CONTEXT.name());
-        } else {
-            existing.setContextMode(QaContextMode.RAG.name());
-            if (RagIndexStatus.NOT_REQUIRED.name().equals(existing.getStatus())
-                || RagIndexStatus.READY.name().equals(existing.getStatus())
-                || RagIndexStatus.NOT_BUILT.name().equals(existing.getStatus())) {
-                existing.setStatus(RagIndexStatus.NOT_BUILT.name());
-            }
-            existing.setEmbeddingProvider(embeddingProvider.providerName());
-            existing.setEmbeddingModel(embeddingProperties.model());
-            existing.setEmbeddingDimension(embeddingProperties.dimension());
+        if (RagIndexStatus.READY.name().equals(existing.getStatus())
+            || RagIndexStatus.NOT_BUILT.name().equals(existing.getStatus())) {
+            existing.setStatus(RagIndexStatus.NOT_BUILT.name());
         }
+        existing.setEmbeddingProvider(embeddingProvider.providerName());
+        existing.setEmbeddingModel(embeddingProperties.model());
+        existing.setEmbeddingDimension(embeddingProperties.dimension());
         indexRepository.updateById(existing);
         return existing;
     }
 
-    private VideoRagIndexEntity notRequired(long videoId, Long taskId, long chars) {
-        VideoRagIndexEntity entity = new VideoRagIndexEntity();
-        entity.setVideoId(videoId);
-        entity.setAnalysisTaskId(taskId);
-        entity.setStatus(RagIndexStatus.NOT_REQUIRED.name());
-        entity.setContextMode(QaContextMode.DIRECT_CONTEXT.name());
-        entity.setTranscriptChars((int) chars);
-        entity.setChunkCount(0);
-        return entity;
-    }
-
-    private VideoRagIndexEntity notBuilt(long videoId, Long taskId, long chars) {
+    private VideoRagIndexEntity notBuilt(long videoId, Long taskId) {
         VideoRagIndexEntity entity = new VideoRagIndexEntity();
         entity.setVideoId(videoId);
         entity.setAnalysisTaskId(taskId);
         entity.setStatus(RagIndexStatus.NOT_BUILT.name());
-        entity.setContextMode(QaContextMode.RAG.name());
-        entity.setTranscriptChars((int) chars);
         entity.setChunkCount(0);
         entity.setEmbeddingProvider(embeddingProvider.providerName());
         entity.setEmbeddingModel(embeddingProperties.model());
@@ -379,6 +313,13 @@ public class RagIndexService {
 
     private List<VideoTranscriptSegmentEntity> loadTranscript(long videoId) {
         return segmentRepository.findLatestSuccessfulByVideoId(videoId);
+    }
+
+    private List<VideoTranscriptSegmentEntity> requireNonEmpty(List<VideoTranscriptSegmentEntity> segments) {
+        if (segments == null || segments.isEmpty()) {
+            throw new VideoAgentException(ErrorCode.TRANSCRIPTION_FAILED, "该视频暂无可用字幕，无法建立问答索引");
+        }
+        return segments;
     }
 
     private Long latestTaskId(List<VideoTranscriptSegmentEntity> segments) {

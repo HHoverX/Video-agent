@@ -77,21 +77,13 @@ videoagent:
     batch-size: ${OUTBOX_BATCH_SIZE:20}
     publish-interval-ms: ${OUTBOX_PUBLISH_INTERVAL:5000}
   rag:
-    direct-context-max-chars: ${RAG_DIRECT_CONTEXT_MAX_CHARS:8000}
-    chunk-max-chars: ${RAG_CHUNK_MAX_CHARS:2000}
+    chunk-target-tokens: ${RAG_CHUNK_TARGET_TOKENS:600}
     chunk-overlap-segments: ${RAG_CHUNK_OVERLAP_SEGMENTS:1}
     dense-top-k: ${RAG_DENSE_TOP_K:15}
     dense-minimum-score: ${RAG_DENSE_MINIMUM_SCORE:0.0}
     lexical-top-k: ${RAG_LEXICAL_TOP_K:15}
     rrf-k: ${RAG_RRF_K:60}
-    rrf-candidate-limit: ${RAG_RRF_CANDIDATE_LIMIT:15}
     final-evidence-limit: ${RAG_FINAL_EVIDENCE_LIMIT:5}
-    reranker:
-      enabled: ${RAG_RERANKER_ENABLED:false}
-      base-url: ${RAG_RERANKER_BASE_URL:}
-      api-key: ${RAG_RERANKER_API_KEY:}
-      model: ${RAG_RERANKER_MODEL:}
-      timeout: ${RAG_RERANKER_TIMEOUT:3s}
     milvus:
       uri: ${MILVUS_URI:http://localhost:19530}
       token: ${MILVUS_TOKEN:}

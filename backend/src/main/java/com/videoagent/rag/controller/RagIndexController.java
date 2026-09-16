@@ -27,11 +27,9 @@ public class RagIndexController {
     public RagIndexStatusResponse status(@PathVariable long videoId) {
         VideoRagIndexEntity index = ragIndexService.getStatus(videoId, currentUser.userId());
         return new RagIndexStatusResponse(
-            index.getContextMode(),
             index.getStatus(),
             index.getChunkCount(),
             index.getEmbeddingModel(),
-            index.getTranscriptChars(),
             index.getLastErrorCode(),
             index.getLastErrorMessage()
         );
@@ -41,11 +39,9 @@ public class RagIndexController {
     public RagIndexStatusResponse build(@PathVariable long videoId) {
         VideoRagIndexEntity index = ragIndexService.buildIndex(videoId, currentUser.userId());
         return new RagIndexStatusResponse(
-            index.getContextMode(),
             index.getStatus(),
             index.getChunkCount(),
             index.getEmbeddingModel(),
-            index.getTranscriptChars(),
             index.getLastErrorCode(),
             index.getLastErrorMessage()
         );

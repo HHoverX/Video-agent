@@ -10,15 +10,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
-
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
-import com.videoagent.rag.config.RagProperties;
-import com.videoagent.rag.context.ContextStrategyResolver;
-import com.videoagent.rag.dto.QaCitation;
 import com.videoagent.rag.dto.QaResponse;
 import com.videoagent.rag.entity.RagIndexStatus;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
@@ -27,15 +20,14 @@ import com.videoagent.rag.qa.VideoQaRequest;
 import com.videoagent.rag.qa.VideoQaResult;
 import com.videoagent.rag.retrieval.RetrievedChunk;
 import com.videoagent.rag.retrieval.TranscriptRetriever;
-import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
-import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.telemetry.QaTelemetryContext;
 import com.videoagent.telemetry.QaTelemetryRoute;
+import com.videoagent.transcript.entity.VideoTranscriptSegmentEntity;
+import com.videoagent.transcript.repository.VideoTranscriptSegmentRepository;
 import com.videoagent.video.service.VideoOwnershipService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
@@ -46,91 +38,12 @@ class VideoQaServiceTest {
     private final VideoQaProvider qaProvider = mock(VideoQaProvider.class);
     private final TranscriptRetriever retriever = mock(TranscriptRetriever.class);
     private final RagIndexService ragIndexService = mock(RagIndexService.class);
-    private final RagProperties properties = new RagProperties(100, 200, 1, 5, 0.0f);
     private VideoQaService service;
 
     @BeforeEach
     void setUp() {
         service = new VideoQaService(
-            ownershipService,
-            segmentRepository,
-            new ContextStrategyResolver(properties),
-            qaProvider,
-            retriever,
-            ragIndexService
-        );
-    }
-
-    // ---------- DIRECT_CONTEXT ----------
-
-    @Test
-    void shouldAnswerDirectWithoutEmbeddingOrRetrieval() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(2));
-        when(qaProvider.answer(
-            any(VideoQaRequest.class), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_DIRECT)
-        )).thenReturn(new VideoQaResult("answer", List.of(0)));
-
-        QaResponse response = service.answer(7L, 1L, "问题？");
-
-        assertThat(response.mode()).isEqualTo("DIRECT_CONTEXT");
-        assertThat(response.answer()).isEqualTo("answer");
-        assertThat(response.citations()).hasSize(1);
-        QaCitation citation = response.citations().getFirst();
-        assertThat(citation.startMs()).isZero();
-        assertThat(citation.endMs()).isEqualTo(1000L);
-        assertThat(citation.text()).isEqualTo("first");
-        verify(ownershipService).requireOwned(7L, 1L);
-        verify(retriever, never()).retrieve(
-            anyLong(), anyLong(), any(), any(QaTelemetryContext.class), any(QaTelemetryRoute.class)
-        );
-        verify(ragIndexService, never()).requireReady(anyLong(), anyLong());
-    }
-
-    @Test
-    void shouldPassFullTranscriptInSegmentOrderToProvider() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(3));
-        when(qaProvider.answer(
-            any(VideoQaRequest.class), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_DIRECT)
-        )).thenReturn(new VideoQaResult("ok", List.of(2)));
-
-        service.answer(7L, 1L, "问题？");
-
-        var captor = org.mockito.ArgumentCaptor.forClass(VideoQaRequest.class);
-        verify(qaProvider).answer(
-            captor.capture(), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_DIRECT)
-        );
-        List<VideoQaRequest.ContextItem> context = captor.getValue().context();
-        assertThat(context).extracting(VideoQaRequest.ContextItem::index).containsExactly(0, 1, 2);
-        assertThat(context).extracting(VideoQaRequest.ContextItem::text)
-            .containsExactly("first", "second", "third");
-    }
-
-    @Test
-    void shouldDropHallucinatedSegmentCitation() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(2));
-        // Model cites segment 99 which does not exist -> must be dropped.
-        when(qaProvider.answer(
-            any(VideoQaRequest.class), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_DIRECT)
-        )).thenReturn(new VideoQaResult("ok", List.of(0, 99)));
-
-        QaResponse response = service.answer(7L, 1L, "问题？");
-
-        assertThat(response.citations()).hasSize(1);
-        assertThat(response.citations().getFirst().text()).isEqualTo("first");
-    }
-
-    @Test
-    void shouldFallBackWhenContextInsufficient() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(2));
-        when(qaProvider.answer(
-            any(VideoQaRequest.class), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_DIRECT)
-        ))
-            .thenReturn(new VideoQaResult("根据当前视频内容无法确定。", List.of()));
-
-        QaResponse response = service.answer(7L, 1L, "问题？");
-
-        assertThat(response.answer()).isEqualTo("根据当前视频内容无法确定。");
-        assertThat(response.citations()).isEmpty();
+            ownershipService, segmentRepository, qaProvider, retriever, ragIndexService);
     }
 
     @Test
@@ -140,29 +53,26 @@ class VideoQaServiceTest {
         assertThatThrownBy(() -> service.answer(7L, 1L, "问题？"))
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.TRANSCRIPTION_FAILED));
+        verify(ragIndexService, never()).requireReady(anyLong(), anyLong());
     }
-
-    // ---------- RAG ----------
 
     @Test
     void shouldRejectQaWhenIndexNotReady() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(20));
-        when(ragIndexService.requireReady(7L, 1L)).thenThrow(new VideoAgentException(ErrorCode.RAG_INDEX_NOT_READY));
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(ragIndexService.requireReady(7L, 1L))
+            .thenThrow(new VideoAgentException(ErrorCode.RAG_INDEX_NOT_READY));
 
         assertThatThrownBy(() -> service.answer(7L, 1L, "问题？"))
             .isInstanceOfSatisfying(VideoAgentException.class, exception ->
                 assertThat(exception.errorCode()).isEqualTo(ErrorCode.RAG_INDEX_NOT_READY));
+        verify(retriever, never()).retrieve(
+            anyLong(), anyLong(), any(), any(QaTelemetryContext.class), any(QaTelemetryRoute.class));
     }
 
     @Test
-    void shouldRetrieveAndAnswerInRagMode() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(20));
-        VideoRagIndexEntity index = new VideoRagIndexEntity();
-        index.setId(1L);
-        index.setVideoId(7L);
-        index.setAnalysisTaskId(3L);
-        index.setStatus(RagIndexStatus.READY.name());
-        when(ragIndexService.requireReady(7L, 1L)).thenReturn(index);
+    void shouldRetrieveAndAnswerWhenIndexReady() {
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(ragIndexService.requireReady(7L, 1L)).thenReturn(readyIndex());
         when(retriever.retrieve(
             eq(1L), eq(7L), eq("问题？"), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_RAG)
         )).thenReturn(List.of(
@@ -175,61 +85,50 @@ class VideoQaServiceTest {
 
         QaResponse response = service.answer(7L, 1L, "问题？");
 
-        assertThat(response.mode()).isEqualTo("RAG");
         assertThat(response.answer()).isEqualTo("rag-answer");
-        assertThat(response.citations()).hasSize(1);
-        assertThat(response.citations().getFirst().text()).isEqualTo("chunk-two");
-        assertThat(response.citations().getFirst().startMs()).isEqualTo(4000L);
+        assertThat(response.citations()).singleElement().satisfies(citation -> {
+            assertThat(citation.text()).isEqualTo("chunk-two");
+            assertThat(citation.startMs()).isEqualTo(4000L);
+        });
     }
 
     @Test
     void shouldRejectCitationOutsideRetrievedChunks() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(20));
-        VideoRagIndexEntity index = new VideoRagIndexEntity();
-        index.setStatus(RagIndexStatus.READY.name());
-        when(ragIndexService.requireReady(7L, 1L)).thenReturn(index);
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(ragIndexService.requireReady(7L, 1L)).thenReturn(readyIndex());
         when(retriever.retrieve(
             eq(1L), eq(7L), eq("问题？"), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_RAG)
-        )).thenReturn(List.of(
-            new RetrievedChunk(1, "chunk-one", 2000, 4000, List.of(1), 0.8f)
-        ));
-        // Model cites chunk 5 which was never retrieved -> dropped.
+        )).thenReturn(List.of(new RetrievedChunk(1, "chunk-one", 2000, 4000, List.of(1), 0.8f)));
         when(qaProvider.answer(
             any(VideoQaRequest.class), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_RAG)
         )).thenReturn(new VideoQaResult("answer", List.of(5)));
 
         QaResponse response = service.answer(7L, 1L, "问题？");
 
+        assertThat(response.answer()).isEqualTo("根据当前视频内容无法确定。");
         assertThat(response.citations()).isEmpty();
     }
 
     @Test
-    void shouldFallBackWhenNoRelevantContextInRag() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(20));
-        VideoRagIndexEntity index = new VideoRagIndexEntity();
-        index.setStatus(RagIndexStatus.READY.name());
-        when(ragIndexService.requireReady(7L, 1L)).thenReturn(index);
+    void shouldNotCallProviderWhenRetrievalReturnsNoEvidence() {
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(ragIndexService.requireReady(7L, 1L)).thenReturn(readyIndex());
         when(retriever.retrieve(
             anyLong(), anyLong(), any(), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_RAG)
         )).thenReturn(List.of());
 
         QaResponse response = service.answer(7L, 1L, "问题？");
 
-        assertThat(response.citations()).isEmpty();
         assertThat(response.answer()).isEqualTo("根据当前视频内容无法确定。");
+        assertThat(response.citations()).isEmpty();
         verify(qaProvider, never()).answer(
-            any(VideoQaRequest.class), any(QaTelemetryContext.class), any(QaTelemetryRoute.class)
-        );
+            any(VideoQaRequest.class), any(QaTelemetryContext.class), any(QaTelemetryRoute.class));
     }
 
     @Test
-    void shouldUseOneGeneratedRequestIdAndReadyIndexTaskIdAcrossRagFlow() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(20));
-        VideoRagIndexEntity index = new VideoRagIndexEntity();
-        index.setId(1L);
-        index.setAnalysisTaskId(33L);
-        index.setStatus(RagIndexStatus.READY.name());
-        when(ragIndexService.requireReady(7L, 1L)).thenReturn(index);
+    void shouldShareRequestAndReadyTaskContextAcrossRetrievalAndAnswer() {
+        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments());
+        when(ragIndexService.requireReady(7L, 1L)).thenReturn(readyIndex());
         when(retriever.retrieve(
             eq(1L), eq(7L), eq("问题？"), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_RAG)
         )).thenReturn(List.of(new RetrievedChunk(0, "chunk", 0, 1000, List.of(0), 0.9f)));
@@ -242,53 +141,31 @@ class VideoQaServiceTest {
         var retrieverContext = org.mockito.ArgumentCaptor.forClass(QaTelemetryContext.class);
         var providerContext = org.mockito.ArgumentCaptor.forClass(QaTelemetryContext.class);
         verify(retriever).retrieve(
-            eq(1L), eq(7L), eq("问题？"), retrieverContext.capture(), eq(QaTelemetryRoute.BASIC_RAG)
-        );
+            eq(1L), eq(7L), eq("问题？"), retrieverContext.capture(), eq(QaTelemetryRoute.BASIC_RAG));
         verify(qaProvider).answer(
-            any(VideoQaRequest.class), providerContext.capture(), eq(QaTelemetryRoute.BASIC_RAG)
-        );
+            any(VideoQaRequest.class), providerContext.capture(), eq(QaTelemetryRoute.BASIC_RAG));
         assertThat(retrieverContext.getValue().requestId())
             .isNotBlank()
             .isEqualTo(providerContext.getValue().requestId());
-        assertThat(java.util.UUID.fromString(retrieverContext.getValue().requestId())).isNotNull();
         assertThat(retrieverContext.getValue().analysisTaskId()).isEqualTo(33L);
-        assertThat(providerContext.getValue()).isEqualTo(retrieverContext.getValue());
     }
 
-    @Test
-    void shouldLogOneDirectRequestCompletionWithFallbackFalse() {
-        when(segmentRepository.findLatestSuccessfulByVideoId(7L)).thenReturn(segments(2));
-        when(qaProvider.answer(
-            any(VideoQaRequest.class), any(QaTelemetryContext.class), eq(QaTelemetryRoute.BASIC_DIRECT)
-        )).thenReturn(new VideoQaResult("answer", List.of(0)));
-        Logger logger = (Logger) LoggerFactory.getLogger(VideoQaService.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        logger.addAppender(appender);
-        try {
-            service.answer(7L, 1L, "问题？");
-        } finally {
-            logger.detachAppender(appender);
-        }
-
-        assertThat(appender.list)
-            .filteredOn(event -> event.getFormattedMessage().startsWith("event=ai.qa_request"))
-            .singleElement()
-            .satisfies(event -> assertThat(event.getFormattedMessage())
-                .contains("route=basic_direct", "outcome=success", "fallback=false"));
+    private VideoRagIndexEntity readyIndex() {
+        VideoRagIndexEntity index = new VideoRagIndexEntity();
+        index.setId(1L);
+        index.setVideoId(7L);
+        index.setAnalysisTaskId(33L);
+        index.setStatus(RagIndexStatus.READY.name());
+        return index;
     }
 
-    private List<VideoTranscriptSegmentEntity> segments(int count) {
-        List<VideoTranscriptSegmentEntity> result = new java.util.ArrayList<>();
-        for (int i = 0; i < count; i++) {
-            VideoTranscriptSegmentEntity entity = new VideoTranscriptSegmentEntity();
-            entity.setSegmentIndex(i);
-            entity.setTaskId(11L);
-            entity.setStartMs(i * 1000L);
-            entity.setEndMs((i + 1) * 1000L);
-            entity.setText(i == 0 ? "first" : i == 1 ? "second" : "third");
-            result.add(entity);
-        }
-        return result;
+    private List<VideoTranscriptSegmentEntity> segments() {
+        VideoTranscriptSegmentEntity segment = new VideoTranscriptSegmentEntity();
+        segment.setTaskId(11L);
+        segment.setSegmentIndex(0);
+        segment.setStartMs(0L);
+        segment.setEndMs(1000L);
+        segment.setText("first");
+        return List.of(segment);
     }
 }

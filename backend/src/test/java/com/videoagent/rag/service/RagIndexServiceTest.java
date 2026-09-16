@@ -16,9 +16,9 @@ import static org.mockito.Mockito.when;
 import com.videoagent.common.exception.ErrorCode;
 import com.videoagent.common.exception.VideoAgentException;
 import com.videoagent.rag.chunk.TranscriptChunker;
+import com.videoagent.rag.chunk.HeuristicTokenEstimator;
 import com.videoagent.rag.config.EmbeddingProperties;
 import com.videoagent.rag.config.RagProperties;
-import com.videoagent.rag.context.ContextStrategyResolver;
 import com.videoagent.rag.embedding.EmbeddingProvider;
 import com.videoagent.rag.entity.RagIndexStatus;
 import com.videoagent.rag.entity.VideoRagIndexEntity;
@@ -49,7 +49,7 @@ class RagIndexServiceTest {
     private final EmbeddingProvider embeddingProvider = mock(EmbeddingProvider.class);
     private final MilvusTranscriptStore transcriptStore = mock(MilvusTranscriptStore.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
-    private final RagProperties ragProperties = new RagProperties(1000, 200, 1, 5, 0.0f);
+    private final RagProperties ragProperties = new RagProperties(200, 1, 5, 0.0f);
     private final EmbeddingProperties embeddingProperties = new EmbeddingProperties("mock", "", "", "", 384, java.time.Duration.ofSeconds(30));
     private RagIndexService service;
 
@@ -62,29 +62,33 @@ class RagIndexServiceTest {
             indexRepository,
             segmentRepository,
             ownershipService,
-            new ContextStrategyResolver(ragProperties),
-            new TranscriptChunker(ragProperties),
+            new TranscriptChunker(ragProperties, new HeuristicTokenEstimator()),
             embeddingProvider,
             transcriptStore,
-            ragProperties,
             embeddingProperties,
             java.util.Optional.of(transactionManager)
         );
     }
 
     @Test
-    void shouldNotBuildIndexForShortTranscript() {
+    void shouldBuildIndexForShortTranscript() {
         long videoId = 7L;
         when(segmentRepository.findLatestSuccessfulByVideoId(videoId)).thenReturn(segments(2));
-        when(indexRepository.findByVideoId(videoId)).thenReturn(null);
+        VideoRagIndexEntity index = indexEntity(videoId, 3L, RagIndexStatus.NOT_BUILT.name());
+        VideoRagIndexEntity ready = indexEntity(videoId, 3L, RagIndexStatus.READY.name());
+        when(indexRepository.findByVideoId(videoId)).thenReturn(index);
+        when(indexRepository.claimBuilding(eq(99L), anyString(), any(LocalDateTime.class), any(LocalDateTime.class)))
+            .thenReturn(1);
+        when(embeddingProvider.embedDocuments(any())).thenReturn(List.of(new float[384], new float[384]));
+        when(indexRepository.markReady(eq(99L), anyString(), anyInt(), any(LocalDateTime.class))).thenReturn(1);
+        when(indexRepository.selectById(99L)).thenReturn(ready);
 
         VideoRagIndexEntity result = service.buildIndex(videoId, 1L);
 
-        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.NOT_REQUIRED.name());
-        assertThat(result.getContextMode()).isEqualTo("DIRECT_CONTEXT");
-        verify(embeddingProvider, never()).embedDocuments(any());
-        verify(transcriptStore, never()).upsertPoints(anyLong(), anyLong(), anyLong(), any());
-        verify(transcriptStore, never()).ensureCollection(anyInt());
+        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.READY.name());
+        verify(embeddingProvider).embedDocuments(any());
+        verify(transcriptStore).ensureCollection(384);
+        verify(transcriptStore).upsertPoints(eq(1L), eq(videoId), eq(3L), any());
     }
 
     @Test
@@ -255,7 +259,7 @@ class RagIndexServiceTest {
 
         VideoRagIndexEntity result = service.getStatus(7L, 1L, preloaded);
 
-        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.NOT_REQUIRED.name());
+        assertThat(result.getStatus()).isEqualTo(RagIndexStatus.NOT_BUILT.name());
         assertThat(result.getAnalysisTaskId()).isEqualTo(3L);
         verify(segmentRepository, never()).findLatestSuccessfulByVideoId(anyLong());
     }
@@ -277,8 +281,6 @@ class RagIndexServiceTest {
         entity.setVideoId(videoId);
         entity.setAnalysisTaskId(taskId);
         entity.setStatus(status);
-        entity.setContextMode("RAG");
-        entity.setTranscriptChars(5000);
         entity.setChunkCount(0);
         entity.setEmbeddingProvider("mock");
         entity.setEmbeddingDimension(384);
