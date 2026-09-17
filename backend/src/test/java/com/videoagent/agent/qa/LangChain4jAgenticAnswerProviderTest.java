@@ -49,6 +49,7 @@ class LangChain4jAgenticAnswerProviderTest {
         org.mockito.Mockito.verify(aiService).synthesize(prompt.capture());
         JsonNode document = objectMapper.readTree(prompt.getValue());
         assertThat(document.get("currentQuestion").asText()).isEqualTo("question");
+        assertThat(document.get("conversationSummary").asText()).isEmpty();
         assertThat(document.get("conversationHistory")).isEmpty();
         assertThat(document.get("currentEvidence")).hasSize(1);
         assertThat(document.get("currentEvidence").get(0).get("text").asText()).isEqualTo(malicious);
@@ -56,7 +57,9 @@ class LangChain4jAgenticAnswerProviderTest {
 
     @Test
     void shouldSeparateUntrustedHistoryFromCurrentEvidence() throws Exception {
-        ConversationHistory history = new ConversationHistory(List.of(
+        ConversationHistory history = new ConversationHistory(
+            "E9 是旧摘要文本，不是证据",
+            List.of(
             new ConversationTurn("之前的问题", "E1 是历史文本，不是证据")
         ));
         EvidenceItem currentEvidence = new EvidenceItem(
@@ -74,6 +77,7 @@ class LangChain4jAgenticAnswerProviderTest {
         org.mockito.Mockito.verify(aiService).synthesize(prompt.capture());
         JsonNode document = objectMapper.readTree(prompt.getValue());
         assertThat(document.get("currentQuestion").asText()).isEqualTo("它呢？");
+        assertThat(document.get("conversationSummary").asText()).contains("E9");
         assertThat(document.get("conversationHistory").get(0).get("answer").asText())
             .contains("E1");
         assertThat(document.get("currentEvidence")).hasSize(1);
@@ -85,8 +89,9 @@ class LangChain4jAgenticAnswerProviderTest {
             .getAnnotation(dev.langchain4j.service.SystemMessage.class);
         String instructions = String.join("\n", annotation.value());
         assertThat(instructions)
-            .contains("Use conversationHistory only to", "resolve references", "may be wrong", "currentEvidence")
-            .contains("E1 or E2 inside conversationHistory");
+            .contains("Use conversationSummary and conversationHistory only to",
+                "resolve references", "may be wrong", "currentEvidence")
+            .contains("E1 or E2 inside conversationSummary or conversationHistory");
     }
 
     @Test

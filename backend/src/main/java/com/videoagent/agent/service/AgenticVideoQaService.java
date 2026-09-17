@@ -1,7 +1,6 @@
 package com.videoagent.agent.service;
 
 import com.videoagent.agent.context.AgenticQaContext;
-import com.videoagent.agent.config.ConversationMemoryProperties;
 import com.videoagent.agent.dto.AgenticCitation;
 import com.videoagent.agent.dto.AgenticQaResponse;
 import com.videoagent.agent.evidence.EvidenceItem;
@@ -66,7 +65,6 @@ public class AgenticVideoQaService {
     private final AgenticAnswerProvider answerProvider;
     private final VideoQaService basicQaService;
     private final ConversationMemory conversationMemory;
-    private final ConversationMemoryProperties conversationMemoryProperties;
 
     public AgenticVideoQaService(
         VideoOwnershipService ownershipService,
@@ -79,8 +77,7 @@ public class AgenticVideoQaService {
         EvidenceNormalizer evidenceNormalizer,
         AgenticAnswerProvider answerProvider,
         VideoQaService basicQaService,
-        ConversationMemory conversationMemory,
-        ConversationMemoryProperties conversationMemoryProperties
+        ConversationMemory conversationMemory
     ) {
         this.ownershipService = ownershipService;
         this.segmentRepository = segmentRepository;
@@ -93,7 +90,6 @@ public class AgenticVideoQaService {
         this.answerProvider = answerProvider;
         this.basicQaService = basicQaService;
         this.conversationMemory = conversationMemory;
-        this.conversationMemoryProperties = conversationMemoryProperties;
     }
 
     public AgenticQaResponse answerAgentic(long videoId, long userId, String question) {
@@ -106,7 +102,7 @@ public class AgenticVideoQaService {
         String errorCategory = ErrorCode.INTERNAL_ERROR.name();
         try {
             ownershipService.requireOwned(videoId, userId);
-            ConversationHistory history = loadHistory(userId, videoId);
+            ConversationHistory history = loadHistory(userId, videoId, telemetryContext);
 
             List<VideoTranscriptSegmentEntity> segments = segmentRepository.findLatestSuccessfulByVideoId(videoId);
             AgenticQaContext context = buildContext(videoId, userId, segments);
@@ -115,7 +111,7 @@ public class AgenticVideoQaService {
                 completionDelegatedToBasic = true;
                 AgenticQaResponse response = fallbackToBasic(
                     videoId, userId, question, telemetryContext);
-                return rememberSuccessfulTurn(userId, videoId, question, response);
+                return rememberSuccessfulTurn(userId, videoId, question, response, telemetryContext);
             }
 
             RetrievalPlan plan;
@@ -139,7 +135,7 @@ public class AgenticVideoQaService {
                 completionDelegatedToBasic = true;
                 AgenticQaResponse response = fallbackToBasic(
                     videoId, userId, question, telemetryContext);
-                return rememberSuccessfulTurn(userId, videoId, question, response);
+                return rememberSuccessfulTurn(userId, videoId, question, response, telemetryContext);
             }
 
             List<String> toolsUsed = actions.stream()
@@ -163,7 +159,7 @@ public class AgenticVideoQaService {
                     toolsUsed,
                     List.of()
                 );
-                return rememberSuccessfulTurn(userId, videoId, question, response);
+                return rememberSuccessfulTurn(userId, videoId, question, response, telemetryContext);
             }
 
             AgenticQaResult result = answerProvider.synthesize(
@@ -182,7 +178,7 @@ public class AgenticVideoQaService {
                     toolsUsed,
                     List.of()
                 );
-                return rememberSuccessfulTurn(userId, videoId, question, response);
+                return rememberSuccessfulTurn(userId, videoId, question, response, telemetryContext);
             }
 
             log.info("[requestId={}][userId={}][videoId={}][strategy={}][toolCount={}][toolsUsed={}] agentic qa answered",
@@ -195,7 +191,7 @@ public class AgenticVideoQaService {
                 toolsUsed,
                 citations
             );
-            return rememberSuccessfulTurn(userId, videoId, question, response);
+            return rememberSuccessfulTurn(userId, videoId, question, response, telemetryContext);
         } catch (VideoAgentException exception) {
             errorCategory = exception.errorCode().name();
             throw exception;
@@ -260,23 +256,36 @@ public class AgenticVideoQaService {
 
     private ConversationHistory loadHistory(
         long userId,
-        long videoId
+        long videoId,
+        QaTelemetryContext telemetryContext
     ) {
-        return conversationMemory.load(userId, videoId)
-            .boundedTo(conversationMemoryProperties.maxHistoryChars());
+        try {
+            return conversationMemory.load(userId, videoId, telemetryContext.requestId());
+        } catch (RuntimeException exception) {
+            log.warn("event=memory.load.failure requestId={} userId={} videoId={} exceptionClass={}",
+                telemetryContext.requestId(), userId, videoId, exception.getClass().getSimpleName());
+            return ConversationHistory.empty();
+        }
     }
 
     private AgenticQaResponse rememberSuccessfulTurn(
         long userId,
         long videoId,
         String question,
-        AgenticQaResponse response
+        AgenticQaResponse response,
+        QaTelemetryContext telemetryContext
     ) {
-        conversationMemory.appendTurn(
-            userId,
-            videoId,
-            new ConversationTurn(question, response.answer())
-        );
+        try {
+            conversationMemory.appendTurn(
+                userId,
+                videoId,
+                new ConversationTurn(question, response.answer()),
+                telemetryContext.requestId()
+            );
+        } catch (RuntimeException exception) {
+            log.warn("event=memory.append.failure requestId={} userId={} videoId={} exceptionClass={}",
+                telemetryContext.requestId(), userId, videoId, exception.getClass().getSimpleName());
+        }
         return response;
     }
 

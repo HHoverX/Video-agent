@@ -104,7 +104,7 @@ class LangChain4jRetrievalPlannerTest {
             "SEMANTIC_SEARCH", "ignored",
             List.of(new PlannerAction("SEARCH_TRANSCRIPT", "Redis 缺点", null, null))
         ));
-        ConversationHistory history = new ConversationHistory(List.of(
+        ConversationHistory history = new ConversationHistory("此前持续讨论 Redis 的用途", List.of(
             new ConversationTurn("Redis 在这里做什么？", "历史回答可能不准确")
         ));
 
@@ -114,6 +114,7 @@ class LangChain4jRetrievalPlannerTest {
         org.mockito.Mockito.verify(aiService).plan(prompt.capture());
         JsonNode document = objectMapper.readTree(prompt.getValue());
         assertThat(document.get("currentQuestion").asText()).isEqualTo("它有什么缺点？");
+        assertThat(document.get("conversationSummary").asText()).contains("Redis");
         assertThat(document.get("conversationHistory")).hasSize(1);
         assertThat(document.get("conversationHistory").get(0).get("question").asText())
             .isEqualTo("Redis 在这里做什么？");

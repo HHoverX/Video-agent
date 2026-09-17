@@ -130,22 +130,25 @@ Question + owned video
 
 ```text
 Question + server-bound context
+  → Redis load rolling summary + recent turns（失败则 empty context）
   → RetrievalPlannerProvider
   → RetrievalPlanValidator
   → one bounded Tool execution pass
   → EvidenceNormalizer
   → AgenticAnswerProvider
   → backend Citation Validation
+  → best-effort RPUSH recent
+  → threshold reached: bounded JVM executor schedules async compaction
 ```
 
-它只有一次规划、一次执行、一次合成；没有 ReAct 循环、反思循环或自主扩权。
+它只有一次规划、一次执行、一次合成；没有 ReAct 循环、反思循环或自主扩权。会话摘要不在 Q&A 主请求中同步生成。
 
 ## 5. MySQL / Redis / RocketMQ / MinIO / Milvus 职责
 
 | 组件 | 当前职责 | 明确边界 |
 | --- | --- | --- |
-| MySQL | 用户、视频 metadata / object key、任务状态、Outbox、Transcript、Summary、RAG index 生命周期；最终业务事实来源 | 不保存视频二进制；不能与 RocketMQ、MinIO、Milvus 做一个原子事务 |
-| Redis | `video:analysis:progress:{taskId}` 实时进度快照与 TTL | Best-effort cache；不参与 Claim、Retry、Resume、Recovery、Fencing 或终态判断；不保存 Session |
+| MySQL | 用户、视频 metadata / object key、任务状态、Outbox、Transcript、Summary、RAG index 生命周期；最终业务事实来源 | 不保存视频二进制；不能与 RocketMQ、MinIO、Milvus 做一个原子事务；V13 `conversation_turn` 暂留但当前 Q&A 不再读写 |
+| Redis | `video:analysis:progress:{taskId}` 实时进度；Agentic QA 的 recent List、rolling summary 与 compact lock | 会话记忆可丢失且可降级，不是视频事实；不参与分析任务 Claim、Retry、Resume、Recovery、Fencing 或终态判断 |
 | RocketMQ | At-least-once 异步传递分析消息，解耦 HTTP 与长耗时媒体/AI 处理 | 可能重复投递；不传视频、Transcript 或大对象；不是 Exactly Once |
 | MinIO | 保存原始上传视频，供分析 Worker 下载 | 不保存 ownership、任务状态或分析结果；删除后的对象清理是 best-effort |
 | Milvus | 保存 Transcript Chunk、Dense Vector 和由 BM25 Function 生成的 Sparse Vector，执行混合检索 | 是可从 MySQL Transcript 重建的 Derived Index，不是业务事实来源 |
@@ -324,6 +327,8 @@ Plan schema 只接受封闭 Tool enum，不允许任意 Tool 名称，也不包�
 - Planner / Answer Provider 对认证错误、非法配置、429/5xx/timeout 和内部错误做区分；配置错误不会静默降级 Mock。
 - 只有允许的 Planner transient failure（代码映射为 `AGENT_PLANNER_FAILED`）或 invalid plan（`INVALID_REQUEST`）可以回退 M8.1 Basic QA。
 - Tool 执行完成后若 Synthesizer / Agentic Answer Provider 失败，不会回退并重新执行 Basic QA；该失败直接向上返回。Provider 认证、配置或明确拒绝同样不会被 fallback 隐藏。
+- 会话 summary/history 是不可信辅助上下文，不是 Evidence；Redis 读取失败返回 empty context，append、异步调度或压缩失败均不能改变已经成功生成的回答。
+- 会话压缩只向有界 JVM Executor 提交 `userId + videoId`，任务执行时重新读取 Redis；token lock、List 前缀校验和 Lua 原子提交防止锁过期或并发 append 导致误删。
 
 ## 11. 当前已知限制与 Explicit Non-claims
 
@@ -331,6 +336,7 @@ Plan schema 只接受封闭 Tool enum，不允许任意 Tool 名称，也不包�
 
 - 模块化单体，不是微服务；未证明百万 QPS、高可用集群或生产级多实例部署。
 - Docker Compose 使用单 MySQL、单 Redis、单 MinIO、单 RocketMQ Broker、单 Milvus；没有基础设施 HA。
+- 会话压缩任务只存在于当前 JVM 的有界队列，不持久化；进程退出或队列拒绝会丢失本次触发，但 recent 原文保留，后续问答可再次触发。
 - SSE subscriptions 保存在单应用实例内存，无 Redis Pub/Sub；多实例广播和粘性路由未实现。
 - MinIO / Milvus 删除发生在 MySQL 删除提交后，属于 best-effort cleanup，失败可能留下不可达 orphan data。
 - JWT 没有 refresh / revoke；logout 只清除前端状态，已签发 Token 在过期前仍可验证。
@@ -340,7 +346,7 @@ Plan schema 只接受封闭 Tool enum，不允许任意 Tool 名称，也不包�
 - 不声称 Exactly Once MQ。
 - 不声称 MySQL + RocketMQ 分布式事务或跨系统强一致。
 - 不声称无限重试或零重复外部调用。
-- 不使用 Seata、XA、2PC、Redis 分布式锁、工作流引擎、Kafka、Kubernetes 或微服务治理。
+- 不使用 Seata、XA、2PC、通用分布式锁框架、工作流引擎、Kafka、Kubernetes 或微服务治理；仅会话压缩使用最小 Redis token lock 做单会话 single-flight。
 
 ### RAG / Agent 非声明
 

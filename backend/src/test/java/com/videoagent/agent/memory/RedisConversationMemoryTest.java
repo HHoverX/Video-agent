@@ -2,146 +2,122 @@ package com.videoagent.agent.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.anyCollection;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.videoagent.agent.config.ConversationMemoryProperties;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.data.redis.core.ListOperations;
-import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.time.Duration;
-import java.util.Collection;
 import java.util.List;
 
 class RedisConversationMemoryTest {
 
-    private final StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
-    @SuppressWarnings("unchecked")
-    private final ListOperations<String, String> listOperations = mock(ListOperations.class);
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ConversationRedisStore redisStore = mock(ConversationRedisStore.class);
+    private final ConversationCompactionScheduler scheduler = mock(ConversationCompactionScheduler.class);
+    private final ConversationMemoryMetrics metrics = mock(ConversationMemoryMetrics.class);
     private RedisConversationMemory memory;
 
     @BeforeEach
     void setUp() {
-        when(redisTemplate.opsForList()).thenReturn(listOperations);
-        memory = new RedisConversationMemory(
-            redisTemplate,
-            objectMapper,
-            new ConversationMemoryProperties(Duration.ofHours(24), 2, 6_000)
+        memory = new RedisConversationMemory(redisStore, scheduler, properties(), metrics);
+    }
+
+    @Test
+    void shouldLoadSummaryAndRecentTurnsWithinContextBudget() throws Exception {
+        ConversationTurn turn = new ConversationTurn("q", "a");
+        when(redisStore.load(1L, 7L)).thenReturn(new ConversationHistory("summary", List.of(turn)));
+
+        ConversationHistory history = memory.load(1L, 7L, "request-1");
+
+        assertThat(history.summary()).isEqualTo("summary");
+        assertThat(history.recentTurns()).containsExactly(turn);
+        verify(metrics).increment("load.success");
+    }
+
+    @Test
+    void shouldReturnEmptyContextOnRedisMiss() throws Exception {
+        when(redisStore.load(1L, 7L)).thenReturn(ConversationHistory.empty());
+
+        assertThat(memory.load(1L, 7L, "request-1")).isEqualTo(ConversationHistory.empty());
+        verify(metrics).increment("load.success");
+    }
+
+    @Test
+    void shouldReturnEmptyContextWhenRedisLoadFails() throws Exception {
+        when(redisStore.load(1L, 7L)).thenThrow(new JsonProcessingException("bad json") { });
+
+        assertThat(memory.load(1L, 7L, "request-1")).isEqualTo(ConversationHistory.empty());
+        verify(metrics).increment("load.failure");
+    }
+
+    @Test
+    void shouldAppendWithoutSchedulingBelowTrigger() throws Exception {
+        ConversationTurn turn = new ConversationTurn("q", "a");
+        when(redisStore.append(1L, 7L, turn)).thenReturn(9L);
+
+        memory.appendTurn(1L, 7L, turn, "request-1");
+
+        verify(scheduler, never()).schedule(1L, 7L);
+        verify(metrics).increment("append.success");
+    }
+
+    @Test
+    void shouldOnlyScheduleAsynchronousCompactionAtTrigger() throws Exception {
+        ConversationTurn turn = new ConversationTurn("q", "a");
+        when(redisStore.append(1L, 7L, turn)).thenReturn(10L);
+
+        memory.appendTurn(1L, 7L, turn, "request-1");
+
+        verify(scheduler).schedule(1L, 7L);
+    }
+
+    @Test
+    void shouldNotPropagateRedisAppendFailure() throws Exception {
+        ConversationTurn turn = new ConversationTurn("q", "a");
+        when(redisStore.append(1L, 7L, turn)).thenThrow(new IllegalStateException("redis down"));
+
+        assertThatCode(() -> memory.appendTurn(1L, 7L, turn, "request-1"))
+            .doesNotThrowAnyException();
+        verify(metrics).increment("append.failure");
+    }
+
+    @Test
+    void shouldNotPropagateSchedulerFailure() throws Exception {
+        ConversationTurn turn = new ConversationTurn("q", "a");
+        when(redisStore.append(1L, 7L, turn)).thenReturn(10L);
+        org.mockito.Mockito.doThrow(new IllegalStateException("executor down"))
+            .when(scheduler).schedule(1L, 7L);
+
+        assertThatCode(() -> memory.appendTurn(1L, 7L, turn, "request-1"))
+            .doesNotThrowAnyException();
+        verify(metrics).increment("compact.rejected");
+    }
+
+    @Test
+    void shouldKeepV2KeysIsolatedByUserAndVideo() {
+        assertThat(RedisConversationMemory.recentKey(1L, 7L))
+            .isNotEqualTo(RedisConversationMemory.recentKey(2L, 7L))
+            .isNotEqualTo(RedisConversationMemory.recentKey(1L, 8L))
+            .endsWith(":recent");
+        assertThat(RedisConversationMemory.summaryKey(1L, 7L)).endsWith(":summary");
+        assertThat(RedisConversationMemory.lockKey(1L, 7L)).endsWith(":compact-lock");
+    }
+
+    private ConversationMemoryProperties properties() {
+        return new ConversationMemoryProperties(
+            Duration.ofHours(24),
+            6,
+            10,
+            4,
+            2_000,
+            6_000,
+            Duration.ofMinutes(3)
         );
-    }
-
-    @Test
-    void shouldReturnCacheHitInOldestToNewestOrder() throws Exception {
-        ConversationTurn first = new ConversationTurn("q1", "a1");
-        ConversationTurn second = new ConversationTurn("q2", "a2");
-        when(listOperations.range(RedisConversationMemory.key(1L, 7L), -2, -1))
-            .thenReturn(List.of(
-                objectMapper.writeValueAsString(first),
-                objectMapper.writeValueAsString(second)
-            ));
-
-        assertThat(memory.load(1L, 7L)).contains(new ConversationHistory(List.of(first, second)));
-    }
-
-    @Test
-    void shouldReturnEmptyOptionalOnMiss() {
-        when(listOperations.range(RedisConversationMemory.key(1L, 7L), -2, -1)).thenReturn(List.of());
-
-        assertThat(memory.load(1L, 7L)).isEmpty();
-    }
-
-    @Test
-    void shouldKeepUserAndVideoKeysIsolated() {
-        assertThat(RedisConversationMemory.key(1L, 7L))
-            .isNotEqualTo(RedisConversationMemory.key(2L, 7L))
-            .isNotEqualTo(RedisConversationMemory.key(1L, 8L));
-    }
-
-    @Test
-    void shouldReplaceRecentTurnsUsingExistingV1FormatAndTtl() throws Exception {
-        ConversationTurn first = new ConversationTurn("q1", "a1");
-        ConversationTurn second = new ConversationTurn("q2", "a2");
-
-        memory.replace(1L, 7L, new ConversationHistory(List.of(first, second)));
-
-        String key = RedisConversationMemory.key(1L, 7L);
-        verify(redisTemplate).delete(key);
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<Collection<String>> values = ArgumentCaptor.forClass(Collection.class);
-        verify(listOperations).rightPushAll(org.mockito.ArgumentMatchers.eq(key), values.capture());
-        assertThat(values.getValue()).extracting(value -> {
-            try {
-                return objectMapper.readValue(value, ConversationTurn.class);
-            } catch (JsonProcessingException exception) {
-                throw new AssertionError(exception);
-            }
-        }).containsExactly(first, second);
-        verify(listOperations).trim(key, -2, -1);
-        verify(redisTemplate).expire(key, Duration.ofHours(24));
-    }
-
-    @Test
-    void shouldDeleteStaleKeyWhenMysqlHistoryIsEmpty() {
-        memory.replace(1L, 7L, ConversationHistory.empty());
-
-        verify(redisTemplate).delete(RedisConversationMemory.key(1L, 7L));
-    }
-
-    @Test
-    void shouldTreatRedisReadAndSerializationFailuresAsMisses() {
-        String key = RedisConversationMemory.key(1L, 7L);
-        when(listOperations.range(key, -2, -1))
-            .thenThrow(new DataAccessResourceFailureException("redis unavailable"));
-        assertThat(memory.load(1L, 7L)).isEmpty();
-
-        org.mockito.Mockito.doReturn(List.of("{")).when(listOperations).range(key, -2, -1);
-        assertThat(memory.load(1L, 7L)).isEmpty();
-    }
-
-    @Test
-    void shouldNotPropagateRedisWriteFailure() {
-        when(listOperations.rightPushAll(anyString(), anyCollection()))
-            .thenThrow(new DataAccessResourceFailureException("redis unavailable"));
-
-        assertThatCode(() -> memory.replace(
-            1L, 7L, new ConversationHistory(List.of(new ConversationTurn("q", "a")))
-        )).doesNotThrowAnyException();
-    }
-
-    @Test
-    void shouldNotPropagateTurnSerializationFailure() throws Exception {
-        ObjectMapper failingMapper = mock(ObjectMapper.class);
-        when(failingMapper.writeValueAsString(org.mockito.ArgumentMatchers.any()))
-            .thenThrow(new JsonProcessingException("serialization failed") { });
-        RedisConversationMemory failingMemory = new RedisConversationMemory(
-            redisTemplate,
-            failingMapper,
-            new ConversationMemoryProperties(Duration.ofHours(24), 2, 6_000)
-        );
-
-        assertThatCode(() -> failingMemory.replace(
-            1L, 7L, new ConversationHistory(List.of(new ConversationTurn("q", "a")))
-        )).doesNotThrowAnyException();
-    }
-
-    @Test
-    void shouldPropagateUnexpectedRuntimeFailure() {
-        when(listOperations.range(anyString(), anyLong(), anyLong()))
-            .thenThrow(new IllegalStateException("programming bug"));
-
-        assertThatThrownBy(() -> memory.load(1L, 7L)).isInstanceOf(IllegalStateException.class);
     }
 }

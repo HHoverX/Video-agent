@@ -2,7 +2,6 @@ package com.videoagent.common.health;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.videoagent.agent.memory.ConversationTurnRepository;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.outbox.repository.AnalysisOutboxEventRepository;
@@ -51,9 +50,6 @@ class HealthEndpointIntegrationTest {
 
     @MockitoBean
     private VideoUploadPartRepository videoUploadPartRepository;
-
-    @MockitoBean
-    private ConversationTurnRepository conversationTurnRepository;
 
     @MockitoBean
     private AnalysisTaskRepository analysisTaskRepository;

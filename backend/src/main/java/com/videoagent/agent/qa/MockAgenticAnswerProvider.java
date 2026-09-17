@@ -32,8 +32,8 @@ public class MockAgenticAnswerProvider implements AgenticAnswerProvider {
         int toolActionCount
     ) {
         String contextualQuestion = question;
-        if (history != null && !history.turns().isEmpty() && needsHistory(question)) {
-            String previousQuestion = history.turns().getLast().question();
+        if (history != null && !history.recentTurns().isEmpty() && needsHistory(question)) {
+            String previousQuestion = history.recentTurns().getLast().question();
             if (previousQuestion != null && !previousQuestion.isBlank()) {
                 contextualQuestion = previousQuestion + " " + question;
             }

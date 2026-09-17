@@ -18,7 +18,6 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.videoagent.agent.context.AgenticQaContext;
-import com.videoagent.agent.config.ConversationMemoryProperties;
 import com.videoagent.agent.dto.AgenticCitation;
 import com.videoagent.agent.dto.AgenticQaResponse;
 import com.videoagent.agent.evidence.EvidenceItem;
@@ -55,7 +54,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -72,13 +70,12 @@ class AgenticVideoQaServiceTest {
     private final AgenticAnswerProvider answerProvider = mock(AgenticAnswerProvider.class);
     private final VideoQaService basicQaService = mock(VideoQaService.class);
     private final ConversationMemory conversationMemory = mock(ConversationMemory.class);
-    private final ConversationMemoryProperties conversationMemoryProperties =
-        new ConversationMemoryProperties(Duration.ofHours(24), 6, 256);
     private AgenticVideoQaService service;
 
     @BeforeEach
     void setUp() {
-        when(conversationMemory.load(anyLong(), anyLong())).thenReturn(ConversationHistory.empty());
+        when(conversationMemory.load(anyLong(), anyLong(), anyString()))
+            .thenReturn(ConversationHistory.empty());
         service = new AgenticVideoQaService(
             ownershipService,
             segmentRepository,
@@ -90,8 +87,7 @@ class AgenticVideoQaServiceTest {
             evidenceNormalizer,
             answerProvider,
             basicQaService,
-            conversationMemory,
-            conversationMemoryProperties
+            conversationMemory
         );
     }
 
@@ -150,7 +146,8 @@ class AgenticVideoQaServiceTest {
         assertThat(citation.endMs()).isEqualTo(2000L);
         assertThat(citation.sourceType()).isEqualTo("TRANSCRIPT_SEARCH");
         verify(conversationMemory).appendTurn(
-            1L, 7L, new ConversationTurn("Redis 作用？", "因为 Redis 延迟低"));
+            eq(1L), eq(7L), eq(new ConversationTurn("Redis 作用？", "因为 Redis 延迟低")),
+            anyString());
     }
 
     @Test
@@ -257,7 +254,7 @@ class AgenticVideoQaServiceTest {
         assertThat(java.util.UUID.fromString(context.getValue().requestId())).isNotNull();
         assertThat(context.getValue().analysisTaskId()).isEqualTo(3L);
         verify(conversationMemory, times(1)).appendTurn(
-            1L, 7L, new ConversationTurn("问题", "基础答案"));
+            eq(1L), eq(7L), eq(new ConversationTurn("问题", "基础答案")), anyString());
     }
 
     @Test
@@ -313,7 +310,7 @@ class AgenticVideoQaServiceTest {
         verify(basicQaService, never()).answerWithContext(
             anyLong(), anyLong(), anyString(), any(QaTelemetryContext.class), any(QaTelemetryRoute.class)
         );
-        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any());
+        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any(), anyString());
     }
 
     @Test
@@ -388,7 +385,7 @@ class AgenticVideoQaServiceTest {
         verify(answerProvider, never()).synthesize(anyString(), any(ConversationHistory.class),
             anyList(), any(QaTelemetryContext.class), anyInt());
         verify(conversationMemory).appendTurn(
-            1L, 7L, new ConversationTurn("q", "根据当前视频内容无法确定。"));
+            eq(1L), eq(7L), eq(new ConversationTurn("q", "根据当前视频内容无法确定。")), anyString());
     }
 
     // ---- Injection boundary ----
@@ -433,7 +430,7 @@ class AgenticVideoQaServiceTest {
         } catch (VideoAgentException e) {
             assertThat(e.errorCode()).isEqualTo(ErrorCode.VIDEO_NOT_FOUND);
         }
-        verify(conversationMemory, never()).load(anyLong(), anyLong());
+        verify(conversationMemory, never()).load(anyLong(), anyLong(), anyString());
         verify(planner, never()).plan(any(), anyString(), any(ConversationHistory.class),
             any(QaTelemetryContext.class));
         verify(toolExecutor, never()).execute(any(), anyList());
@@ -444,7 +441,7 @@ class AgenticVideoQaServiceTest {
         ConversationHistory history = new ConversationHistory(List.of(
             new ConversationTurn("Redis 在这里做什么？", "历史回答可能不准确")
         ));
-        when(conversationMemory.load(1L, 7L)).thenReturn(history);
+        when(conversationMemory.load(eq(1L), eq(7L), anyString())).thenReturn(history);
         EvidenceItem evidence = stubAgenticEvidenceFlow("它有什么缺点？");
         when(answerProvider.synthesize(eq("它有什么缺点？"), eq(history), eq(List.of(evidence)),
             any(QaTelemetryContext.class), anyInt()))
@@ -454,7 +451,7 @@ class AgenticVideoQaServiceTest {
 
         org.mockito.InOrder order = org.mockito.Mockito.inOrder(ownershipService, conversationMemory);
         order.verify(ownershipService).requireOwned(7L, 1L);
-        order.verify(conversationMemory).load(1L, 7L);
+        order.verify(conversationMemory).load(eq(1L), eq(7L), anyString());
         verify(planner).plan(any(AgenticQaContext.class), eq("它有什么缺点？"), eq(history),
             any(QaTelemetryContext.class));
         verify(answerProvider).synthesize(eq("它有什么缺点？"), eq(history), eq(List.of(evidence)),
@@ -466,7 +463,7 @@ class AgenticVideoQaServiceTest {
         ConversationHistory history = new ConversationHistory(List.of(
             new ConversationTurn("旧问题", "E1 只出现在历史回答中")
         ));
-        when(conversationMemory.load(1L, 7L)).thenReturn(history);
+        when(conversationMemory.load(eq(1L), eq(7L), anyString())).thenReturn(history);
         stubAgenticEvidenceFlow("q");
         EvidenceItem currentEvidence = new EvidenceItem(
             "E2", EvidenceSourceType.TRANSCRIPT_SEARCH, "current text",
@@ -483,7 +480,7 @@ class AgenticVideoQaServiceTest {
         assertThat(response.answer()).isEqualTo("根据当前视频内容无法确定。");
         assertThat(response.citations()).isEmpty();
         verify(conversationMemory).appendTurn(
-            1L, 7L, new ConversationTurn("q", "根据当前视频内容无法确定。"));
+            eq(1L), eq(7L), eq(new ConversationTurn("q", "根据当前视频内容无法确定。")), anyString());
     }
 
     @Test
@@ -494,7 +491,7 @@ class AgenticVideoQaServiceTest {
 
         assertThatThrownBy(() -> service.answerAgentic(7L, 1L, "tool failure"))
             .isInstanceOf(VideoAgentException.class);
-        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any());
+        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any(), anyString());
     }
 
     @Test
@@ -506,7 +503,7 @@ class AgenticVideoQaServiceTest {
 
         assertThatThrownBy(() -> service.answerAgentic(7L, 1L, "answer failure"))
             .isInstanceOf(VideoAgentException.class);
-        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any());
+        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any(), anyString());
     }
 
     @Test
@@ -525,37 +522,38 @@ class AgenticVideoQaServiceTest {
 
         assertThatThrownBy(() -> service.answerAgentic(7L, 1L, "问题"))
             .isInstanceOf(VideoAgentException.class);
-        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any());
+        verify(conversationMemory, never()).appendTurn(anyLong(), anyLong(), any(), anyString());
     }
 
     @Test
-    void shouldPropagateUnexpectedMemoryWriteFailure() {
+    void shouldReturnSuccessfulAnswerWhenMemoryWriteFails() {
         EvidenceItem evidence = stubAgenticEvidenceFlow("q");
         when(answerProvider.synthesize(eq("q"), any(ConversationHistory.class), eq(List.of(evidence)),
             any(QaTelemetryContext.class), anyInt()))
             .thenReturn(new AgenticQaResult("answer", List.of("E1")));
         org.mockito.Mockito.doThrow(new NullPointerException("programming bug"))
-            .when(conversationMemory).appendTurn(anyLong(), anyLong(), any());
+            .when(conversationMemory).appendTurn(anyLong(), anyLong(), any(), anyString());
 
-        assertThatThrownBy(() -> service.answerAgentic(7L, 1L, "q"))
-            .isInstanceOf(NullPointerException.class);
+        assertThat(service.answerAgentic(7L, 1L, "q").answer()).isEqualTo("answer");
     }
 
     @Test
-    void shouldPropagateUnexpectedMemoryLoadFailure() {
-        when(conversationMemory.load(1L, 7L)).thenThrow(new NullPointerException("programming bug"));
+    void shouldContinueWithEmptyHistoryWhenMemoryLoadFails() {
+        when(conversationMemory.load(eq(1L), eq(7L), anyString()))
+            .thenThrow(new NullPointerException("programming bug"));
+        EvidenceItem evidence = stubAgenticEvidenceFlow("q");
+        when(answerProvider.synthesize(eq("q"), eq(ConversationHistory.empty()), eq(List.of(evidence)),
+            any(QaTelemetryContext.class), anyInt()))
+            .thenReturn(new AgenticQaResult("answer", List.of("E1")));
 
-        assertThatThrownBy(() -> service.answerAgentic(7L, 1L, "q"))
-            .isInstanceOf(NullPointerException.class);
+        assertThat(service.answerAgentic(7L, 1L, "q").answer()).isEqualTo("answer");
     }
 
     @Test
-    void shouldPassOneBoundedHistoryToPlannerAndAnswerProvider() {
-        ConversationTurn older = new ConversationTurn("o".repeat(200), "a".repeat(100));
+    void shouldPassOneLoadedHistoryToPlannerAndAnswerProvider() {
         ConversationTurn newest = new ConversationTurn("Redis 在这里做什么？", "历史回答");
-        ConversationHistory storedHistory = new ConversationHistory(List.of(older, newest));
         ConversationHistory expectedHistory = new ConversationHistory(List.of(newest));
-        when(conversationMemory.load(1L, 7L)).thenReturn(storedHistory);
+        when(conversationMemory.load(eq(1L), eq(7L), anyString())).thenReturn(expectedHistory);
         EvidenceItem evidence = stubAgenticEvidenceFlow("它有什么缺点？");
         when(answerProvider.synthesize(eq("它有什么缺点？"), eq(expectedHistory), eq(List.of(evidence)),
             any(QaTelemetryContext.class), anyInt()))

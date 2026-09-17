@@ -165,13 +165,15 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
         ConversationHistory history,
         List<EvidenceItem> evidence
     ) {
-        List<ConversationTurn> turns = history == null ? List.of() : history.turns();
+        String summary = history == null ? "" : history.summary();
+        List<ConversationTurn> turns = history == null ? List.of() : history.recentTurns();
         List<PromptEvidence> promptEvidence = evidence.stream()
             .map(item -> new PromptEvidence(
                 item.evidenceId(), item.sourceType().name(), item.text(), item.startMs(), item.endMs()))
             .toList();
         try {
-            return objectMapper.writeValueAsString(new AnswerPrompt(question, turns, promptEvidence));
+            return objectMapper.writeValueAsString(new AnswerPrompt(
+                question, summary, turns, promptEvidence));
         } catch (JsonProcessingException exception) {
             throw new VideoAgentException(
                 ErrorCode.INTERNAL_ERROR,
@@ -191,6 +193,7 @@ public class LangChain4jAgenticAnswerProvider implements AgenticAnswerProvider {
 
     private record AnswerPrompt(
         String currentQuestion,
+        String conversationSummary,
         List<ConversationTurn> conversationHistory,
         List<PromptEvidence> currentEvidence
     ) {

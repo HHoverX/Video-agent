@@ -63,11 +63,11 @@ public class MockRetrievalPlannerProvider implements RetrievalPlannerProvider {
 
     private String contextualQuestion(String question, ConversationHistory history) {
         String current = question == null ? "" : question.toLowerCase(Locale.ROOT);
-        if (history == null || history.turns().isEmpty()
+        if (history == null || history.recentTurns().isEmpty()
             || !containsAny(current, "它", "这个", "那个", "刚才", "前面", "上述", "这种", "那")) {
             return question;
         }
-        String previousQuestion = history.turns().getLast().question();
+        String previousQuestion = history.recentTurns().getLast().question();
         if (previousQuestion == null || previousQuestion.isBlank()) {
             return question;
         }

@@ -19,7 +19,6 @@ import com.videoagent.analysis.dto.AnalysisTaskResponse;
 import com.videoagent.analysis.repository.AnalysisTaskRepository;
 import com.videoagent.analysis.service.AnalysisEventService;
 import com.videoagent.analysis.service.AnalysisQueryService;
-import com.videoagent.agent.memory.ConversationTurnRepository;
 import com.videoagent.auth.entity.AppUserEntity;
 import com.videoagent.auth.repository.AppUserRepository;
 import com.videoagent.common.exception.ErrorCode;
@@ -79,9 +78,6 @@ class SecurityEndpointIntegrationTest {
 
     @MockitoBean
     private VideoUploadPartRepository uploadPartRepository;
-
-    @MockitoBean
-    private ConversationTurnRepository conversationTurnRepository;
 
     @MockitoBean
     private AnalysisTaskRepository taskRepository;

@@ -2,7 +2,7 @@
 
 VideoAgent 是一个面向长视频的智能分析与问答系统。用户上传 MP4 视频后，系统异步完成音频提取、ASR 字幕生成、结构化总结和检索索引构建，并基于真实字幕证据回答问题、返回可跳转的时间范围。
 
-项目采用 Vue 3 + Spring Boot 模块化单体。MySQL 保存业务事实，MinIO 保存视频与临时分片，RocketMQ 传递异步分析消息，Redis 提供上传进度、限流、任务进度和会话缓存，Milvus 统一承载长字幕的 Dense 与 BM25 派生索引。
+项目采用 Vue 3 + Spring Boot 模块化单体。MySQL 保存业务事实，MinIO 保存视频与临时分片，RocketMQ 传递异步分析消息，Redis 提供上传进度、限流、任务进度和短期会话记忆，Milvus 统一承载长字幕的 Dense 与 BM25 派生索引。
 
 > 当前实现只支持 MP4。长视频上传使用“临时分片对象 + MinIO Compose”，不是原生 S3 Multipart Upload。
 
@@ -31,7 +31,7 @@ VideoAgent 是一个面向长视频的智能分析与问答系统。用户上传
 - **混合检索**：Dense Retrieval 与 Milvus BM25 分别召回，应用层执行 RRF，截取最终 Top-K Evidence。
 - **证据约束问答**：检索始终绑定服务端确定的 `userId + videoId`；模型只返回请求内 Evidence ID，最终时间戳由后端映射真实字幕证据。
 - **紧凑视频工作区**：桌面端播放器与 AI Q&A 在左栏纵向排列并保持 `24px` 间距，右侧内容面板独立展示；小屏继续使用现有单列响应式布局。
-- **多轮会话记忆**：MySQL 保存持久会话，Redis 缓存最近历史；Redis 不可用时回退 MySQL。
+- **可降级多轮会话记忆**：Redis List 保存最近完整问答，Redis String 保存更早历史滚动摘要；压缩由 JVM 有界线程池异步执行，Redis 故障时退化为无历史的单轮问答。
 
 ## 系统架构
 
@@ -124,7 +124,7 @@ docker compose ps
 | 服务 | 默认地址 | 用途 |
 | --- | --- | --- |
 | MySQL | `localhost:3306` | 业务数据与 Flyway 迁移 |
-| Redis | `localhost:6380` | Bitmap、令牌桶、进度和会话缓存 |
+| Redis | `localhost:6380` | Bitmap、令牌桶、进度和短期会话记忆 |
 | MinIO API | `http://localhost:9000` | 本地对象存储 |
 | MinIO Console | `http://localhost:9001` | MinIO 管理界面 |
 | Upload Gateway | `http://localhost:9002` | 浏览器预签名 PUT 入口 |
@@ -325,9 +325,19 @@ POST /api/videos/{videoId}/qa
 POST /api/videos/{videoId}/qa/agentic
 ```
 
+Agentic QA 的会话记忆按 `userId + videoId` 隔离，使用以下 Redis v2 key：
+
+```text
+videoagent:agentic-qa:memory:v2:{userId}:{videoId}:recent
+videoagent:agentic-qa:memory:v2:{userId}:{videoId}:summary
+videoagent:agentic-qa:memory:v2:{userId}:{videoId}:compact-lock
+```
+
+主请求只追加 recent 并在达到阈值时向 JVM 有界线程池提交压缩检查，不等待摘要 LLM。压缩任务重新读取 Redis，通过带 TTL 的 token lock 和提交时 List 前缀校验，原子更新 summary 并裁掉已覆盖的旧 turns。失败或任务拒绝时保留原文；summary/history 只帮助理解指代和意图，当前 Evidence 仍是视频事实与 Citation 的唯一来源。
+
 ## 数据库与迁移
 
-Flyway 脚本位于 `backend/src/main/resources/db/migration`，当前范围为 `V1`–`V16`。
+Flyway 脚本位于 `backend/src/main/resources/db/migration`，当前范围为 `V1`–`V17`。
 
 | 表 | 职责 |
 | --- | --- |
@@ -338,7 +348,7 @@ Flyway 脚本位于 `backend/src/main/resources/db/migration`，当前范围为 
 | `video_transcript_segment` | 带时间戳的 ASR 字幕 Checkpoint |
 | `video_summary`、`video_chapter`、`video_key_point` | 结构化总结 Checkpoint |
 | `video_rag_index` | RAG 构建状态、租约和 build token |
-| `conversation_turn` | 按用户和视频隔离的持久对话历史 |
+| `conversation_turn` | V13 创建的旧会话表；暂留用于短期回退兼容，当前运行时不再读写 |
 
 最新迁移：
 
@@ -387,6 +397,9 @@ mvn '-Dtest=Milestone8RagInfrastructureIntegrationTest' test
 
 $env:VIDEOAGENT_M8_AGENT_INFRA_TEST = 'true'
 mvn '-Dtest=Milestone8AgentInfrastructureIntegrationTest' test
+
+$env:VIDEOAGENT_MEMORY_INFRA_TEST = 'true'
+mvn '-Dtest=ConversationMemoryInfrastructureIntegrationTest' test
 
 $env:VIDEOAGENT_M7_INFRA_TEST = 'true'
 mvn '-Dtest=Milestone7ReliabilityInfrastructureIntegrationTest,M7TransactionalAtomicityIntegrationTest' test

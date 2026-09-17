@@ -106,8 +106,17 @@ videoagent:
     planner-model: ${AGENT_PLANNER_MODEL:}
     memory:
       ttl: ${AGENT_MEMORY_TTL:24h}
-      max-turns: ${AGENT_MEMORY_MAX_TURNS:6}
-      max-history-chars: ${AGENT_MEMORY_MAX_HISTORY_CHARS:6000}
+      recent-turns: ${AGENT_MEMORY_RECENT_TURNS:6}
+      compact-trigger-turns: ${AGENT_MEMORY_COMPACT_TRIGGER_TURNS:10}
+      compact-batch-turns: ${AGENT_MEMORY_COMPACT_BATCH_TURNS:4}
+      max-summary-chars: ${AGENT_MEMORY_MAX_SUMMARY_CHARS:2000}
+      max-context-chars: ${AGENT_MEMORY_MAX_CONTEXT_CHARS:6000}
+      compact-lock-ttl: ${AGENT_MEMORY_COMPACT_LOCK_TTL:3m}
+      compaction-executor:
+        core-size: ${AGENT_MEMORY_COMPACTION_CORE_SIZE:1}
+        max-size: ${AGENT_MEMORY_COMPACTION_MAX_SIZE:2}
+        queue-capacity: ${AGENT_MEMORY_COMPACTION_QUEUE_CAPACITY:100}
+        keep-alive: ${AGENT_MEMORY_COMPACTION_KEEP_ALIVE:30s}
   media:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffprobe-path: ${FFPROBE_PATH:ffprobe}

@@ -1,200 +1,339 @@
 package com.videoagent.agent.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.doAnswer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.videoagent.auth.entity.AppUserEntity;
-import com.videoagent.auth.repository.AppUserRepository;
-import com.videoagent.video.entity.VideoEntity;
-import com.videoagent.video.repository.VideoRepository;
+import com.videoagent.agent.config.ConversationMemoryProperties;
+import com.videoagent.agent.memory.ConversationRedisStore.CommitResult;
+import com.videoagent.agent.memory.ConversationRedisStore.CompactionSnapshot;
+import com.videoagent.agent.memory.summary.ConversationSummaryProvider;
 
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
-import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
-@EnabledIfEnvironmentVariable(named = "VIDEOAGENT_MEMORY_INFRA_TEST", matches = "true")
 @SpringBootTest(properties = {
-    "videoagent.analysis.consumer-group=videoagent-memory-${random.uuid}",
-    "videoagent.ai.asr.provider=mock",
     "videoagent.ai.llm.provider=mock",
-    "videoagent.agent.memory.max-turns=3",
-    "videoagent.agent.memory.ttl=5m"
+    "videoagent.agent.memory.ttl=5m",
+    "videoagent.agent.memory.recent-turns=2",
+    "videoagent.agent.memory.compact-trigger-turns=4",
+    "videoagent.agent.memory.compact-batch-turns=2",
+    "videoagent.agent.memory.max-summary-chars=2000",
+    "videoagent.agent.memory.max-context-chars=6000"
 })
+@EnabledIfEnvironmentVariable(named = "VIDEOAGENT_MEMORY_INFRA_TEST", matches = "true")
 class ConversationMemoryInfrastructureIntegrationTest {
 
-    @Autowired
-    private PersistentConversationMemory memory;
+    private static final DefaultRedisScript<Long> REPLACE_STATE = new DefaultRedisScript<>("""
+        redis.call('SET', KEYS[1], ARGV[1])
+        redis.call('DEL', KEYS[2])
+        redis.call('RPUSH', KEYS[2], ARGV[2])
+        return 1
+        """, Long.class);
 
     @Autowired
-    private ConversationTurnStore turnStore;
+    private RedisConversationMemory memory;
 
     @Autowired
-    private ConversationTurnRepository turnRepository;
+    private ConversationRedisStore redisStore;
 
     @Autowired
-    private AppUserRepository userRepository;
+    private ConversationCompactionService compactionService;
 
     @Autowired
-    private VideoRepository videoRepository;
+    private ConversationMemoryProperties memoryProperties;
+
+    @Autowired
+    private ConversationMemoryMetrics metrics;
 
     @Autowired
     private StringRedisTemplate redisTemplate;
 
     @Autowired
-    private JdbcTemplate jdbcTemplate;
-
-    @Autowired
     private ObjectMapper objectMapper;
 
-    @MockitoSpyBean
-    private RedisConversationMemory redisMemory;
-
-    private final List<Long> userIds = new ArrayList<>();
-    private final List<Long> videoIds = new ArrayList<>();
-
-    @BeforeEach
-    void assertInfrastructureAndTransactionBoundary() {
-        assertThat(jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM information_schema.statistics "
-                + "WHERE table_schema = DATABASE() AND table_name = 'conversation_turn' "
-                + "AND index_name = 'idx_conversation_turn_recent'",
-            Long.class
-        )).isEqualTo(4L);
-
-        doAnswer(invocation -> {
-            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-            return invocation.callRealMethod();
-        }).when(redisMemory).load(anyLong(), anyLong());
-        doAnswer(invocation -> {
-            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-            return invocation.callRealMethod();
-        }).when(redisMemory).replace(anyLong(), anyLong(), any(ConversationHistory.class));
-    }
+    private final List<Long> conversationIds = new ArrayList<>();
 
     @AfterEach
     void cleanUp() {
-        for (Long userId : userIds) {
-            for (Long videoId : videoIds) {
-                redisTemplate.delete(RedisConversationMemory.key(userId, videoId));
+        for (Long id : conversationIds) {
+            redisTemplate.delete(List.of(
+                RedisConversationMemory.recentKey(id, id),
+                RedisConversationMemory.summaryKey(id, id),
+                RedisConversationMemory.lockKey(id, id)
+            ));
+        }
+        conversationIds.clear();
+    }
+
+    @Test
+    void shouldReturnEmptyContextOnRedisMiss() {
+        long id = conversationId();
+
+        assertThat(memory.load(id, id, "request-1")).isEqualTo(ConversationHistory.empty());
+    }
+
+    @Test
+    void shouldAppendLoadAndRefreshRecentAndSummaryTtl() {
+        long id = conversationId();
+        ConversationTurn turn = new ConversationTurn("q1", "a1");
+        redisTemplate.opsForValue().set(
+            RedisConversationMemory.summaryKey(id, id),
+            "old-summary",
+            Duration.ofSeconds(30)
+        );
+
+        memory.appendTurn(id, id, turn, "request-1");
+        ConversationHistory history = memory.load(id, id, "request-2");
+
+        assertThat(history.summary()).isEqualTo("old-summary");
+        assertThat(history.recentTurns()).containsExactly(turn);
+        assertThat(redisTemplate.getExpire(RedisConversationMemory.recentKey(id, id)))
+            .isGreaterThan(240L)
+            .isLessThanOrEqualTo(300L);
+        assertThat(redisTemplate.getExpire(RedisConversationMemory.summaryKey(id, id)))
+            .isGreaterThan(240L)
+            .isLessThanOrEqualTo(300L);
+    }
+
+    @Test
+    void shouldCompactOldestBatchAndKeepOriginalTurnsUntilCommitSucceeds() throws Exception {
+        long id = conversationId();
+        append(id, 1, 4);
+
+        compactionService.compact(id, id);
+
+        ConversationHistory history = memory.load(id, id, "request-1");
+        assertThat(history.summary()).isNotBlank();
+        assertThat(history.recentTurns()).extracting(ConversationTurn::question)
+            .containsExactly("q3", "q4");
+        assertThat(redisTemplate.getExpire(RedisConversationMemory.summaryKey(id, id)))
+            .isPositive()
+            .isLessThanOrEqualTo(300L);
+        assertThat(redisTemplate.getExpire(RedisConversationMemory.recentKey(id, id)))
+            .isPositive()
+            .isLessThanOrEqualTo(300L);
+    }
+
+    @Test
+    void shouldNotDeleteTurnsTwiceWhenCompactionIsRepeated() throws Exception {
+        long id = conversationId();
+        append(id, 1, 4);
+
+        compactionService.compact(id, id);
+        String firstSummary = redisTemplate.opsForValue().get(
+            RedisConversationMemory.summaryKey(id, id));
+        compactionService.compact(id, id);
+
+        assertThat(redisTemplate.opsForValue().get(RedisConversationMemory.summaryKey(id, id)))
+            .isEqualTo(firstSummary);
+        assertThat(memory.load(id, id, "request-1").recentTurns())
+            .extracting(ConversationTurn::question)
+            .containsExactly("q3", "q4");
+    }
+
+    @Test
+    void shouldAllowOnlyOneEffectiveConcurrentCompaction() throws Exception {
+        long id = conversationId();
+        append(id, 1, 4);
+        AtomicInteger summaryCalls = new AtomicInteger();
+        CountDownLatch firstSummaryStarted = new CountDownLatch(1);
+        CountDownLatch allowFirstSummaryToFinish = new CountDownLatch(1);
+        ConversationSummaryProvider blockingProvider = (oldSummary, turns, maxChars) -> {
+            summaryCalls.incrementAndGet();
+            firstSummaryStarted.countDown();
+            try {
+                if (!allowFirstSummaryToFinish.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out waiting to finish test summary");
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting to finish test summary", exception);
             }
-        }
-        for (Long videoId : videoIds.reversed()) {
-            videoRepository.deleteById(videoId);
-        }
-        for (Long userId : userIds.reversed()) {
-            userRepository.deleteById(userId);
-        }
-        videoIds.clear();
-        userIds.clear();
-    }
+            return "concurrent-summary";
+        };
+        ConversationCompactionService concurrentService = new ConversationCompactionService(
+            redisStore, blockingProvider, memoryProperties, metrics);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
 
-    @Test
-    void shouldKeepFullMysqlHistoryAndRefillOnlyRecentTurnsWithTtl() throws Exception {
-        long userId = insertUser("memory-full");
-        long videoId = insertVideo(userId, "Full history");
-        for (int index = 1; index <= 5; index++) {
-            memory.appendTurn(userId, videoId, new ConversationTurn("q" + index, "a" + index));
-        }
-
-        assertThat(turnRepository.countByUserIdAndVideoId(userId, videoId)).isEqualTo(5L);
-        redisTemplate.delete(RedisConversationMemory.key(userId, videoId));
-
-        ConversationHistory recovered = memory.load(userId, videoId);
-
-        assertThat(recovered.turns()).extracting(ConversationTurn::question)
-            .containsExactly("q3", "q4", "q5");
-        String key = RedisConversationMemory.key(userId, videoId);
-        assertThat(redisTemplate.opsForList().size(key)).isEqualTo(3L);
-        Long ttlSeconds = redisTemplate.getExpire(key);
-        assertThat(ttlSeconds).isPositive().isLessThanOrEqualTo(300L);
-        assertThat(redisTemplate.opsForList().range(key, 0, -1))
-            .extracting(this::questionFromJson)
-            .containsExactly("q3", "q4", "q5");
-    }
-
-    @Test
-    void shouldUseIdTieBreakerAndKeepUserVideoHistoriesIsolated() {
-        long userA = insertUser("memory-a");
-        long userB = insertUser("memory-b");
-        long videoX = insertVideo(userA, "Video X");
-        long videoY = insertVideo(userA, "Video Y");
-        LocalDateTime sameMillisecond = LocalDateTime.now().truncatedTo(ChronoUnit.MILLIS);
-
-        insertTurn(userA, videoX, "a-x-1", sameMillisecond);
-        insertTurn(userA, videoX, "a-x-2", sameMillisecond);
-        insertTurn(userA, videoY, "a-y", sameMillisecond);
-        insertTurn(userB, videoX, "b-x", sameMillisecond);
-
-        assertThat(turnStore.loadRecent(userA, videoX, 3).turns())
-            .extracting(ConversationTurn::question)
-            .containsExactly("a-x-1", "a-x-2");
-        assertThat(turnStore.loadRecent(userA, videoY, 3).turns())
-            .extracting(ConversationTurn::question)
-            .containsExactly("a-y");
-        assertThat(turnStore.loadRecent(userB, videoX, 3).turns())
-            .extracting(ConversationTurn::question)
-            .containsExactly("b-x");
-    }
-
-    private long insertUser(String prefix) {
-        LocalDateTime now = LocalDateTime.now();
-        AppUserEntity user = new AppUserEntity();
-        user.setUsername(prefix + "-" + System.nanoTime());
-        user.setPasswordHash("test-password-hash");
-        user.setCreatedAt(now);
-        user.setUpdatedAt(now);
-        assertThat(userRepository.insert(user)).isEqualTo(1);
-        userIds.add(user.getId());
-        return user.getId();
-    }
-
-    private long insertVideo(long userId, String title) {
-        LocalDateTime now = LocalDateTime.now();
-        VideoEntity video = new VideoEntity();
-        video.setUserId(userId);
-        video.setTitle(title);
-        video.setOriginalFilename("memory.mp4");
-        video.setObjectKey("videos/memory-" + System.nanoTime() + ".mp4");
-        video.setFileSize(24L);
-        video.setMimeType("video/mp4");
-        video.setStatus("UPLOADED");
-        video.setCreatedAt(now);
-        video.setUpdatedAt(now);
-        assertThat(videoRepository.insert(video)).isEqualTo(1);
-        videoIds.add(video.getId());
-        return video.getId();
-    }
-
-    private void insertTurn(long userId, long videoId, String question, LocalDateTime createdAt) {
-        ConversationTurnEntity entity = new ConversationTurnEntity();
-        entity.setUserId(userId);
-        entity.setVideoId(videoId);
-        entity.setQuestion(question);
-        entity.setAnswer("answer-" + question);
-        entity.setCreatedAt(createdAt);
-        assertThat(turnRepository.insert(entity)).isEqualTo(1);
-    }
-
-    private String questionFromJson(String value) {
         try {
-            return objectMapper.readValue(value, ConversationTurn.class).question();
-        } catch (Exception exception) {
-            throw new AssertionError(exception);
+            Future<?> first = executor.submit(() -> concurrentService.compact(id, id));
+            assertThat(firstSummaryStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<?> second = executor.submit(() -> concurrentService.compact(id, id));
+            second.get(5, TimeUnit.SECONDS);
+            allowFirstSummaryToFinish.countDown();
+            first.get(5, TimeUnit.SECONDS);
+        } finally {
+            allowFirstSummaryToFinish.countDown();
+            executor.shutdownNow();
         }
+
+        assertThat(summaryCalls).hasValue(1);
+        assertThat(memory.load(id, id, "request-1").recentTurns())
+            .extracting(ConversationTurn::question)
+            .containsExactly("q3", "q4");
+        assertThat(redisTemplate.opsForValue().get(RedisConversationMemory.summaryKey(id, id)))
+            .isEqualTo("concurrent-summary");
+    }
+
+    @Test
+    void shouldPreserveTurnsAppendedWhileSnapshotIsBeingSummarized() throws Exception {
+        long id = conversationId();
+        append(id, 1, 4);
+        String token = UUID.randomUUID().toString();
+        assertThat(redisStore.tryAcquireLock(id, id, token)).isTrue();
+        CompactionSnapshot snapshot = redisStore.snapshot(id, id).orElseThrow();
+
+        append(id, 5, 6);
+        CommitResult result = redisStore.commit(id, id, token, snapshot, "summary-1-2");
+
+        assertThat(result).isEqualTo(CommitResult.SUCCESS);
+        assertThat(memory.load(id, id, "request-1").recentTurns())
+            .extracting(ConversationTurn::question)
+            .containsExactly("q3", "q4", "q5", "q6");
+    }
+
+    @Test
+    void shouldRejectStaleTokenWithoutDeletingTurns() throws Exception {
+        long id = conversationId();
+        append(id, 1, 4);
+        String staleToken = UUID.randomUUID().toString();
+        assertThat(redisStore.tryAcquireLock(id, id, staleToken)).isTrue();
+        CompactionSnapshot snapshot = redisStore.snapshot(id, id).orElseThrow();
+        redisTemplate.opsForValue().set(RedisConversationMemory.lockKey(id, id), "new-owner");
+
+        CommitResult result = redisStore.commit(id, id, staleToken, snapshot, "must-not-commit");
+
+        assertThat(result).isEqualTo(CommitResult.LOCK_LOST);
+        assertThat(redisTemplate.opsForList().size(RedisConversationMemory.recentKey(id, id)))
+            .isEqualTo(4L);
+        assertThat(redisTemplate.opsForValue().get(RedisConversationMemory.summaryKey(id, id)))
+            .isNull();
+    }
+
+    @Test
+    void shouldNotReleaseLockOwnedByAnotherCompactor() {
+        long id = conversationId();
+        String staleToken = UUID.randomUUID().toString();
+        assertThat(redisStore.tryAcquireLock(id, id, staleToken)).isTrue();
+        redisTemplate.opsForValue().set(RedisConversationMemory.lockKey(id, id), "new-owner");
+
+        redisStore.releaseLock(id, id, staleToken);
+
+        assertThat(redisTemplate.opsForValue().get(RedisConversationMemory.lockKey(id, id)))
+            .isEqualTo("new-owner");
+    }
+
+    @Test
+    void shouldRejectChangedPrefixWithoutDeletingTurns() throws Exception {
+        long id = conversationId();
+        append(id, 1, 4);
+        String token = UUID.randomUUID().toString();
+        assertThat(redisStore.tryAcquireLock(id, id, token)).isTrue();
+        CompactionSnapshot snapshot = redisStore.snapshot(id, id).orElseThrow();
+        redisTemplate.opsForList().set(
+            RedisConversationMemory.recentKey(id, id),
+            0,
+            objectMapper.writeValueAsString(new ConversationTurn("changed", "changed"))
+        );
+
+        CommitResult result = redisStore.commit(id, id, token, snapshot, "must-not-commit");
+
+        assertThat(result).isEqualTo(CommitResult.PREFIX_CHANGED);
+        assertThat(redisTemplate.opsForList().size(RedisConversationMemory.recentKey(id, id)))
+            .isEqualTo(4L);
+        assertThat(redisTemplate.opsForValue().get(RedisConversationMemory.summaryKey(id, id)))
+            .isNull();
+    }
+
+    @Test
+    void shouldLoadSummaryAndRecentTurnsFromOneAtomicSnapshot() throws Exception {
+        long id = conversationId();
+        String summaryKey = RedisConversationMemory.summaryKey(id, id);
+        String recentKey = RedisConversationMemory.recentKey(id, id);
+        String encodedA = objectMapper.writeValueAsString(new ConversationTurn("q-a", "a-a"));
+        String encodedB = objectMapper.writeValueAsString(new ConversationTurn("q-b", "a-b"));
+        replaceState(summaryKey, recentKey, "summary-a", encodedA);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> writer = executor.submit(() -> {
+                start.await();
+                for (int index = 0; index < 500; index++) {
+                    if ((index & 1) == 0) {
+                        replaceState(summaryKey, recentKey, "summary-b", encodedB);
+                    } else {
+                        replaceState(summaryKey, recentKey, "summary-a", encodedA);
+                    }
+                }
+                return null;
+            });
+            Future<?> reader = executor.submit(() -> {
+                start.await();
+                for (int index = 0; index < 500; index++) {
+                    ConversationHistory history = redisStore.load(id, id);
+                    List<String> questions = history.recentTurns().stream()
+                        .map(ConversationTurn::question)
+                        .toList();
+                    boolean stateA = history.summary().equals("summary-a")
+                        && questions.equals(List.of("q-a"));
+                    boolean stateB = history.summary().equals("summary-b")
+                        && questions.equals(List.of("q-b"));
+                    assertThat(stateA || stateB).isTrue();
+                }
+                return null;
+            });
+            start.countDown();
+            writer.get(10, TimeUnit.SECONDS);
+            reader.get(10, TimeUnit.SECONDS);
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private void append(long id, int first, int last) throws Exception {
+        for (int index = first; index <= last; index++) {
+            redisStore.append(id, id, new ConversationTurn("q" + index, "a" + index));
+        }
+    }
+
+    private void replaceState(
+        String summaryKey,
+        String recentKey,
+        String summary,
+        String encodedTurn
+    ) {
+        Long result = redisTemplate.execute(
+            REPLACE_STATE,
+            List.of(summaryKey, recentKey),
+            summary,
+            encodedTurn
+        );
+        if (result == null || result != 1L) {
+            throw new IllegalStateException("Redis test state replacement failed");
+        }
+    }
+
+    private long conversationId() {
+        long id = Math.abs(System.nanoTime());
+        conversationIds.add(id);
+        return id;
     }
 }

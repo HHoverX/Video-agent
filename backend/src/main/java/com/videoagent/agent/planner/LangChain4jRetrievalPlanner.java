@@ -170,9 +170,11 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
     }
 
     private String prompt(String question, ConversationHistory history, String compactState) {
-        List<ConversationTurn> turns = history == null ? List.of() : history.turns();
+        String summary = history == null ? "" : history.summary();
+        List<ConversationTurn> turns = history == null ? List.of() : history.recentTurns();
         try {
-            return objectMapper.writeValueAsString(new PlannerPrompt(question, turns, compactState));
+            return objectMapper.writeValueAsString(new PlannerPrompt(
+                question, summary, turns, compactState));
         } catch (JsonProcessingException exception) {
             throw new VideoAgentException(
                 ErrorCode.INTERNAL_ERROR,
@@ -200,6 +202,7 @@ public class LangChain4jRetrievalPlanner implements RetrievalPlannerProvider {
 
     private record PlannerPrompt(
         String currentQuestion,
+        String conversationSummary,
         List<ConversationTurn> conversationHistory,
         String compactVideoState
     ) {
